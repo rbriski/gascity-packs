@@ -25,12 +25,22 @@ import pytest
 
 PACK_DIR = pathlib.Path(__file__).resolve().parent.parent
 MANIFEST_PATH = PACK_DIR / "manifest" / "app.json"
+AGENT_MANIFEST_PATH = PACK_DIR / "manifest" / "agent-app.json"
 
 
 @pytest.fixture(scope="module")
 def manifest() -> dict:
     assert MANIFEST_PATH.is_file(), f"manifest missing: {MANIFEST_PATH}"
     with MANIFEST_PATH.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+@pytest.fixture(scope="module")
+def agent_manifest() -> dict:
+    assert AGENT_MANIFEST_PATH.is_file(), (
+        f"agent manifest missing: {AGENT_MANIFEST_PATH}"
+    )
+    with AGENT_MANIFEST_PATH.open("r", encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -66,14 +76,21 @@ def test_manifest_declares_bot_scopes(manifest: dict) -> None:
     # invariant scope-by-event into this assertion.
     required = {
         "channels:history",
+        # company rooms: verify switchboard membership of public
+        # directory rooms (conversations.info / conversations.members)
+        "channels:read",
         "chat:write",
         "chat:write.customize",
         "files:read",
         "files:write",
         "groups:history",
+        # company rooms: same membership check for private rooms
+        "groups:read",
         "im:history",
         "mpim:history",
         "reactions:write",
+        # company rooms: bots.info author resolution for peer trust
+        "users:read",
     }
     missing = required - set(scopes)
     assert not missing, f"manifest missing required bot scopes: {sorted(missing)}"
@@ -126,3 +143,71 @@ def test_manifest_slash_commands_field_present(manifest: dict) -> None:
     # it can append/diff. Empty is fine today; missing is not.
     cmds = manifest.get("features", {}).get("slash_commands")
     assert isinstance(cmds, list), "features.slash_commands must be a list"
+
+
+# --- Agent identity app template (manifest/agent-app.json) -----------
+#
+# Company-rooms provisioning stamps one Slack app per named agent from
+# this template (see docs/company-rooms.md → Membership and
+# Provisioning). Its surface is deliberately minimal; these tests lock
+# that minimality in so a well-meaning edit can't silently widen it.
+
+
+def test_agent_manifest_parses_as_json(agent_manifest: dict) -> None:
+    assert isinstance(agent_manifest, dict)
+
+
+def test_agent_manifest_has_display_information(agent_manifest: dict) -> None:
+    di = agent_manifest.get("display_information")
+    assert isinstance(di, dict), "display_information must be an object"
+    assert di.get("name"), "display_information.name is required"
+
+
+def test_agent_manifest_has_bot_user(agent_manifest: dict) -> None:
+    bot = agent_manifest.get("features", {}).get("bot_user")
+    assert isinstance(bot, dict), "features.bot_user must be an object"
+    assert bot.get("display_name"), "features.bot_user.display_name is required"
+
+
+def test_agent_manifest_scopes_are_exactly_chat_write(agent_manifest: dict) -> None:
+    # An agent identity app is an outbound sender only. Anything beyond
+    # chat:write is over-broad for the rooms phases; the DM phase adds
+    # im:history in a separate, reviewed change.
+    scopes = agent_manifest.get("oauth_config", {}).get("scopes", {}).get("bot")
+    assert scopes == ["chat:write"], (
+        f"agent app must declare exactly [chat:write], got {scopes!r}"
+    )
+
+
+def test_agent_manifest_messages_tab_enabled(agent_manifest: dict) -> None:
+    # Hard Slack prerequisite for the per-agent DM phase: humans cannot
+    # DM a bot whose App Home Messages tab is disabled.
+    home = agent_manifest.get("features", {}).get("app_home")
+    assert isinstance(home, dict), "features.app_home must be an object"
+    assert home.get("messages_tab_enabled") is True, (
+        "app_home.messages_tab_enabled must be true"
+    )
+    assert home.get("messages_tab_read_only_enabled") is False, (
+        "app_home.messages_tab_read_only_enabled must be false"
+    )
+
+
+def test_agent_manifest_has_no_event_subscriptions(agent_manifest: dict) -> None:
+    # The switchboard is the single admission owner in the rooms phases;
+    # an agent app that subscribes to anything would become a second
+    # observer. The DM phase adds message.im deliberately, elsewhere.
+    settings = agent_manifest.get("settings", {})
+    subs = settings.get("event_subscriptions")
+    assert not (subs and subs.get("bot_events")), (
+        "agent app must declare no bot event subscriptions in the rooms phases"
+    )
+
+
+def test_agent_manifest_interactivity_and_rotation_off(agent_manifest: dict) -> None:
+    settings = agent_manifest.get("settings", {})
+    assert settings.get("interactivity", {}).get("is_enabled") is False, (
+        "agent app interactivity must be disabled"
+    )
+    assert settings.get("token_rotation_enabled") is False, (
+        "agent app token_rotation_enabled must be false (pilot uses long-lived tokens)"
+    )

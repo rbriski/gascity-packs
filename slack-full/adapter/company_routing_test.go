@@ -265,10 +265,14 @@ func TestComputeWakeSetAcceptanceRule6(t *testing.T) {
 		wantReason string
 	}{
 		{
+			// Phase 2c: a resolved company bot with no native company mention
+			// wakes nobody (was company_bot_phase2 in Phase 1). ResolvedBotUserID
+			// stands in for the delivery worker's bots.info resolution so the
+			// pure router stays offline.
 			name:       "registered company bot no mention",
-			msg:        CompanyMessage{TeamID: testTeam, ChannelID: testChannel, Subtype: "bot_message", BotID: "B0RILEY", UserID: botRiley, Text: "status update"},
+			msg:        CompanyMessage{TeamID: testTeam, ChannelID: testChannel, Subtype: "bot_message", BotID: "B0RILEY", UserID: botRiley, ResolvedBotUserID: botRiley, Text: "status update"},
 			wantAuthor: AuthorCompanyBot,
-			wantReason: wakeReasonCompanyBotPhase2,
+			wantReason: wakeReasonCompanyBotNoMention,
 		},
 		{
 			name:       "unknown bot no mention",
@@ -290,6 +294,40 @@ func TestComputeWakeSetAcceptanceRule6(t *testing.T) {
 				t.Errorf("Reason = %q, want %q", dec.Reason, tt.wantReason)
 			}
 		})
+	}
+}
+
+// TestClassifyAuthorFailsClosedOnRawUser — a bot-authored message whose raw
+// `user` equals a registered agent's bot_user_id must NOT be classified as a
+// company bot when authoritative resolution left ResolvedBotUserID empty (a
+// definitive unknown / corroboration mismatch during delivery). It fails closed
+// to an unknown bot, so no peer wake — and thus no keyless pointer — is emitted.
+func TestClassifyAuthorFailsClosedOnRawUser(t *testing.T) {
+	dir := routingDirectory(t)
+	// Raw user is Riley's bot_user_id, but bots.info resolution failed so the
+	// delivery worker left ResolvedBotUserID empty.
+	msg := CompanyMessage{
+		TeamID:    testTeam,
+		ChannelID: testChannel,
+		Subtype:   "bot_message",
+		BotID:     "B0RILEY",
+		UserID:    botRiley, // matches a directory agent's bot_user_id
+		Text:      "<@" + botOllie + "> please review",
+	}
+	if got := classifyAuthor(dir, msg, selfSwitchboard); got != AuthorBot {
+		t.Fatalf("classifyAuthor = %v, want AuthorBot (no raw-user fallback to company bot)", got)
+	}
+	dec := ComputeWakeSet(dir, msg, selfSwitchboard)
+	if dec.Author != AuthorBot || dec.Reason != wakeReasonUnknownBot {
+		t.Errorf("decision author=%v reason=%q, want bot/unknown_bot", dec.Author, dec.Reason)
+	}
+	if len(dec.Wakes) != 0 {
+		t.Errorf("fail-open woke %v, want nobody", wakeNames(dec))
+	}
+	// The corroborated resolution still classifies a company bot.
+	msg.ResolvedBotUserID = botRiley
+	if got := classifyAuthor(dir, msg, selfSwitchboard); got != AuthorCompanyBot {
+		t.Errorf("resolved company bot = %v, want AuthorCompanyBot", got)
 	}
 }
 

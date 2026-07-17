@@ -37,8 +37,16 @@ func (c AuthorClass) String() string {
 // Wake kinds recorded on each WakeTarget and mirrored into the receipt's
 // per-target delivery record.
 const (
-	wakeKindAmbient  = "ambient"
-	wakeKindTargeted = "targeted"
+	wakeKindAmbient        = "ambient"
+	wakeKindTargeted       = "targeted"
+	wakeKindPeerDelegation = "peer_delegation"
+	wakeKindPeerResult     = "peer_result"
+	// wakeKindPeerInput is an uncorrelated company-bot wake: peer chatter
+	// without gc metadata, an unmatched identifiable reply, or a
+	// gate-failed / clarifying / out-of-window post. It carries NO
+	// delegation_key. peer_delegation and peer_result ALWAYS carry a
+	// non-empty delegation_key; peer_input never does.
+	wakeKindPeerInput = "peer_input"
 )
 
 // Machine-readable no-delivery reasons. An empty Reason on a RouteDecision
@@ -48,7 +56,8 @@ const (
 	wakeReasonNotCompanyRoom       = "not_company_room"       // channel is not an imported company room
 	wakeReasonSubtypeNotAdmissible = "subtype_not_admissible" // defense-in-depth subtype gate
 	wakeReasonCompanySelf          = "company_self"           // switchboard's own post
-	wakeReasonCompanyBotPhase2     = "company_bot_phase2"     // registered company bot; mention leg lands in Phase 2
+	wakeReasonCompanyBotNoMention  = "company_bot_no_mention" // registered company bot with no native company mention
+	wakeReasonCompanyBotNotMember  = "company_bot_not_member" // resolved company bot is not a member of this room
 	wakeReasonUnknownBot           = "unknown_bot"            // unknown bot / webhook / integration
 	wakeReasonNoAmbientMembers     = "no_ambient_members"     // unmentioned human, room has no ambient wake set
 	wakeReasonMentionedNoEligible  = "mentioned_no_eligible"  // mentioned agents are not member+eligible
@@ -76,6 +85,19 @@ type CompanyMessage struct {
 	Subtype                         string
 	Text                            string
 	Blocks                          json.RawMessage
+	// AppID / BotProfileAppID are the event's self-declared app identifiers,
+	// used only to corroborate a bots.info resolution (never as the trust
+	// anchor). Populated from the raw event by the delivery worker.
+	AppID           string
+	BotProfileAppID string
+	// ResolvedBotUserID is the authoritative bots.info -> user_id resolution
+	// for a bot author, populated by the delivery worker so ComputeWakeSet
+	// stays pure. Empty means "not (yet) resolved to a company agent".
+	ResolvedBotUserID string
+	// Metadata is the raw Slack message metadata object (event_type +
+	// event_payload) carried on delegation / result posts; the correlation
+	// layer (company_peer.go) reads it for claim admission.
+	Metadata json.RawMessage
 }
 
 // WakeTarget names one agent to wake and why (ambient vs targeted).
@@ -210,9 +232,38 @@ func ComputeWakeSet(dir *CompanyDirectory, msg CompanyMessage, selfBotUserID str
 		dec.Reason = wakeReasonCompanySelf
 		return dec
 	case AuthorCompanyBot:
-		// Phase 1 delivers nothing for bot authors; the mention-driven
-		// company-bot wake leg turns on in Phase 2.
-		dec.Reason = wakeReasonCompanyBotPhase2
+		// Company-bot mention leg (Phase 2c): a resolved company bot that is
+		// a member of this room wakes each eligible mentioned member (itself
+		// excluded). The refinement of the wake kind (peer_delegation vs
+		// peer_result) and the delegation-record claim happen in the delivery
+		// worker; here every bot-authored wake is a peer_delegation.
+		author, _ := dir.AgentByBotUserID(msg.ResolvedBotUserID)
+		if author == nil || !dir.IsMember(room, author.Name) {
+			dec.Reason = wakeReasonCompanyBotNotMember
+			return dec
+		}
+		companyMentions := companyMentionAgents(dir, msg)
+		if len(companyMentions) == 0 {
+			dec.Reason = wakeReasonCompanyBotNoMention
+			return dec
+		}
+		seen := make(map[string]bool)
+		for _, a := range companyMentions {
+			if a.BotUserID == author.BotUserID {
+				continue // self-exclusion: a bot never wakes itself
+			}
+			if !dir.IsMember(room, a.Name) || !dir.IsMentionEligible(room, a.Name) {
+				continue
+			}
+			if seen[a.BotUserID] {
+				continue
+			}
+			seen[a.BotUserID] = true
+			dec.Wakes = append(dec.Wakes, WakeTarget{Agent: *a, Kind: wakeKindPeerDelegation})
+		}
+		if len(dec.Wakes) == 0 {
+			dec.Reason = wakeReasonMentionedNoEligible
+		}
 		return dec
 	case AuthorBot:
 		dec.Reason = wakeReasonUnknownBot
@@ -220,12 +271,7 @@ func ComputeWakeSet(dir *CompanyDirectory, msg CompanyMessage, selfBotUserID str
 	}
 
 	// AuthorHuman.
-	var companyMentions []*CompanyAgent
-	for _, id := range ExtractMentionIDs(msg.Blocks, msg.Text) {
-		if a, ok := dir.AgentByBotUserID(id); ok {
-			companyMentions = append(companyMentions, a)
-		}
-	}
+	companyMentions := companyMentionAgents(dir, msg)
 
 	if len(companyMentions) > 0 {
 		// Exclusive mention routing: ambient is suppressed entirely, even
@@ -267,19 +313,39 @@ func ComputeWakeSet(dir *CompanyDirectory, msg CompanyMessage, selfBotUserID str
 	return dec
 }
 
+// companyMentionAgents returns the directory agents named by the message's
+// native mention set (union of rich_text user leaves and canonical text
+// tokens), in mention order.
+func companyMentionAgents(dir *CompanyDirectory, msg CompanyMessage) []*CompanyAgent {
+	var out []*CompanyAgent
+	for _, id := range ExtractMentionIDs(msg.Blocks, msg.Text) {
+		if a, ok := dir.AgentByBotUserID(id); ok {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // classifyAuthor applies the fail-closed author classification. Self is
-// checked first (the switchboard's own bot user id); then any bot author
-// (bot_message subtype or a non-empty bot id) is either a registered
-// company bot — when its user field resolves to a directory agent — or an
-// unknown bot. A message with neither a user nor a bot identity is
+// checked first (the switchboard's own bot user id, matched against either
+// the raw or resolved author id); then any bot author (bot_message subtype or
+// a non-empty bot id) is a registered company bot ONLY when its authoritative
+// bots.info resolution (ResolvedBotUserID) maps to a directory agent —
+// otherwise an unknown bot. A message with neither a user nor a bot identity is
 // malformed and treated as a bot (no delivery).
+//
+// A bot author is NEVER classified company-bot from the raw event `user`
+// fallback: during delivery resolveCompanyAuthor runs first, so a definitive
+// unknown / corroboration mismatch leaves ResolvedBotUserID empty, and this
+// function must fail closed to unknown rather than re-open the bot on a raw id
+// that merely happens to equal a registered agent's bot_user_id.
 func classifyAuthor(dir *CompanyDirectory, msg CompanyMessage, selfBotUserID string) AuthorClass {
-	if selfBotUserID != "" && msg.UserID == selfBotUserID {
+	if selfBotUserID != "" && (msg.UserID == selfBotUserID || msg.ResolvedBotUserID == selfBotUserID) {
 		return AuthorSelf
 	}
 	if msg.Subtype == "bot_message" || msg.BotID != "" {
-		if msg.UserID != "" {
-			if _, ok := dir.AgentByBotUserID(msg.UserID); ok {
+		if msg.ResolvedBotUserID != "" {
+			if _, ok := dir.AgentByBotUserID(msg.ResolvedBotUserID); ok {
 				return AuthorCompanyBot
 			}
 		}

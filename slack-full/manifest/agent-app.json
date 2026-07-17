@@ -1,0 +1,35 @@
+{
+  "display_information": {
+    "name": "REPLACE-agent-name",
+    "description": "Gas City agent identity app — the mentionable Slack identity and outbound sender for one named company agent.",
+    "background_color": "#1f2933",
+    "long_description": "One agent identity app is provisioned per named company agent. Its bot user is the agent's real, mentionable <@U…> identity in company rooms and its bot token is the agent's outbound sending identity for gc slack delegate / reply-current. In the rooms phases it observes nothing — no event subscriptions — so the switchboard app stays the single admission owner for room traffic. The App Home Messages tab is enabled ahead of the per-agent DM phase, which later adds message.im + im:history. This app is internal to one visibility boundary and is never distributed on the Slack Marketplace. See https://github.com/gastownhall/gascity/tree/main/examples/slack-pack for setup."
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "REPLACE-agent-name",
+      "always_online": true
+    },
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "slash_commands": []
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write"
+      ]
+    }
+  },
+  "settings": {
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

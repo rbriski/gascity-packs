@@ -459,6 +459,18 @@ type config struct {
 	companyDirectoryPath string
 	companyBindingsPath  string
 	companyIngressDir    string
+	// Phase 2 shared-state directories (secrets/intents/delegations/turns/
+	// locks). Resolved exactly like the Python side: env override >
+	// <GC_CITY_PATH>/.gc/slack/<leaf> > /tmp/gc-slack-adapter/<leaf>. The Go
+	// ingress path reads intents (correlation + stale count), reads/writes
+	// delegation records (result claims), writes current-turn pointers, and
+	// takes advisory locks; the secrets dir is Python-only but resolved here
+	// for parity / config visibility.
+	companySecretsDir     string
+	companyIntentsDir     string
+	companyDelegationsDir string
+	companyTurnsDir       string
+	companyLocksDir       string
 	// companySelfBotUserID is the switchboard app's own bot user id,
 	// excluded from wake routing so the switchboard never wakes itself.
 	// Optional (empty OK in Phase 1). Sourced from
@@ -473,6 +485,18 @@ type config struct {
 
 func loadConfig() (config, error) {
 	return loadConfigFromEnv(os.Getenv)
+}
+
+// companyStateDirDefault resolves a Phase 2 shared-state directory default:
+// <GC_CITY_PATH>/.gc/slack/<leaf> when the city path is set, else
+// /tmp/gc-slack-adapter/<leaf>. The env override is applied by the caller.
+// This mirrors the Python company outbound module's path resolution leaf for
+// leaf.
+func companyStateDirDefault(cityPath, leaf string) string {
+	if cityPath != "" {
+		return filepath.Join(cityPath, ".gc", "slack", leaf)
+	}
+	return filepath.Join("/tmp/gc-slack-adapter", leaf)
 }
 
 // loadConfigFromEnv reads adapter configuration from a getenv function. When
@@ -559,6 +583,17 @@ func loadConfigFromEnv(getenv func(string) string) (config, error) {
 	cfg.companyBindingsPath = envOrFn("SLACK_COMPANY_BINDINGS_PATH", defaultCompanyBindingsPath)
 	cfg.companyIngressDir = envOrFn("SLACK_COMPANY_INGRESS_DIR", defaultCompanyIngressDir)
 	cfg.companySelfBotUserID = getenv("SLACK_SWITCHBOARD_BOT_USER_ID")
+
+	// Phase 2 shared-state directories. Same resolution precedence as the
+	// registries above, with the Python leaf names (secrets/,
+	// company-delegation-intents/, company-delegations/, company-current-turn/,
+	// locks/). These MUST match scripts/slack_company_outbound.py file for
+	// file.
+	cfg.companySecretsDir = envOrFn("SLACK_COMPANY_SECRETS_DIR", companyStateDirDefault(cfg.cityPath, "secrets"))
+	cfg.companyIntentsDir = envOrFn("SLACK_COMPANY_INTENTS_DIR", companyStateDirDefault(cfg.cityPath, "company-delegation-intents"))
+	cfg.companyDelegationsDir = envOrFn("SLACK_COMPANY_DELEGATIONS_DIR", companyStateDirDefault(cfg.cityPath, "company-delegations"))
+	cfg.companyTurnsDir = envOrFn("SLACK_COMPANY_TURNS_DIR", companyStateDirDefault(cfg.cityPath, "company-current-turn"))
+	cfg.companyLocksDir = envOrFn("SLACK_COMPANY_LOCKS_DIR", companyStateDirDefault(cfg.cityPath, "locks"))
 
 	// Retention controls. Defaults: keep inbound files for 7 days,
 	// sweep every hour. Setting either to "0" disables the janitor.
@@ -946,6 +981,12 @@ type slackMessageEvent struct {
 	ChannelType string          `json:"channel_type,omitempty"`
 	Files       []slackFile     `json:"files,omitempty"`
 	Blocks      json.RawMessage `json:"blocks,omitempty"`
+	// AppID / BotProfile corroborate a bot author's bots.info resolution
+	// (Phase 2c); Metadata carries delegation / result correlation
+	// breadcrumbs on company posts.
+	AppID      string          `json:"app_id,omitempty"`
+	BotProfile json.RawMessage `json:"bot_profile,omitempty"`
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
 }
 
 func main() {

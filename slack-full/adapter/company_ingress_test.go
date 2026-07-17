@@ -104,6 +104,24 @@ func (f *fakeGC) inboundCalls() int {
 	return n
 }
 
+// fakeAuthorResolver is a deterministic companyAuthorResolver for tests: it
+// resolves known bot ids to a fixed identity and reports every other bot id as
+// a definitive unknown, so bot-leg tests never touch the Slack API.
+type fakeAuthorResolver struct {
+	byBot     map[string]companyBotInfo
+	transient map[string]bool // bot ids that report a transient failure
+}
+
+func (f fakeAuthorResolver) Resolve(botID string) (companyBotInfo, botResolveOutcome) {
+	if f.transient[botID] {
+		return companyBotInfo{}, botResolveTransient
+	}
+	if info, ok := f.byBot[botID]; ok {
+		return info, botResolveOK
+	}
+	return companyBotInfo{}, botResolveUnknown
+}
+
 // ---- harness ---------------------------------------------------------------
 
 type companyHarness struct {
@@ -114,6 +132,11 @@ type companyHarness struct {
 	ingressDir string
 	dirPath    string
 	bindPath   string
+	// Phase 2 shared-state directories.
+	intentsDir     string
+	delegationsDir string
+	turnsDir       string
+	locksDir       string
 }
 
 // newCompanyHarness builds a file-backed harness. df/bf nil means the
@@ -134,7 +157,15 @@ func newCompanyHarness(t *testing.T, gcURL string, df *companyDirectoryFile, bf 
 			t.Fatalf("write bindings: %v", err)
 		}
 	}
-	h := &companyHarness{ingressDir: ingressDir, dirPath: dirPath, bindPath: bindPath}
+	h := &companyHarness{
+		ingressDir:     ingressDir,
+		dirPath:        dirPath,
+		bindPath:       bindPath,
+		intentsDir:     filepath.Join(root, "company-delegation-intents"),
+		delegationsDir: filepath.Join(root, "company-delegations"),
+		turnsDir:       filepath.Join(root, "company-current-turn"),
+		locksDir:       filepath.Join(root, "locks"),
+	}
 	h.reopen(t, gcURL, semCap)
 	// Ensure t.TempDir cleanup can remove a dir a test left read-only.
 	t.Cleanup(func() { _ = os.Chmod(ingressDir, 0o700) })
@@ -158,16 +189,26 @@ func (h *companyHarness) reopen(t *testing.T, gcURL string, semCap int) {
 		t.Fatalf("bindings load: %v", err)
 	}
 	cfg := config{
-		gcAPIBase:   gcURL,
-		cityName:    "test-city",
-		provider:    "slack",
-		accountID:   testTeamID,
-		dispatchSem: make(chan struct{}, semCap),
+		gcAPIBase:             gcURL,
+		cityName:              "test-city",
+		provider:              "slack",
+		accountID:             testTeamID,
+		dispatchSem:           make(chan struct{}, semCap),
+		companyIntentsDir:     h.intentsDir,
+		companyDelegationsDir: h.delegationsDir,
+		companyTurnsDir:       h.turnsDir,
+		companyLocksDir:       h.locksDir,
 	}
 	h.receipts = receipts
 	h.dirStore = dirStore
 	h.bindStore = bindStore
 	h.gw = newCompanyGateway(cfg, dirStore, bindStore, receipts)
+	// Default: hydration returns a deterministic "unavailable" bundle so the
+	// common integration tests never touch Slack. Bot/peer/hydration tests
+	// override h.gw.hydrate / h.gw.authors explicitly.
+	h.gw.hydrate = func(CompanyMessage) companyHydration {
+		return companyHydration{RootProvenance: companyRootProvenanceUnverified, ContextStatus: companyContextUnavailable}
+	}
 }
 
 func (h *companyHarness) openBarrier() { h.gw.barrier.Store(true) }
@@ -638,6 +679,7 @@ func TestCompanyDegradedStore503NeverLegacyThenRecovers(t *testing.T) {
 		accountID:         testTeamID,
 		dispatchSem:       make(chan struct{}, 4),
 		companyIngressDir: badIngress,
+		companyTurnsDir:   filepath.Join(root, "company-current-turn"),
 	}
 	receipts, rerr := NewIngressReceiptStore(badIngress)
 	if rerr == nil {
@@ -819,10 +861,16 @@ func TestCompanyBotAuthorTerminalNoDelivery(t *testing.T) {
 	df := baseDirectoryFile()
 	bf := baseBindingsFile()
 	h := newCompanyHarness(t, gc.server.URL, &df, &bf, 4)
+	// A resolved company bot with no native company mention wakes nobody
+	// (Phase 2c company_bot_no_mention). The resolver is faked so the test
+	// does not touch Slack.
+	h.gw.authors = fakeAuthorResolver{byBot: map[string]companyBotInfo{
+		"B0RILEY": {UserID: "U0AAAAAA2", AppID: "A0AAAAAA2"},
+	}}
 	h.openBarrier()
 
 	// bot_message from riley's registered bot_user_id: admissible subtype,
-	// but a bot author wakes nobody in Phase 1.
+	// but a bot author with no company mention wakes nobody.
 	ev := slackMessageEvent{Subtype: "bot_message", BotID: "B0RILEY", User: "U0AAAAAA2", Channel: testChannelID, TS: baseOrigin().TS, Text: "status update"}
 	w, handled := h.admitViaHandler(t, ev, 0)
 	if !handled || w.Result().StatusCode != http.StatusOK {
@@ -833,8 +881,8 @@ func TestCompanyBotAuthorTerminalNoDelivery(t *testing.T) {
 	if r == nil || r.Status != ingressStatusNoDelivery {
 		t.Fatalf("status = %v, want no_delivery", statusOf(r))
 	}
-	if r.Reason != wakeReasonCompanyBotPhase2 {
-		t.Errorf("reason = %q, want %q", r.Reason, wakeReasonCompanyBotPhase2)
+	if r.Reason != wakeReasonCompanyBotNoMention {
+		t.Errorf("reason = %q, want %q", r.Reason, wakeReasonCompanyBotNoMention)
 	}
 	if len(r.Targets) != 0 {
 		t.Errorf("bot author recorded targets: %+v", r.Targets)
@@ -1205,13 +1253,13 @@ func TestCompanyEnsureTargetsDisjointKeys(t *testing.T) {
 	}
 	oa, _ := dir.AgentByName("ollie")
 	ra, _ := dir.AgentByName("riley")
-	dec := RouteDecision{Room: room, Wakes: []WakeTarget{
+	wakes := []frozenWake{
 		{Agent: *oa, Kind: wakeKindAmbient},  // bound -> session "riley"
 		{Agent: *ra, Kind: wakeKindTargeted}, // unbound
-	}}
+	}
 	g := &companyGateway{}
 	r := &IngressReceipt{ID: "in-x"}
-	g.ensureTargets(r, room, dec, binds, time.Now())
+	g.ensureTargets(r, room, wakes, binds, time.Now())
 	if len(r.Targets) != 2 {
 		t.Fatalf("targets = %d, want 2 distinct records (bound session 'riley' + unbound agent 'riley'): %+v", len(r.Targets), r.Targets)
 	}

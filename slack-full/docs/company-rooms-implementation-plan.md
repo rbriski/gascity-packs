@@ -467,13 +467,17 @@ parent (`thread_ts` absent or equal to `ts`) AND its author is a non-bot
 human; otherwise `root_unverified`.
 
 `company-delegation-intents/<nonce>.json` — created BEFORE any provider
-POST. Nonce = `gcs-` + first 20 hex of sha256 over the canonical
-anticipated record: (source app_id, source bot_user_id, target agent,
-target bot_user_id, team, channel, human_root_ts, body_sha256,
-retry_seq) — `retry_seq` is the count of existing intent files for the
-same tuple regardless of status, making crash retries of one logical
-delegation idempotent (same seq) while successive logical delegations
-mint fresh nonces:
+POST, for delegations AND for results/synthesis (an `op` field:
+`delegation | result | synthesis`; every company post goes through the
+intent path so no post can double on a timeout). Nonce = `gcs-` + first
+20 hex of sha256 over the canonical anticipated record: (source app_id,
+source bot_user_id, target agent, target bot_user_id, team, channel,
+human_root_ts, body_sha256, retry_seq) — `retry_seq` is monotonic:
+`max(retry_seq of existing intents for the tuple) + 1` when minting
+fresh (never a file count, so pruning cannot re-mint a used nonce), and
+the pruner always retains the highest-seq intent per tuple. Crash
+retries of one logical delegation resume the existing intent; successive
+logical delegations mint fresh nonces:
 
 ```json
 {
@@ -510,10 +514,11 @@ delegation record if absent; not found and past `retry_deadline` → the
 intent stays parked (`posting`) — never repost on ambiguity
 (`chat.postMessage` is not idempotent). The Go sweep surfaces a count of
 stale `posting` intents (age > retry_deadline) on `/healthz` as the
-operator signal. Existing-nonce handling at `delegate` time: `posting` →
-resume reconciliation; `published` with its delegation record still
-`pending` → the one-pending error below; anything terminal → `retry_seq`
-has already advanced, fresh nonce.
+operator signal. Existing-nonce handling at `delegate` time: `prepared`
+→ adopt and resume (nothing was ever posted; safe to proceed to
+posting); `posting` → resume reconciliation; `published` with its
+delegation record still `pending` → the one-pending error below;
+anything terminal → mint a fresh nonce at the next `retry_seq`.
 
 `company-delegations/<key>.json` (key per the sanitizer spec) —
 materialized before the CLI reports success:
@@ -576,10 +581,10 @@ deterministic context source for the Python verbs (no receipt scanning):
   "receipt_id": "in-…",
   "team_id": "T…", "channel_id": "C…", "ts": "<origin ts>",
   "room": "orchestrator-team",
-  "kind": "ambient | targeted | peer_delegation | peer_result",
+  "kind": "ambient | targeted | peer_input | peer_delegation | peer_result",
   "thread_root_ts": "<derived root>",
   "agent": "ollie",
-  "delegation_key": "<delegations filename, peer turns only>",
+  "delegation_key": "<delegations filename; present iff kind is peer_delegation or peer_result>",
   "delivered_at": "<RFC3339>"
 }
 ```
@@ -706,11 +711,14 @@ failed, record create-once (EEXIST adopts), pointer-file consumption +
 `slack-full/tests/fixtures/company/` golden files: intent record,
 delegation record, current-turn pointer, and sanitizer filename
 fixtures (hostile/long/dotted components). The Go and Python suites
-each parse, validate, and re-derive the same bytes. A Python test
-writes a delegation record via the real code path; a Go test claims it
-via the real code path against the same tempdir layout (lock + O_EXCL
-interop proven end-to-end); a Go test writes a pointer file the Python
-verb path consumes.
+each parse, validate, and re-derive the same bytes. Interop is
+fixture-mediated across the two independent suites:
+`fixtures/company/interop/` holds records generated through the REAL
+Python code paths (with pinned clocks); the Python suite proves
+byte-stable regeneration, and the Go suite claims/consumes those exact
+bytes through its real claim and pointer paths. Lock-filename parity is
+pinned by identical derivations in both suites (verified:
+`dtuple-3a4b34ac4caada68.lock` from both languages for the same key).
 
 Pilot step: capture one real agent-app post event and assert the
 mention extractor, author classifier, AND embedded metadata match the

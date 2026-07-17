@@ -676,6 +676,32 @@ def test_bind_reports_created_vs_replaced(tmp_path: pathlib.Path, capsys):
     assert json.loads(capsys.readouterr().out)["action"] == "unchanged"
 
 
+def test_bind_rejects_session_already_bound_to_different_agent(tmp_path: pathlib.Path):
+    """A session is one agent's identity in a room: binding the same session to
+    a DIFFERENT agent in the same room is rejected (would clobber the pointer)."""
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    assert mod.main([
+        "bind-company-agent", "--room", "orchestrator-team",
+        "--agent", "ollie", "--session", "shared-session",
+    ]) == 0
+    # Same room, same session, different agent -> hard error.
+    assert mod.main([
+        "bind-company-agent", "--room", "orchestrator-team",
+        "--agent", "riley", "--session", "shared-session",
+    ]) != 0
+    # The rejected bind left the registry with only the first binding.
+    bindings = json.loads(mod.company_bindings_path().read_text())
+    assert bindings["bindings"] == [
+        {"room": "orchestrator-team", "agent": "ollie", "session": "shared-session"},
+    ]
+    # Re-binding the SAME (room, agent) to that session is still fine (idempotent).
+    assert mod.main([
+        "bind-company-agent", "--room", "orchestrator-team",
+        "--agent", "ollie", "--session", "shared-session",
+    ]) == 0
+
+
 def test_bind_unknown_room_or_agent_errors(tmp_path: pathlib.Path):
     mod = _mod()
     _import_valid(mod, tmp_path)

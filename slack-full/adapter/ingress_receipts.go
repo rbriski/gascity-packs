@@ -109,13 +109,24 @@ type ReceiptOrigin struct {
 
 // TargetDelivery records the per-session delivery state of a receipt.
 type TargetDelivery struct {
-	Session        string    `json:"session"`
-	Kind           string    `json:"kind"`            // "ambient" | "targeted"
+	Session string `json:"session"`
+	// Kind is the frozen wake kind: "ambient" | "targeted" (human legs) or
+	// "peer_delegation" | "peer_result" | "peer_input" (company-bot legs,
+	// Phase 2c). Only peer_delegation / peer_result carry a DelegationKey.
+	Kind           string    `json:"kind"`
 	Status         string    `json:"status"`          // "pending" | "delivered" | "failed"
 	IdempotencyKey string    `json:"idempotency_key"` // ingress:<id>:target:<session>
 	Attempts       int       `json:"attempts"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	Detail         string    `json:"detail,omitempty"`
+	// Agent is the directory agent name for this target, recorded so the
+	// current-turn pointer can be rewritten on redrive without recomputing
+	// the route. Empty for a failed-unbound record.
+	Agent string `json:"agent,omitempty"`
+	// DelegationKey is the delegations-registry filename this peer turn
+	// correlates to (set for peer_delegation / peer_result legs only; empty
+	// for peer_input and the human ambient/targeted legs).
+	DelegationKey string `json:"delegation_key,omitempty"`
 }
 
 // IngressReceipt is the durable ingress record. It retains the complete
@@ -141,6 +152,11 @@ type IngressReceipt struct {
 	Event   json.RawMessage           `json:"event"`
 	Targets map[string]TargetDelivery `json:"targets,omitempty"`
 	Reason  string                    `json:"reason,omitempty"` // parked/no_delivery/failed detail
+	// Hydration is the frozen context bundle (verified human root +
+	// bounded untrusted excerpt) fetched ONCE at first delivery so redrives
+	// re-render byte-identical reminders under the same Idempotency-Key
+	// (Phase 2c). Absent until the first delivery attempt computes it.
+	Hydration json.RawMessage `json:"hydration,omitempty"`
 }
 
 // NewIngressReceiptStore opens (creating if needed) the receipt directory

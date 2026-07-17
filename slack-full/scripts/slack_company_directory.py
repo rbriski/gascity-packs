@@ -569,6 +569,23 @@ def cmd_bind(args: argparse.Namespace) -> int:
 
     bindings = load_bindings()
     entries: list[dict[str, str]] = bindings["bindings"]
+
+    # A session is a single agent's identity in a room: the delivery worker
+    # keys the current-turn pointer by <session>.json, so two agents sharing
+    # one session in the same room would clobber each other's pointer and the
+    # recorded identity would depend on wake order. Reject binding a session
+    # that is already bound to a DIFFERENT agent in the same room.
+    for entry in entries:
+        if (
+            entry.get("room") == room
+            and entry.get("session") == session
+            and entry.get("agent") != agent
+        ):
+            raise DirectoryError(
+                f"session {session!r} is already bound to agent "
+                f"{entry.get('agent')!r} in room {room!r}; a session may bind "
+                "only one agent per room")
+
     action = "created"
     for entry in entries:
         if entry.get("room") == room and entry.get("agent") == agent:

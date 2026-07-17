@@ -116,6 +116,52 @@ def _resolve_conversation(
 _DEFAULT_KIND = "dm"
 
 
+def _maybe_company_reply(args: argparse.Namespace) -> int | None:
+    """Company-context path: post via the acting agent's own token.
+
+    Additive and inert for non-company sessions. Whenever this session has an
+    active company current-turn pointer we divert by the turn ``kind``:
+
+      * ``peer_delegation`` → post a delegation result into the human root
+        thread (``gc_delegation_result`` gate, requester the only live mention);
+      * ``peer_result`` → post a synthesis into the root with no live mentions;
+      * ``ambient`` / ``targeted`` / ``peer_input`` → post an ordinary reply
+        into the room's thread root with no live mentions.
+
+    Only the *absence* of a company pointer returns ``None`` so the legacy path
+    runs byte-for-byte; a session with any company pointer answers into the
+    room (the legacy resolution the company delivery path never feeds).
+    """
+    session_name = os.environ.get("GC_SESSION_NAME", "").strip()
+    if not session_name:
+        return None
+    try:
+        import slack_company_outbound as outbound  # type: ignore
+    except ImportError:
+        return None
+    try:
+        turn = outbound.read_current_turn(session_name)
+        if turn is None:
+            return None
+        kind = turn.get("kind")
+        body = _load_body(args)
+        origin_ts = (getattr(args, "origin_ts", "") or "").strip()
+        if kind == "peer_delegation":
+            result = outbound.post_peer_result(
+                body=body, origin_ts=origin_ts, session_name=session_name)
+        elif kind == "peer_result":
+            result = outbound.post_peer_synthesis(
+                body=body, origin_ts=origin_ts, session_name=session_name)
+        else:  # ambient / targeted / peer_input → root reply
+            result = outbound.post_company_root_reply(
+                body=body, origin_ts=origin_ts, session_name=session_name)
+    except (outbound.OutboundError, outbound.TransientPostError,
+            outbound.DefinitivePostError) as exc:
+        raise SystemExit(f"company reply failed: {exc}") from exc
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description="Reply to the latest Slack inbound event seen by the current session",
@@ -129,6 +175,10 @@ def main(argv: list[str]) -> int:
                               "D=dm). Default fallback: dm"))
     parser.add_argument("--reply-to", default="",
                         help="Slack message ts to reply to (threaded reply)")
+    parser.add_argument(
+        "--origin-ts", default="",
+        help=("Company rooms: pin a specific turn ts when a newer wake has "
+              "overwritten the current-turn pointer (mismatch is a hard error)."))
     parser.add_argument(
         "--thread-current",
         action="store_true",
@@ -155,6 +205,10 @@ def main(argv: list[str]) -> int:
               "the message)."),
     )
     args = parser.parse_args(argv)
+
+    company_rc = _maybe_company_reply(args)
+    if company_rc is not None:
+        return company_rc
 
     body = _load_body(args)
 

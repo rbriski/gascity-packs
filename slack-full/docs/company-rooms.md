@@ -359,7 +359,10 @@ construction. `peers` reports rooms, members, wake policy, bindings, and
 membership warnings.
 
 `delegate` resolves the room, Slack IDs, source app, and current named
-session from the latest Slack ingress; agents never memorize IDs or tokens.
+session from the session's current-turn pointer, written by the
+switchboard at each company delivery (`--origin-ts` pins a specific turn
+when a newer wake has moved the pointer); agents never memorize IDs or
+tokens.
 It durably persists a posting intent before the provider POST
 (prepared → posting → published, bounded attempts, TTL), then posts
 `<@target> …` as the delegating agent's identity app into the human root's
