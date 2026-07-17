@@ -240,13 +240,27 @@ var dispatchInflightWG sync.WaitGroup
 // from a test-style cfg without a sem (in which case the dropped-load
 // log line is the intended fail-safe behavior). sec-S-04.
 func (c config) acquireDispatchSlot() (release func(), capacity int, ok bool) {
+	release, capacity, ok = c.tryAcquireDispatchSlot()
+	if !ok {
+		dispatchDroppedTotal.Add(1)
+	}
+	return release, capacity, ok
+}
+
+// tryAcquireDispatchSlot attempts to take a dispatch slot WITHOUT counting
+// a failed acquire as a drop. The legacy inbound path wraps this via
+// acquireDispatchSlot (a miss there is a genuine dropped delivery). The
+// company path uses this directly: a company receipt that finds no slot
+// stays durably pending for the sweep — backpressure, not a drop — so
+// counting it would pollute dispatch_dropped_total and mask real legacy
+// loss (F10).
+func (c config) tryAcquireDispatchSlot() (release func(), capacity int, ok bool) {
 	sem := c.dispatchSem
 	semCap := cap(sem)
 	select {
 	case sem <- struct{}{}:
 		return func() { <-sem }, semCap, true
 	default:
-		dispatchDroppedTotal.Add(1)
 		return nil, semCap, false
 	}
 }
@@ -433,6 +447,28 @@ type config struct {
 	// SLACK_THREAD_CONTEXT_LIMIT, defaulting to
 	// defaultThreadContextLimit. gc-px8.5.
 	slackThreadContextLimit int
+	// companyDirectoryPath / companyBindingsPath / companyIngressDir are
+	// the Slack company-rooms (Phase 1) registry locations. The two JSON
+	// registries resolve exactly like the six atomic registries
+	// (env override > <GC_CITY_PATH>/.gc/slack/<file> >
+	// /tmp/gc-slack-adapter/<file>); the ingress dir mirrors the
+	// thread_sessions.json resolution with a chat-ingress/ leaf. The
+	// Python CLI (scripts/slack_company_directory.py) resolves the same
+	// files. Sourced from SLACK_COMPANY_DIRECTORY_PATH,
+	// SLACK_COMPANY_BINDINGS_PATH, SLACK_COMPANY_INGRESS_DIR.
+	companyDirectoryPath string
+	companyBindingsPath  string
+	companyIngressDir    string
+	// companySelfBotUserID is the switchboard app's own bot user id,
+	// excluded from wake routing so the switchboard never wakes itself.
+	// Optional (empty OK in Phase 1). Sourced from
+	// SLACK_SWITCHBOARD_BOT_USER_ID.
+	companySelfBotUserID string
+	// companyGateway owns the durable-admission + delivery path for
+	// imported company rooms. Nil disables the company path entirely —
+	// every inbound then flows through the legacy path byte-for-byte.
+	// Wired in main() before any handler closes over the cfg value.
+	companyGateway *companyGateway
 }
 
 func loadConfig() (config, error) {
@@ -505,6 +541,24 @@ func loadConfigFromEnv(getenv func(string) string) (config, error) {
 	cfg.roomLaunchPath = envOrFn("GC_SLACK_ROOM_LAUNCH_FILE", defaultRoomLaunchPath)
 	cfg.subteamAliasStorePath = envOrFn("SLACK_SUBTEAM_ALIAS_FILE", defaultSubteamAliasPath)
 	cfg.userAliasStorePath = envOrFn("SLACK_USER_ALIAS_FILE", defaultUserAliasPath)
+
+	// Company-rooms (Phase 1) registry + ingress paths. The two JSON
+	// registries follow the same city-rooted-then-/tmp default with an
+	// env override as the six atomic registries; the ingress dir mirrors
+	// thread_sessions.json resolution with a chat-ingress/ leaf. These
+	// MUST match scripts/slack_company_directory.py file for file.
+	defaultCompanyDirectoryPath := "/tmp/gc-slack-adapter/company_directory.json"
+	defaultCompanyBindingsPath := "/tmp/gc-slack-adapter/company_bindings.json"
+	defaultCompanyIngressDir := "/tmp/gc-slack-adapter/chat-ingress"
+	if cfg.cityPath != "" {
+		defaultCompanyDirectoryPath = filepath.Join(cfg.cityPath, ".gc", "slack", "company_directory.json")
+		defaultCompanyBindingsPath = filepath.Join(cfg.cityPath, ".gc", "slack", "company_bindings.json")
+		defaultCompanyIngressDir = filepath.Join(cfg.cityPath, ".gc", "slack", "chat-ingress")
+	}
+	cfg.companyDirectoryPath = envOrFn("SLACK_COMPANY_DIRECTORY_PATH", defaultCompanyDirectoryPath)
+	cfg.companyBindingsPath = envOrFn("SLACK_COMPANY_BINDINGS_PATH", defaultCompanyBindingsPath)
+	cfg.companyIngressDir = envOrFn("SLACK_COMPANY_INGRESS_DIR", defaultCompanyIngressDir)
+	cfg.companySelfBotUserID = getenv("SLACK_SWITCHBOARD_BOT_USER_ID")
 
 	// Retention controls. Defaults: keep inbound files for 7 days,
 	// sweep every hour. Setting either to "0" disables the janitor.
@@ -865,6 +919,7 @@ type slackEventEnvelope struct {
 	Challenge string          `json:"challenge,omitempty"`
 	TeamID    string          `json:"team_id,omitempty"`
 	APIAppID  string          `json:"api_app_id,omitempty"`
+	EventID   string          `json:"event_id,omitempty"`
 	Event     json.RawMessage `json:"event,omitempty"`
 }
 
@@ -879,17 +934,18 @@ type slackFile struct {
 }
 
 type slackMessageEvent struct {
-	Type        string      `json:"type"`
-	Subtype     string      `json:"subtype,omitempty"`
-	User        string      `json:"user,omitempty"`
-	BotID       string      `json:"bot_id,omitempty"`
-	Text        string      `json:"text,omitempty"`
-	Channel     string      `json:"channel,omitempty"`
-	TS          string      `json:"ts,omitempty"`
-	ThreadTS    string      `json:"thread_ts,omitempty"`
-	EventTS     string      `json:"event_ts,omitempty"`
-	ChannelType string      `json:"channel_type,omitempty"`
-	Files       []slackFile `json:"files,omitempty"`
+	Type        string          `json:"type"`
+	Subtype     string          `json:"subtype,omitempty"`
+	User        string          `json:"user,omitempty"`
+	BotID       string          `json:"bot_id,omitempty"`
+	Text        string          `json:"text,omitempty"`
+	Channel     string          `json:"channel,omitempty"`
+	TS          string          `json:"ts,omitempty"`
+	ThreadTS    string          `json:"thread_ts,omitempty"`
+	EventTS     string          `json:"event_ts,omitempty"`
+	ChannelType string          `json:"channel_type,omitempty"`
+	Files       []slackFile     `json:"files,omitempty"`
+	Blocks      json.RawMessage `json:"blocks,omitempty"`
 }
 
 func main() {
@@ -1012,6 +1068,39 @@ func main() {
 	// win at runtime — this is purely observability.
 	logCrossStoreOverlapWarnings(channelMapReg, rigMapReg)
 
+	// Company-rooms (Slack company-rooms Phase 1) wiring. The two CLI-
+	// written registries load with the never-fatal contract (a corrupt or
+	// invalid file installs a nil snapshot and disables company routing
+	// while legacy traffic keeps flowing). The durable ingress store is a
+	// hard prerequisite for admission, but its construction failure is NOT
+	// a legacy fallthrough: the gateway is wired even when the store cannot
+	// be created, and runs degraded (barrier stays closed, company-room
+	// admissible events get 503 without x-slack-no-retry, /healthz reports
+	// the store error, startRecovery retries construction). companyGW must
+	// be set on cfg BEFORE handleSlackEvents closes over the cfg value below.
+	companyDirStore := &companyDirectoryStore{}
+	if err := companyDirStore.Load(cfg.companyDirectoryPath); err != nil {
+		log.Printf("company directory: initial load surfaced %v (routing disabled until a valid file is imported)", err)
+	}
+	companyBindStore := &companyBindingsStore{}
+	if err := companyBindStore.Load(cfg.companyBindingsPath, companyDirStore.Snapshot()); err != nil {
+		log.Printf("company bindings: initial load surfaced %v", err)
+	}
+	receipts, rerr := NewIngressReceiptStore(cfg.companyIngressDir)
+	if rerr != nil {
+		log.Printf("WARN: company ingress store %q: %v — gateway starting DEGRADED (company events 503, never legacy; construction retried)",
+			cfg.companyIngressDir, rerr)
+	}
+	companyGW := newCompanyGateway(cfg, companyDirStore, companyBindStore, receipts)
+	if rerr != nil {
+		companyGW.setStoreError(rerr)
+	}
+	cfg.companyGateway = companyGW
+	companyHealthStatus.Store(companyGW)
+	log.Printf("company gateway: directory=%s bindings=%s ingress=%s self_bot=%q dir_loaded=%v bindings_loaded=%v store_ready=%v",
+		cfg.companyDirectoryPath, cfg.companyBindingsPath, cfg.companyIngressDir, cfg.companySelfBotUserID,
+		companyDirStore.Snapshot() != nil, companyBindStore.Snapshot() != nil, receipts != nil)
+
 	// Public mux: only /slack/events + /slack/interactions
 	// (HMAC-verified) and /healthz. Bound to 0.0.0.0 by default so
 	// Tailscale Funnel can reach it.
@@ -1075,6 +1164,13 @@ func main() {
 		cityName:  cfg.cityName,
 	}, threadReg, aliasReg)
 
+	// Company-rooms startup recovery barrier + periodic sweep. Until the
+	// barrier opens, company-admissible events receive 503 (retryable);
+	// legacy routes, /healthz, interactions, and the internal listener
+	// serve immediately (they never consulted the gateway). The recovery
+	// pass and sweep are no-ops when the gateway is nil.
+	companyGW.startRecovery(janitorCtx)
+
 	errCh := make(chan error, 2)
 	go func() {
 		log.Printf("public listener serving on %s (Slack events)", cfg.publicListen)
@@ -1109,6 +1205,11 @@ func main() {
 	defer signal.Stop(hupCh)
 	go runReloadLoop(reloadStop, hupCh, func() {
 		logReloadOutcome(appsReg, channelMapReg, rigMapReg, roomLaunchReg, subteamAliases, userAliases)
+		// Company stores reload on the same SIGHUP but OUTSIDE the atomic
+		// six-registry set: a stale/invalid company file retains its own
+		// last-known-good snapshot (handled inside StageReload) and never
+		// blocks the six above, which have already committed.
+		companyGW.reloadOnSIGHUP()
 	})
 
 	stop := make(chan os.Signal, 1)
@@ -1917,6 +2018,18 @@ func handleSlackEvents(cfg config, aliasReg *handleAliasRegistry, threadReg *thr
 		if env.Type == "url_verification" && env.Challenge != "" {
 			w.Header().Set("Content-Type", "text/plain")
 			_, _ = w.Write([]byte(env.Challenge))
+			return
+		}
+
+		// Company-rooms durable admission (Slack company-rooms Phase 1d).
+		// When the event targets an imported company room, the gateway
+		// owns the HTTP response (200 on admit/duplicate/non-admissible,
+		// 503 without x-slack-no-retry on store failure or a closed
+		// startup barrier) and delivery proceeds asynchronously. Every
+		// other event — no gateway, no directory, non-company channel,
+		// non-message type — falls through to the legacy path below
+		// byte-for-byte.
+		if cfg.companyGateway.tryHandleEvent(w, r, env) {
 			return
 		}
 

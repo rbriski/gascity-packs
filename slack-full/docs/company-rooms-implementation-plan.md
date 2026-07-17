@@ -319,17 +319,23 @@ produce no wakes.
     stays pending for the sweep (backpressure, not drop).
 - Company delivery worker: in-process single-flight per receipt ID;
   claims the receipt (`Status: routing` via generation-checked Update);
-  computes the wake set (1c); resolves each wake through the
-  company-bindings snapshot (missing binding → target `failed` with
-  reason, no legacy fallback); delivers each target via a new
-  `deliverToCompanySession` helper — POST
+  computes the wake set (1c) only when the receipt has no recorded
+  targets — recorded targets are a frozen route that redrives drive to
+  terminal states, never recompute (`no_delivery` is legal only with no
+  recorded targets and an empty freshly-computed wake set); resolves each
+  wake through the company-bindings snapshot (missing binding → target
+  `failed` with reason, no legacy fallback); delivers each target via a
+  new `deliverToCompanySession` helper — POST
   `/v0/city/{city}/session/{session}/messages` with header
   `Idempotency-Key: ingress:<id>:target:<session>`, an explicit
   per-request timeout, and the system-reminder-style envelope used by
   alias dispatch (markup-neutralized); marks a target `delivered` only on
-  gc's acknowledged 2xx, leaves it `pending` (attempts++) on
-  timeout/5xx/ambiguity for sweep retry with the same key; sets the
-  terminal receipt status when all targets resolve.
+  gc's acknowledged 2xx; leaves it `pending` (attempts++) on
+  timeout/5xx/408/429/connection error for sweep retry with the same
+  key; marks it `failed` on any other 4xx or when the bounded attempts
+  cap is exhausted; sets the terminal receipt status when all targets
+  resolve. `app_mention` events for company-room channels are owned by
+  the company path (200, no receipt, no legacy dispatch).
 - Parking: a pending receipt whose channel matches no *current* directory
   room (including nil directory) is left pending with
   `Reason: parked_no_directory_room` — never terminally resolved, never
@@ -339,9 +345,14 @@ produce no wakes.
   admissible events get 503 (retryable) until one synchronous
   `Pending()` scan completes and its receipts are enqueued. (Posting
   intents precede pending ingress in the barrier ordering from Phase 2
-  on.) `/healthz` detail reports barrier state and the receipt-store
-  `WriteFailures()` counter; the gateway status payload includes both plus
-  directory/bindings snapshot state and membership warnings.
+  on.) `/healthz` detail is the sole adapter status surface: barrier
+  state, receipt-store health and `WriteFailures()`, delivery-failure
+  count, and directory/bindings snapshot state. Membership warnings
+  surface only via the Python `import-company-directory`/`peers` path in
+  Phase 1. A receipt-store construction failure at startup puts the
+  gateway in degraded mode — company-admissible events 503 (never
+  legacy), `/healthz` reports the store error, and construction is
+  retried — it is never a silent fallthrough to legacy.
 - Periodic sweep (60s) starts after one successful barrier pass, waits one
   interval first, respects the routing-claim stale-reclaim window (skip
   receipts whose `UpdatedAt` is fresher than 5 minutes unless terminal).

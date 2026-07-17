@@ -80,12 +80,15 @@ behave identically). Membership is therefore part of the room contract:
 - The switchboard bot and every directory member's bot must be invited to
   each directory room. A directory room the switchboard has not joined
   produces zero events — an invisible failure unless surfaced.
-- `gc slack import-company-directory` and each directory reload verify
+- `gc slack import-company-directory` and `gc slack peers` verify
   switchboard membership per room (`conversations.info` /
   `conversations.members`; scopes `channels:read`, `groups:read` added to
-  the switchboard manifest). Non-membership is a directory-level warning
-  surfaced by `gc slack peers` and in the gateway status payload; the room
-  stays configured but is flagged inert.
+  the switchboard manifest), best-effort and warnings-only. In Phase 1 the
+  adapter does not re-verify membership on directory reload — reload-time
+  verification is a Phase 2 addition; until then, re-running `peers` after
+  membership changes is the check. The adapter's sole status surface is
+  `/healthz` detail (there is no separate gateway status payload in this
+  pack).
 - Agent identity apps are provisioned from a manifest template: bot user,
   `chat:write`, App Home Messages tab enabled
   (`app_home.messages_tab_enabled: true`,
@@ -166,7 +169,10 @@ Order of operations for a company-room event POST:
    `file_share`, `thread_broadcast`, or `bot_message`. Everything else
    (`channel_join`, `channel_topic`, hidden edit/delete records,
    `url_verification` handshakes, unsupported event types) is acknowledged
-   with HTTP 200 and creates no receipt. An event with no stable
+   with HTTP 200 and creates no receipt. The switchboard's `app_mention`
+   copies of company-room messages are likewise owned by the company path
+   and acknowledged without a receipt — the `message.channels` copy is
+   the canonical admitted event — so they never reach legacy dispatch. An event with no stable
    `(team_id, channel_id, ts)` identity is logged and dropped with HTTP
    200 — never 5xx, which would burn Slack's retry budget on an unkeyable
    event.
@@ -192,20 +198,27 @@ Order of operations for a company-room event POST:
    windows remain and are accepted, documented risk: an outage longer than
    24 hours, or Slack auto-disabling the subscription (>95% failures over
    60 minutes at ≥1,000 events/hour — below that volume Slack does not
-   auto-disable). The receipt store exposes a write-failure counter in the
-   gateway status payload and `/healthz` detail; that counter is the
-   paging hook, and the re-enable path (app config → Event Subscriptions)
-   is part of the operator runbook.
+   auto-disable). The receipt store exposes a write-failure counter in
+   `/healthz` detail; that counter is the paging hook, and the re-enable
+   path (app config → Event Subscriptions) is part of the operator
+   runbook. If the receipt store cannot be initialized at startup, the
+   switchboard runs degraded: company-room admissible events receive 503
+   (never legacy delivery) and `/healthz` reports the store error until
+   the store recovers.
 9. Routing and delivery proceed asynchronously after the acknowledgment.
-   Per-target delivery state is recorded in the receipt under keys
-   `ingress:<id>:target:<session>`; each session submission carries that
-   key as an `Idempotency-Key` header. gc's idempotency cache is
-   best-effort (in-memory, bounded TTL), so the durable receipt is the
-   authority: a target is marked delivered only on gc's acknowledged
-   acceptance, ambiguous outcomes stay pending for retry with the same
-   key, and the overall guarantee is at-least-once with receipt-side
-   suppression. True end-to-end exactly-once arrives with the ledger
-   integration (Phase 5).
+   The wake set is computed once, at first delivery, and frozen into the
+   receipt's per-target records under keys
+   `ingress:<id>:target:<session>`; redrives drive the recorded targets
+   and never recompute the route. Each session submission carries its key
+   as an `Idempotency-Key` header. gc's idempotency cache is best-effort
+   (in-memory, bounded TTL), so the durable receipt is the authority: a
+   target is marked delivered only on gc's acknowledged acceptance;
+   timeouts, 5xx, 408, and 429 stay pending for retry with the same key;
+   a definitive 4xx marks the target failed with the response detail; and
+   retries are bounded by an attempts cap (exhaustion is a terminal,
+   visible failure). The overall guarantee is at-least-once with
+   receipt-side suppression. True end-to-end exactly-once arrives with
+   the ledger integration (Phase 5).
 10. Dispatch saturation is backpressure: the receipt stays pending and the
     recovery sweep delivers it later. Nothing admitted is ever silently
     dropped. A receipt whose channel no longer matches any directory room
@@ -456,7 +469,10 @@ legacy fanout deterministically.
 Required operator steps beyond pack install: enable Delayed Events on the
 switchboard app; add `channels:read`, `groups:read` (Phase 1) and
 `users:read` (Phase 2) to the switchboard manifest and reinstall; invite
-the switchboard bot and member agent bots to each directory room.
+the switchboard bot and member agent bots to each directory room;
+optionally set `SLACK_SWITCHBOARD_BOT_USER_ID` so the switchboard can
+classify its own posts (empty is safe in Phase 1 — self posts are bots
+and bots wake nobody).
 
 The pilot is a three-app proof in a scratch channel: one human ambient
 request, exclusive `@riley` activation, one visible Ollie→Riley delegation
