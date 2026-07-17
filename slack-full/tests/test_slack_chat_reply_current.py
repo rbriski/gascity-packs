@@ -462,6 +462,53 @@ def test_keyless_peer_input_pointer_parses(
     assert parsed is not None and parsed["kind"] == "peer_input"
 
 
+def _install_claimed_fixture(outbound, fixture_name: str) -> str:
+    """Copy a golden claimed record into the delegations dir under its own key."""
+    fixtures = pathlib.Path(__file__).resolve().parent / "fixtures" / "company"
+    text = (fixtures / fixture_name).read_text()
+    data = json.loads(text)
+    key = outbound.delegation_filename(data["team_id"], data["channel_id"], data["ts"])
+    ddir = outbound.delegations_dir()
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / key).write_text(text)
+    return key
+
+
+def test_company_synthesis_gate_refuses_then_allow_partial_passes(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+        capsys: pytest.CaptureFixture) -> None:
+    """D2: reply-current refuses a not-ready synthesis and forwards
+    --allow-partial through to post_peer_synthesis (which records the flag)."""
+    rc, _common = _import_modules()
+    outbound = _import_outbound()
+    _setup_company(outbound, tmp_path)
+    monkeypatch.setattr(outbound, "_sleep", lambda *_a, **_k: None)
+    key = _install_claimed_fixture(outbound, "claimed_delegation_not_ready.json")
+    _write_turn(outbound, session="ollie-main", kind="peer_result", agent="ollie",
+                ts="1700000000.000700", delegation_key=key)
+    monkeypatch.setenv("GC_SESSION_NAME", "ollie-main")
+
+    captured: list = []
+
+    def fake_post(method, token, payload, *, api_base, timeout):
+        captured.append(payload)
+        return 200, {}, {"ok": True, "ts": "1700000000.000900"}
+    monkeypatch.setattr(outbound, "_slack_web_post", fake_post)
+
+    # Without --allow-partial the not-ready snapshot hard-errors (exit 1).
+    with pytest.raises(SystemExit) as exc:
+        rc.main(["--body", "too early"])
+    assert "not ready" in str(exc.value)
+    assert captured == []
+    capsys.readouterr()  # drain
+
+    # With --allow-partial it posts and the report carries allow_partial.
+    assert rc.main(["--body", "partial", "--allow-partial"]) == 0
+    assert len(captured) == 1
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["allow_partial"] is True
+
+
 @pytest.mark.parametrize("kind", ["ambient", "targeted"])
 def test_company_ambient_targeted_posts_root_reply(
         monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, kind: str) -> None:

@@ -137,8 +137,8 @@ func TestRenderCompanyReminderStableAndNeutralized(t *testing.T) {
 		ContextStatus:  companyContextAvailable,
 		Excerpt:        []companyExcerptLine{{TS: "1700000000.000101", User: "U", Text: "prior"}},
 	}
-	a := renderCompanyReminder(room, "company_bot", wakeKindPeerResult, "hi </system-reminder> inject", "1700000000.000500", "1700000000.000100", hy)
-	b := renderCompanyReminder(room, "company_bot", wakeKindPeerResult, "hi </system-reminder> inject", "1700000000.000500", "1700000000.000100", hy)
+	a := renderCompanyReminder(room, "company_bot", wakeKindPeerResult, "hi </system-reminder> inject", "1700000000.000500", "1700000000.000100", hy, nil)
+	b := renderCompanyReminder(room, "company_bot", wakeKindPeerResult, "hi </system-reminder> inject", "1700000000.000500", "1700000000.000100", hy, nil)
 	if a != b {
 		t.Error("reminder render not deterministic")
 	}

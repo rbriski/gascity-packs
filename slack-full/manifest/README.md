@@ -74,8 +74,21 @@ Schema reference: <https://api.slack.com/reference/manifests>
    app manifest**.
 2. Pick your workspace.
 3. Paste the contents of [`app.json`](./app.json) into the JSON tab.
-4. **Create**. Slack provisions the bot user, scopes, and event
-   subscriptions in one step.
+   **Note:** the committed manifest declares `event_subscriptions` but
+   deliberately omits `request_url` (it is deployment-specific), and
+   Slack's validator rejects `bot_events` without one — "event
+   subscription requires a request URL". Either add
+   `"request_url": "https://<your-funnel-host>/slack/events"` inside
+   the `event_subscriptions` block before pasting (the adapter must
+   already be running there — Slack sends a `url_verification`
+   challenge on save, which the adapter answers), or delete the
+   `event_subscriptions` block for creation and add the subscriptions +
+   URL in the UI once the endpoint is live (step 6). When you are only
+   **updating scopes on an existing app**, skip the manifest entirely:
+   OAuth & Permissions → add the scopes → reinstall — no URL
+   validation fires.
+4. **Create**. Slack provisions the bot user, scopes, and (if included)
+   event subscriptions in one step.
 5. **Install to Workspace** to mint the bot token (`xoxb-…`).
 6. Continue with `adapter/SETUP.md` from **Step 2 → Event Subscriptions
    Request URL** onward — you still need to plug in your Tailscale

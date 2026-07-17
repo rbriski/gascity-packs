@@ -62,7 +62,13 @@ func TestInteropGoClaimsPythonDelegation(t *testing.T) {
 	}
 	m := delegationMatch{record: rec, filename: filename}
 	const resultTS = "1700000000.000900"
-	if err := env.claimRecord(m, resultTS); err != nil {
+	claimedAt := env.now().UTC().Format(time.RFC3339)
+	claimedView := *rec
+	claimedView.Status = companyDelegationClaimed
+	claimedView.ResultTS = resultTS
+	claimedView.ResultClaimedAt = claimedAt
+	snap := env.computeSynthesisSnapshot(&claimedView, filename, claimedAt)
+	if err := env.claimRecord(m, resultTS, claimedAt, snap); err != nil {
 		t.Fatalf("claimRecord on Python-authored record: %v", err)
 	}
 
@@ -88,7 +94,7 @@ func TestInteropGoClaimsPythonDelegation(t *testing.T) {
 
 	// Replay of the same claim is idempotent.
 	m2 := delegationMatch{record: after, filename: filename}
-	if err := env.claimRecord(m2, resultTS); err != nil {
+	if err := env.claimRecord(m2, resultTS, claimedAt, snap); err != nil {
 		t.Fatalf("replayed claim not idempotent: %v", err)
 	}
 }

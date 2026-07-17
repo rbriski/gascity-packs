@@ -935,8 +935,11 @@ AckState string `json:"ack_state,omitempty"`
 - **S5 — Monotonic per-group replay ordering (rule 16; GW:2031-2097;
   DOC:181-187).** Startup recovery and every sweep pass order replay
   within a group: receipts whose claimed record has no valid snapshot
-  (legacy/malformed/pruned) first, by `(result_claimed_at, result ts,
-  receipt id)`; then snapshot-bearing receipts by ascending
+  (legacy/malformed/pruned) first, by `(ReceivedAt, origin ts, receipt
+  id)` — the receipt does not store `result_claimed_at`/result ts, so
+  the received time is the normative stand-in (a deterministic total
+  order over the legacy bucket); then snapshot-bearing receipts by
+  ascending
   `(responded_delegation_count, synthesis_snapshot_at, result ts,
   receipt id)`. Slack `ts` ordering is numeric on the two
   `.`-separated integer components; a malformed ts sorts after all
@@ -1031,7 +1034,12 @@ AckState string `json:"ack_state,omitempty"`
   `synthesis_ready` equals the recomputed `compatible > 0 && responded
   == compatible && pending == 0`. Anything else normalizes to the
   unavailable shape (version 0, zero counts, empty list, ready false).
-  The envelope and the Python gate consume only the normalized form.
+  Normalization is STRICT and identical across languages: no whitespace
+  trimming anywhere, and `synthesis_state_version` plus all three
+  counts must be exact JSON integers — bool, float (including `1.0`),
+  and numeric-string forms are invalid on both sides (Python note:
+  `bool` is an `int` subclass and must be explicitly excluded). The
+  envelope and the Python gate consume only the normalized form.
 
 ### Synthesis envelope and the reply-current gate
 
@@ -1115,14 +1123,27 @@ CLI operating on state its own process family owned:
 - `POST /internal/company/redrive` body `{"origin": {…}, "targets":
   ["s1", …], "include_failed": true|false}` — under the receipt's
   single-flight + generation commit (single-flight held elsewhere →
-  409, the verb retries). Two legs: (1) receipts **with frozen
-  targets**: selected targets (default: all `failed` targets;
-  `--target` filters; `--include-failed` is required to touch a
-  target whose Detail begins `attempts_exhausted`) are reset to
-  `pending` with `Attempts: 0`, `Detail: "operator_redrive"`, the
-  **same recorded IdempotencyKey** (never re-derived), receipt status
-  back to `routing`, recovery backoff fields cleared, then
-  `triggerDelivery`. (2) receipts **with no recorded targets** (the
+  409, the verb retries). The `receipt` id, when supplied, is
+  pattern-validated before any path use (400 otherwise). Two legs:
+  (1) receipts **with frozen targets**: selected targets (default:
+  all **bound** `failed` targets; `--target` filters;
+  `--include-failed` is required to touch a target whose Detail
+  begins `attempts_exhausted`) are reset to `pending` with
+  `Attempts: 0`, `Detail: "operator_redrive"`, the **same recorded
+  IdempotencyKey** (never re-derived), receipt status back to
+  `routing`, recovery backoff fields cleared, then `triggerDelivery`.
+  A `failed` target frozen **unbound** (`Session == ""`) is
+  re-resolved at redrive time from its recorded `Agent` name against
+  the CURRENT bindings snapshot — the binding-repair recovery path;
+  on success it gains its session and a normally-derived
+  IdempotencyKey; still-unbound targets are reported as unresolvable
+  in the response. An empty reset that leaves
+  recoverable-but-unbound targets is an explicit 422
+  (`reason: "unresolved_targets"`) — never a success-shaped empty
+  reset hiding lost data; benign empties (all delivered, `--target`
+  miss, `attempts_exhausted` without `--include-failed`) remain 200
+  with an empty reset so status checks do not error.
+  (2) receipts **with no recorded targets** (the
   `correlation_recovery_exhausted` / parked states this verb is the
   designated recovery for): reset Status to `received`, clear Reason
   and the recovery fields, then `triggerDelivery` so first-routing
@@ -1159,11 +1180,15 @@ cursor so redrives are idempotent:
    `already_reacted` → `AckState: "eyes"`.
 2. Terminal `delivered` → `reactions.remove eyes` (best-effort) +
    `reactions.add white_check_mark`; → `AckState: "done"`.
-3. Terminal `failed` → `reactions.remove eyes` (best-effort) +
-   `reactions.add warning`, plus one concise switchboard reply into
-   the message's thread root (`thread_ts = deriveHumanRootTS`,
-   entity-escaped, no live mentions, body exactly
-   `delivery failed for receipt <id>`); → `AckState: "done"`.
+3. Terminal `failed` → the concise switchboard reply into the
+   message's thread root posts **exactly once** (`thread_ts =
+   deriveHumanRootTS`, entity-escaped, no live mentions, body exactly
+   `delivery failed for receipt <id>`), committed as the durable
+   intermediate cursor `AckState: "warned"` in the same receipt
+   update; then `reactions.remove eyes` (best-effort) +
+   `reactions.add warning` advance to `AckState: "done"`. Sweep-heal
+   of a `"warned"` receipt retries ONLY the reactions — a
+   rate-limited ⚠️ can never re-post the reply.
 4. Terminal `no_delivery` → `reactions.remove eyes` only (a green
    check on a message that woke nobody would misreport); →
    `AckState: "done"`.
@@ -1175,8 +1200,9 @@ further ack calls for this receipt; `ratelimited` and transient
 HTTP/network errors leave `AckState` unchanged; any other definitive
 error degrades. Because terminal receipts are never redriven, stranded
 terminal acks are **sweep-healed**: each sweep's retention scan runs
-`applyTerminalAck` for terminal receipts whose `AckState == "eyes"`
-(bounded, within retention) — `reactions.remove` is Tier 2 (20+/min),
+`applyTerminalAck` for terminal receipts whose `AckState` is `"eyes"`
+or `"warned"` (bounded, within retention; the `"warned"` cursor makes
+the failure reply once-only) — `reactions.remove` is Tier 2 (20+/min),
 tighter than add's Tier 3, so rate-limited terminal acks are the
 expected case, not a corner. A crash between the finalize commit and
 the ack commit still leaves an at-most-once window (👀 may persist
@@ -1330,8 +1356,12 @@ legacy-first then by (responded, snapshot_at) while an unrelated root
 keeps store order (S5, mirroring GW:2070-2097); chain sequentiality
 (sibling B's POST observed only after A terminal); live two-result race
 under `dgser` delivers in claim order; correlation park backoff
-schedule 60/120/240/480/900/900 then terminal
-`correlation_recovery_exhausted` (S7); park resolved on attempt 3
+schedule per S7 — immediate first eligibility, five waits
+60/120/240/480/900, terminal `correlation_recovery_exhausted` at
+attempt 6 (the 15-min cap continues indefinitely only for D5's
+ambiguous park); attempts are scoped per recovery reason — a reason
+transition resets the counter, and `correlation_error` never counts;
+park resolved on attempt 3
 claims and delivers exactly once and clears recovery fields; ambiguous
 park never terminal, capped cadence (D5); redrive endpoint resets only
 selected targets, preserves recorded IdempotencyKey byte-for-byte,
@@ -1378,8 +1408,9 @@ Tests (3c): gate table — ready posts, not-ready exits 1 listing
 pending siblings, `--allow-partial` posts with the report flag,
 unavailable warns and posts; cancel-then-ready flow (cancel a dead
 sibling, next claim freezes ready — proven against Go-claimed bytes in
-interop); one-hop: delegate on a `peer_delegation` turn errors, on
-`ambient`/`targeted`/`peer_input`/`peer_result` proceeds (S8);
+interop); one-hop matrix per S8: delegate errors on `peer_delegation`,
+`peer_input`, AND `peer_result` turns alike, proceeds only on
+`ambient`/`targeted`;
 `company-status` renders groups/snapshots/parks/stale intents from
 mixed fixtures; `company-redrive` client (HTTP mocked) passes
 targets/include_failed and surfaces 404; `parse_delegation`
@@ -1464,6 +1495,19 @@ legacy single-app installs). DM admission into the same receipt store with
 `(team_id, dm_channel_id, ts)` keys; allowed-human policy; DM-bound
 singleton sessions; bot-authored DMs deliver nothing; acceptance rule 12.
 
+DM session binding should ride the extmsg fabric's `dm` conversation
+primitives rather than a pack-local registry: a `ConversationRef{Kind:
+dm}` bound 1:1 to the agent's session is an exact fit for the fabric's
+one-active-binding-per-conversation model and gives durable,
+restart-surviving bindings via the controller-owned bead store
+(`engdocs/design/external-messaging-fabric.md` in gascity core; the
+fabric's Phase-1 single-writer rule means the pack drives this through
+the typed API only). Decide at Phase 4 design time; the room-side
+deterministic wake set stays pack-owned regardless — the fabric's
+member-fanout and group/launcher routing must NOT be adopted for rooms
+(all-members fanout with mention annotation is the prompt-trusted
+suppression model this design replaced).
+
 ## Phase 5 — ledger integration
 
 When the gascity durable-request-ledger lands: swap local admission for
@@ -1476,3 +1520,22 @@ receipts never carry raw bodies, so the inner-event payload moves to a
 spool-side body store at that point. The Phase 1 origin-key discipline and
 ordering are chosen so the swap does not change pack-observable routing
 semantics; true end-to-end exactly-once delivery arrives here.
+
+Transport note (researched 2026-07-17, gascity core): the supervisor's
+typed control plane is HTTP+SSE only — its two websocket surfaces
+(t3bridge runtime client; opaque `/svc/*` proxy passthrough) reach
+neither orders nor conversations, and orders are named trigger→action
+definitions, the wrong altitude for per-wake delivery. The one
+pre-ledger hardening candidate is migrating company wakes from
+`POST /v0/city/{city}/session/{id}/messages` (202-queued, 30-min
+in-memory idempotency) to `POST /v0/city/{city}/extmsg/inbound`
+(durable bead-backed transcript persisted before session read, typed
+receipt with transcript entry id, principled 4xx-permanent /
+5xx-retryable contract). GATE: extmsg's inbound `DedupKey` is
+currently a no-op in core (type-defined, never consumed —
+`internal/extmsg/types.go`), so gc-side redelivery dedup is not real
+yet and a retried POST would duplicate the turn; do not migrate until
+a DedupKey consumer lands in core or the ledger supplies it. Also
+worth borrowing at ledger time: the orders tracking-bead pattern
+(synchronous durable marker before dispatch, label-keyed dedup) as
+the request-ledger row template.

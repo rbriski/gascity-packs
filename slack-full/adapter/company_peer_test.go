@@ -143,6 +143,7 @@ func peerTestEnv(t *testing.T) companyPeerEnv {
 		delegationsDir: filepath.Join(root, "company-delegations"),
 		intentsDir:     filepath.Join(root, "company-delegation-intents"),
 		locksDir:       filepath.Join(root, "locks"),
+		retention:      companyReceiptRetention,
 		now:            fixedClock(t),
 	}
 	for _, d := range []string{env.delegationsDir, env.intentsDir, env.locksDir} {

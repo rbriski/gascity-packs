@@ -151,7 +151,8 @@ def _maybe_company_reply(args: argparse.Namespace) -> int | None:
                 body=body, origin_ts=origin_ts, session_name=session_name)
         elif kind == "peer_result":
             result = outbound.post_peer_synthesis(
-                body=body, origin_ts=origin_ts, session_name=session_name)
+                body=body, origin_ts=origin_ts, session_name=session_name,
+                allow_partial=bool(getattr(args, "allow_partial", False)))
         else:  # ambient / targeted / peer_input → root reply
             result = outbound.post_company_root_reply(
                 body=body, origin_ts=origin_ts, session_name=session_name)
@@ -179,6 +180,12 @@ def main(argv: list[str]) -> int:
         "--origin-ts", default="",
         help=("Company rooms: pin a specific turn ts when a newer wake has "
               "overwritten the current-turn pointer (mismatch is a hard error)."))
+    parser.add_argument(
+        "--allow-partial", action="store_true",
+        help=("Company rooms: on a peer_result (synthesis) turn, synthesize the "
+              "currently-materialized compatible delegations even when the "
+              "frozen snapshot is not ready (records allow_partial in the "
+              "report). Ignored for non-synthesis turns."))
     parser.add_argument(
         "--thread-current",
         action="store_true",

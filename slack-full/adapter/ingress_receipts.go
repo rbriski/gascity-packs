@@ -157,6 +157,28 @@ type IngressReceipt struct {
 	// re-render byte-identical reminders under the same Idempotency-Key
 	// (Phase 2c). Absent until the first delivery attempt computes it.
 	Hydration json.RawMessage `json:"hydration,omitempty"`
+	// Synthesis is the frozen snapshot bytes for a peer_result receipt,
+	// copied from the claimed record in the same routing commit that freezes
+	// targets, so redrives re-render byte-identical reminder synthesis fields
+	// even if the record is later pruned (the same frozen-bytes discipline as
+	// Hydration). Absent on non-peer_result receipts (Phase 3a).
+	Synthesis json.RawMessage `json:"synthesis,omitempty"`
+	// RecoveryAttempts / RecoveryNextAt / RecoveryReason track the S7
+	// correlation-park backoff (rule 17 parity, Phase 3b): a
+	// correlation_pending or ambiguous_pending_delegations park counts one
+	// attempt only when a redrive re-ran resolveResultWake and found the
+	// posting intent still in flight, and schedules the next eligible pass at
+	// min(60s*2^(n-1), 15min). NOTE omitzero on RecoveryNextAt, not omitempty:
+	// encoding/json's omitempty never elides a struct, so a zero 0001-01-01
+	// timestamp would otherwise pollute every receipt's cross-language wire
+	// shape (go.mod is go >= 1.24, omitzero available).
+	RecoveryAttempts int       `json:"recovery_attempts,omitempty"`
+	RecoveryNextAt   time.Time `json:"recovery_next_at,omitzero"`
+	RecoveryReason   string    `json:"recovery_reason,omitempty"`
+	// AckState is the visible-ack cursor (Phase 3b, config-gated):
+	// "" | "eyes" | "done" | "degraded". Cosmetic — the durable receipt, not
+	// the emoji, stays authoritative, so an ack failure never changes status.
+	AckState string `json:"ack_state,omitempty"`
 }
 
 // NewIngressReceiptStore opens (creating if needed) the receipt directory
@@ -344,6 +366,65 @@ func (s *IngressReceiptStore) Get(origin ReceiptOrigin) (*IngressReceipt, error)
 	return r, nil
 }
 
+// GetByID reads one receipt by its receipt id (the origin-keyed
+// "in-…" filename stem). Returns (nil, nil) when the receipt does not exist
+// — a terminal receipt swept past retention is gone, which the redrive
+// endpoint surfaces as 404. A symlinked/corrupt file is returned as an error
+// (never quarantined here — this is a targeted read, not a scan).
+func (s *IngressReceiptStore) GetByID(id string) (*IngressReceipt, error) {
+	// Defense in depth: never join an id that is not the receipt-id shape into a
+	// filesystem path. GetByID is the one id ingress that skips origin-derivation
+	// (and thus safeStorageID sanitization), so a hostile id (path separator, NUL,
+	// traversal) must be rejected before pathForID. The redrive handler validates
+	// the same shape up front and returns 400; this guard covers any other caller.
+	if !isReceiptID(id) {
+		return nil, fmt.Errorf("ingress receipts: invalid receipt id %q", id)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.readReceiptFile(s.pathForID(id))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return r, nil
+}
+
+// List returns every receipt in the store (terminal and non-terminal),
+// ordered by (ReceivedAt, Origin.TS) — the operator-listing scan behind
+// GET /internal/company/receipts. A corrupt scan entry is quarantined and
+// skipped exactly like Pending; only a directory-listing failure is fatal.
+func (s *IngressReceiptStore) List() ([]*IngressReceipt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	paths, err := s.receiptFiles()
+	if err != nil {
+		return nil, err
+	}
+	var out []*IngressReceipt
+	for _, p := range paths {
+		r, rerr := s.readReceiptFile(p)
+		if rerr != nil {
+			if errors.Is(rerr, os.ErrNotExist) {
+				continue // raced removal
+			}
+			s.quarantineNonFatal(p, rerr)
+			continue
+		}
+		out = append(out, r)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].ReceivedAt.Equal(out[j].ReceivedAt) {
+			return out[i].ReceivedAt.Before(out[j].ReceivedAt)
+		}
+		return out[i].Origin.TS < out[j].Origin.TS
+	})
+	return out, nil
+}
+
 // Pending returns non-terminal receipts ordered by (ReceivedAt,
 // Origin.TS). A corrupt receipt file encountered during the scan is
 // quarantined (*.corrupt) and skipped — a single bad file never fails the
@@ -434,15 +515,23 @@ func (s *IngressReceiptStore) Sweep(retention time.Duration) (removed int, err e
 }
 
 // SweepAndPending performs the periodic sweep in a single directory scan:
-// it removes terminal receipts older than retention AND returns the
-// surviving non-terminal receipts ordered by (ReceivedAt, Origin.TS). It
-// replaces a back-to-back Sweep + Pending, halving the per-tick decode work
-// done under the store mutex Admit contends for on the HTTP hot path.
-// Retention below the floor is rejected exactly like Sweep; corrupt scan
-// entries are quarantined rather than fatal.
-func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending []*IngressReceipt, removed int, err error) {
+// it removes terminal receipts older than retention, returns the surviving
+// non-terminal receipts ordered by (ReceivedAt, Origin.TS), AND returns the
+// terminal-within-retention receipts whose visible-ack cursor is stranded on
+// "eyes" or "warned" (healNeeded). Folding the ack-heal candidates into this one
+// scan avoids a second full-store decode pass per tick under the store mutex
+// Admit contends for on the HTTP hot path. Retention below the floor is rejected
+// exactly like Sweep; corrupt scan entries are quarantined rather than fatal.
+//
+// A stranded cursor is one whose terminal reaction (✅/⚠️/remove) never landed
+// (rate-limited, or a crash between the finalize commit and the ack commit).
+// "warned" is the failed-path intermediate where the threaded reply is already
+// posted and only the ⚠️ reaction remains, so healing re-applies the reaction
+// WITHOUT re-posting the reply. healNeeded is always collected (cheap on the
+// already-decoded receipt); the caller applies it only when acks are enabled.
+func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending, healNeeded []*IngressReceipt, removed int, err error) {
 	if retention < ingressRetentionFloor {
-		return nil, 0, fmt.Errorf("ingress receipts: retention %s below %s floor", retention, ingressRetentionFloor)
+		return nil, nil, 0, fmt.Errorf("ingress receipts: retention %s below %s floor", retention, ingressRetentionFloor)
 	}
 	cutoff := time.Now().Add(-retention)
 
@@ -451,7 +540,7 @@ func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending 
 
 	paths, err := s.receiptFiles()
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 	removedAny := false
 	for _, p := range paths {
@@ -468,7 +557,13 @@ func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending 
 			continue // never sweep in-flight work
 		}
 		if !r.ReceivedAt.Before(cutoff) {
-			continue // still within retention
+			// Terminal but within retention: not swept. Collect a stranded
+			// visible-ack cursor for in-pass healing (fold of the former
+			// TerminalAcksNeedingHeal second scan).
+			if r.AckState == ackStateEyes || r.AckState == ackStateWarned {
+				healNeeded = append(healNeeded, r)
+			}
+			continue
 		}
 		if derr := os.Remove(p); derr != nil {
 			if errors.Is(derr, os.ErrNotExist) {
@@ -491,7 +586,7 @@ func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending 
 		}
 		return pending[i].Origin.TS < pending[j].Origin.TS
 	})
-	return pending, removed, nil
+	return pending, healNeeded, removed, nil
 }
 
 // WriteFailures returns the monotonic count of failed Admit/Update
@@ -687,6 +782,30 @@ func receiptID(o ReceiptOrigin) string {
 		safeStorageID(o.TS, "ts")
 	sum := sha256.Sum256([]byte(o.TeamID + "\x00" + o.ChannelID + "\x00" + o.TS))
 	return "in-" + readable + "-" + hex.EncodeToString(sum[:])[:12]
+}
+
+// isReceiptID reports whether id matches the exact shape receiptID produces:
+// "in-" followed by one or more bytes from [A-Za-z0-9._-] (the pattern
+// ^in-[A-Za-z0-9._-]+$). Every generated id passes — the readable prefix is
+// built from safeStorageID components (that same character set) and a hex digest
+// — while any id carrying a path separator, NUL, or other hostile byte is
+// rejected before it can be joined into a store path.
+func isReceiptID(id string) bool {
+	if !strings.HasPrefix(id, "in-") || len(id) <= len("in-") {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		ch := id[i]
+		switch {
+		case ch >= 'a' && ch <= 'z':
+		case ch >= 'A' && ch <= 'Z':
+		case ch >= '0' && ch <= '9':
+		case ch == '.' || ch == '_' || ch == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // safeStorageID returns value unchanged when it is a short, filename-safe

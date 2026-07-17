@@ -46,10 +46,17 @@ RETRY_DEADLINE_SECONDS = 120
 
 # Terminal/expired records and terminal intents are pruned after this many
 # seconds. Pinned at 7 days (receipt/Discord parity); a caller-supplied
-# retention below the 24h floor is clamped up, never honored — terminal state
-# is the crash-recovery memory the reconciler leans on.
+# retention below the floor is clamped up, never honored — terminal state is
+# the crash-recovery memory the reconciler leans on.
 PRUNE_RETENTION_SECONDS = 7 * 86400
-PRUNE_RETENTION_FLOOR_SECONDS = 24 * 3600
+# One-hour clock-skew margin added to the maximum record ttl to derive the
+# prune retention floor: a record must never be prunable on Python's clock
+# while it is still S2-compatible on Go's clock (Phase 2 pruning contract).
+PRUNE_CLOCK_SKEW_MARGIN_SECONDS = 3600
+# Retention floor: ``>=`` the maximum record ``ttl_seconds`` plus the clock-skew
+# margin. Every record uses ``INTENT_TTL_SECONDS`` so this is the static floor;
+# ``prune`` lifts it further if it observes a larger ttl on disk.
+PRUNE_RETENTION_FLOOR_SECONDS = INTENT_TTL_SECONDS + PRUNE_CLOCK_SKEW_MARGIN_SECONDS
 
 # Slack app-level errors (HTTP 200 with ok:false) that are worth retrying —
 # everything else at ok:false is a definitive rejection (bad channel, bad
@@ -189,6 +196,157 @@ def dtuple_lock_name(
 
 def intent_lock_name(nonce: str) -> str:
     return lock_filename("intent", nonce)
+
+
+# --- synthesis group + lock-name parity (Phase 3) --------------------------
+#
+# Python never takes ``dgroup`` or ``dgser`` (delegate/cancel stay
+# ``dtuple``-only, per the lock-ordering contract); these derivations exist
+# purely so the fixture parity pins prove both languages compute identical
+# ``.lock`` names for the same key fields.
+
+# The canonical durable root shared by sibling delegations, in this pinned
+# field order (S: synthesis group, D1). All five must be non-empty for a
+# record to belong to a group.
+_SYNTHESIS_GROUP_FIELDS = (
+    "team_id", "channel_id", "thread_root_ts",
+    "requester_bot_user_id", "requester_session",
+)
+
+
+def synthesis_group(record: dict[str, Any]) -> tuple[str, ...] | None:
+    """The 5-tuple synthesis group for ``record``, or ``None``.
+
+    ``(team_id, channel_id, thread_root_ts, requester_bot_user_id,
+    requester_session)`` iff all five fields are non-empty strings; otherwise
+    the record has no group and is never claimable.
+    """
+    if not isinstance(record, dict):
+        return None
+    fields = tuple(record.get(k, "") for k in _SYNTHESIS_GROUP_FIELDS)
+    if any(not isinstance(f, str) or not f for f in fields):
+        return None
+    return fields
+
+
+def dgroup_lock_name(*fields: str) -> str:
+    """``dgroup`` lock filename over ``fields`` (parity only; never taken here).
+
+    Called with the 5 group fields in pinned order, or with the 6-field
+    fallback key (``"unavailable"`` + team, channel, thread_root_ts,
+    responder_bot_user_id, requester_bot_user_id) when a claim's preflight scan
+    finds no matching record.
+    """
+    return lock_filename("dgroup", *fields)
+
+
+def dgser_lock_name(team_id: str, channel_id: str, thread_root_ts: str) -> str:
+    """``dgser`` root-serialization lock filename (parity only, never taken here)."""
+    return lock_filename("dgser", team_id, channel_id, thread_root_ts)
+
+
+# --- synthesis snapshot validator (S10, cross-language normalizer) ----------
+
+def _nonneg_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _unavailable_synthesis_state() -> dict[str, Any]:
+    """The normalized *unavailable* shape (version 0, zero counts, ready false)."""
+    return {
+        "synthesis_state_version": 0,
+        "synthesis_state_available": False,
+        "compatible_delegation_count": 0,
+        "responded_delegation_count": 0,
+        "pending_delegation_count": 0,
+        "pending_delegations": [],
+        "synthesis_ready": False,
+        "synthesis_snapshot_at": "",
+    }
+
+
+def synthesis_state(record: dict[str, Any]) -> dict[str, Any]:
+    """S10 normalizer over a delegation record's stored synthesis snapshot.
+
+    Identical semantics to the Go ``normalizeSynthesisState``: a stored
+    snapshot is *available* iff ``synthesis_state_version == 1``,
+    ``synthesis_state_available == true``, all three counts are non-negative
+    ints with ``responded + pending == compatible`` and ``compatible > 0``, the
+    pending list length equals ``pending_delegation_count`` with unique
+    non-empty ``delegation_ts``, ``synthesis_snapshot_at`` is non-empty, and the
+    stored ``synthesis_ready`` equals the recomputed ``compatible > 0 &&
+    responded == compatible && pending == 0``. Anything else normalizes to the
+    unavailable shape. Consumers (the envelope, the reply-current gate) read
+    only the normalized form.
+
+    Canonical cross-language rule (pinned; Go mirrors it byte-for-byte):
+    ``synthesis_state_version`` and the three counts must be *exact* JSON
+    integers — a bool, a float (including ``1.0``), or a numeric string is
+    rejected (Python's ``bool`` is an ``int`` subclass, so it is excluded
+    explicitly via :func:`_nonneg_int`). No string field is whitespace-trimmed:
+    a padded ``synthesis_snapshot_at`` or ``delegation_ts`` is taken verbatim,
+    so padded values stay non-empty and stay distinct.
+    """
+    if not isinstance(record, dict):
+        return _unavailable_synthesis_state()
+    if _nonneg_int(record.get("synthesis_state_version")) != 1:
+        return _unavailable_synthesis_state()
+    if record.get("synthesis_state_available") is not True:
+        return _unavailable_synthesis_state()
+
+    compatible = _nonneg_int(record.get("compatible_delegation_count"))
+    responded = _nonneg_int(record.get("responded_delegation_count"))
+    pending = _nonneg_int(record.get("pending_delegation_count"))
+    if compatible is None or responded is None or pending is None:
+        return _unavailable_synthesis_state()
+    if responded + pending != compatible or compatible <= 0:
+        return _unavailable_synthesis_state()
+
+    raw_pending = record.get("pending_delegations")
+    if not isinstance(raw_pending, list) or len(raw_pending) != pending:
+        return _unavailable_synthesis_state()
+    seen: set[str] = set()
+    norm_pending: list[dict[str, str]] = []
+    for entry in raw_pending:
+        if not isinstance(entry, dict):
+            return _unavailable_synthesis_state()
+        dts = entry.get("delegation_ts")
+        if not isinstance(dts, str) or not dts or dts in seen:
+            return _unavailable_synthesis_state()
+        seen.add(dts)
+
+        def _s(key: str) -> str:
+            val = entry.get(key, "")
+            return val if isinstance(val, str) else ""
+
+        norm_pending.append({
+            "delegation_ts": dts,
+            "delegation_key": _s("delegation_key"),
+            "expected_responder_agent": _s("expected_responder_agent"),
+            "expected_responder_bot_user_id": _s("expected_responder_bot_user_id"),
+        })
+
+    snapshot_at = record.get("synthesis_snapshot_at")
+    if not isinstance(snapshot_at, str) or not snapshot_at:
+        return _unavailable_synthesis_state()
+
+    recomputed_ready = compatible > 0 and responded == compatible and pending == 0
+    stored_ready = record.get("synthesis_ready")
+    if not isinstance(stored_ready, bool) or stored_ready != recomputed_ready:
+        return _unavailable_synthesis_state()
+
+    return {
+        "synthesis_state_version": 1,
+        "synthesis_state_available": True,
+        "compatible_delegation_count": compatible,
+        "responded_delegation_count": responded,
+        "pending_delegation_count": pending,
+        "pending_delegations": norm_pending,
+        "synthesis_ready": recomputed_ready,
+        "synthesis_snapshot_at": snapshot_at,
+    }
 
 
 def compute_nonce(
@@ -1184,10 +1342,10 @@ def reconcile_posting_intents() -> int:
 def prune(retention_seconds: int = PRUNE_RETENTION_SECONDS) -> dict[str, int]:
     """Remove terminal intents and terminal/expired records older than retention.
 
-    Retention below the 24h floor is clamped up (never honored) — terminal
-    state is crash-recovery memory.
+    Retention is clamped up to ``max(record ttl) + 1h`` — never honored below
+    that floor — so a record can never be prunable on Python's clock while
+    still S2-compatible on Go's (terminal state is crash-recovery memory).
     """
-    retention = max(int(retention_seconds), PRUNE_RETENTION_FLOOR_SECONDS)
     now = _now()
     removed = {"intents": 0, "delegations": 0}
 
@@ -1196,6 +1354,22 @@ def prune(retention_seconds: int = PRUNE_RETENTION_SECONDS) -> dict[str, int]:
     # monotonic across prunes so a re-mint can never reuse a nonce a stale
     # receipt might still reconcile against.
     all_intents = list_intents()
+    all_delegations = list_delegations()
+
+    # Floor = max observed record ttl + clock-skew margin (never below the
+    # static floor). Snapshot scans tolerate concurrent deletion by skipping
+    # vanished files.
+    max_ttl = INTENT_TTL_SECONDS
+    for intent in all_intents:
+        ttl = intent.get("ttl_seconds", 0)
+        if isinstance(ttl, int) and not isinstance(ttl, bool):
+            max_ttl = max(max_ttl, ttl)
+    for _path, record in all_delegations:
+        ttl = record.get("ttl_seconds", 0)
+        if isinstance(ttl, int) and not isinstance(ttl, bool):
+            max_ttl = max(max_ttl, ttl)
+    floor = max(PRUNE_RETENTION_FLOOR_SECONDS, max_ttl + PRUNE_CLOCK_SKEW_MARGIN_SECONDS)
+    retention = max(int(retention_seconds), floor)
     watermark_nonce: dict[tuple[str, ...], str] = {}
     watermark_rank: dict[tuple[str, ...], tuple[int, float]] = {}
     for intent in all_intents:
@@ -1220,7 +1394,7 @@ def prune(retention_seconds: int = PRUNE_RETENTION_SECONDS) -> dict[str, int]:
         except OSError:
             pass
 
-    for path, record in list_delegations():
+    for path, record in all_delegations:
         if record["status"] not in _DELEGATION_TERMINAL:
             continue
         stamp = (
@@ -1321,6 +1495,18 @@ def run_delegate(*, to: str, body: str, origin_ts: str, session_name: str) -> di
     prune()
 
     turn = _verify_pointer(session_name, origin_ts)
+    # S8 strict one-hop: delegate proceeds only from a human-rooted turn
+    # (ambient/targeted) and hard-errors on every peer kind alike. A delegated
+    # recipient may reply-current a result but must not redelegate, and a
+    # requester issues every sibling delegation from its human turn(s) before
+    # waiting — delegating from a result turn would enable a second synthesis.
+    if turn["kind"] not in ("ambient", "targeted"):
+        raise OutboundError(
+            f"delegate is one-hop: it runs only from a human-rooted turn "
+            f"(ambient/targeted), not a {turn['kind']!r} turn. Issue every "
+            "sibling delegation from your human-rooted turn before waiting; a "
+            "delegated recipient may `reply-current` a result but must not "
+            "redelegate.")
     agents, rooms, bindings = _load_context()
     _verify_binding(rooms, bindings, turn, session_name)
 
@@ -1645,11 +1831,68 @@ def post_peer_result(*, body: str, origin_ts: str, session_name: str) -> dict[st
         intent, outcome, kind="peer_result", delegation_key=turn["delegation_key"])
 
 
-def post_peer_synthesis(*, body: str, origin_ts: str, session_name: str) -> dict[str, Any]:
+def _synthesis_gate(turn: dict[str, Any], *, allow_partial: bool) -> dict[str, Any]:
+    """The D2 readiness gate over the claimed record's frozen snapshot (S10).
+
+    Returns report extras to merge (``{"allow_partial": True}`` when a
+    not-ready snapshot is forced). Raises :class:`OutboundError` (exit 1) on a
+    refused not-ready synthesis; warns to stderr and proceeds on an unavailable
+    (legacy/malformed/pruned) snapshot — never wedges on cosmetic corruption.
+    """
+    key = turn.get("delegation_key") or ""
+    record: dict[str, Any] | None = None
+    if key:
+        data = _read_json(delegations_dir() / key)
+        if isinstance(data, dict):
+            try:
+                record = parse_delegation(data)
+            except OutboundError:
+                record = None
+    state = synthesis_state(record if record is not None else {})
+
+    if not state["synthesis_state_available"] or state["synthesis_state_version"] != 1:
+        print(
+            f"warning: synthesis snapshot for delegation record {key!r} is "
+            "unavailable (legacy, malformed, or pruned record); proceeding "
+            "without the readiness gate",
+            file=sys.stderr,
+        )
+        return {}
+
+    if state["synthesis_ready"]:
+        return {}
+
+    if allow_partial:
+        return {"allow_partial": True}
+
+    pending_lines = "\n".join(
+        f"  - {pd['expected_responder_agent']} (delegation_ts {pd['delegation_ts']})"
+        for pd in state["pending_delegations"]
+    )
+    raise OutboundError(
+        "synthesis is not ready: "
+        f"{state['responded_delegation_count']} of "
+        f"{state['compatible_delegation_count']} compatible sibling "
+        "delegations have durably claimed a result. Still pending:\n"
+        f"{pending_lines}\n"
+        "remedies: wait for the remaining sibling result wake, or "
+        "`gc slack delegate --cancel --to <agent>` for a dead sibling "
+        "(expires it out of the compatible set, so the next claim freezes "
+        "ready); or pass --allow-partial to synthesize the partial set now.")
+
+
+def post_peer_synthesis(
+    *, body: str, origin_ts: str, session_name: str, allow_partial: bool = False,
+) -> dict[str, Any]:
     """Post a synthesis into the human root thread with no live agent mentions.
 
-    Routed through a durable intent (op=synthesis) so a timed-out synthesis
-    post is reconciled against its own echo rather than reposted.
+    The D2 gate (S10-normalized snapshot on the claimed record) decides
+    readiness: ready proceeds; not-ready hard-errors listing each pending
+    sibling and the two remedies unless ``allow_partial`` is set (which
+    proceeds and records ``allow_partial: true`` in the report); an unavailable
+    snapshot warns and proceeds. Routed through a durable intent (op=synthesis)
+    so a timed-out synthesis post is reconciled against its own echo rather than
+    reposted.
     """
     if not body.strip():
         raise OutboundError("--body/--body-file must be non-empty")
@@ -1661,6 +1904,8 @@ def post_peer_synthesis(*, body: str, origin_ts: str, session_name: str) -> dict
         raise OutboundError(f"current turn kind is {turn['kind']!r}, not peer_result")
     agents, rooms, bindings = _load_context()
     _verify_binding(rooms, bindings, turn, session_name)
+
+    report_extra = _synthesis_gate(turn, allow_partial=allow_partial)
 
     acting = turn["agent"]
     src = agents.get(acting)
@@ -1680,7 +1925,9 @@ def post_peer_synthesis(*, body: str, origin_ts: str, session_name: str) -> dict
         metadata_nonce="",
         make_metadata=synthesis_metadata,
     )
-    return _company_post_report(intent, outcome, kind="peer_synthesis")
+    report = _company_post_report(intent, outcome, kind="peer_synthesis")
+    report.update(report_extra)
+    return report
 
 
 def post_company_root_reply(*, body: str, origin_ts: str, session_name: str) -> dict[str, Any]:

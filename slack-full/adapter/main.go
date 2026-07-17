@@ -476,6 +476,10 @@ type config struct {
 	// Optional (empty OK in Phase 1). Sourced from
 	// SLACK_SWITCHBOARD_BOT_USER_ID.
 	companySelfBotUserID string
+	// companyVisibleAcks gates the config-driven visible-ack reactions
+	// (Phase 3b). Off by default: unset/empty/"0" = off, anything else = on.
+	// Sourced from SLACK_COMPANY_VISIBLE_ACKS.
+	companyVisibleAcks bool
 	// companyGateway owns the durable-admission + delivery path for
 	// imported company rooms. Nil disables the company path entirely —
 	// every inbound then flows through the legacy path byte-for-byte.
@@ -583,6 +587,11 @@ func loadConfigFromEnv(getenv func(string) string) (config, error) {
 	cfg.companyBindingsPath = envOrFn("SLACK_COMPANY_BINDINGS_PATH", defaultCompanyBindingsPath)
 	cfg.companyIngressDir = envOrFn("SLACK_COMPANY_INGRESS_DIR", defaultCompanyIngressDir)
 	cfg.companySelfBotUserID = getenv("SLACK_SWITCHBOARD_BOT_USER_ID")
+	// Visible-ack gate: off unless the env var is a non-empty value other
+	// than "0" (the same truthiness the rest of the company config uses).
+	if v := strings.TrimSpace(getenv("SLACK_COMPANY_VISIBLE_ACKS")); v != "" && v != "0" {
+		cfg.companyVisibleAcks = true
+	}
 
 	// Phase 2 shared-state directories. Same resolution precedence as the
 	// registries above, with the Python leaf names (secrets/,
@@ -1165,6 +1174,13 @@ func main() {
 	internalMux.HandleFunc("DELETE /identity", handleIdentityDelete(identityReg))
 	internalMux.HandleFunc("POST /handle-alias", handleHandleAlias(aliasReg))
 	internalMux.HandleFunc("DELETE /handle-alias", handleHandleAliasDelete(aliasReg))
+	// Company-rooms operator surface (Phase 3b): the receipt listing + redrive
+	// endpoints backing the `gc slack company-status` / `company-redrive` verbs.
+	// Registered only when the company gateway is wired.
+	if cfg.companyGateway != nil {
+		internalMux.HandleFunc("/internal/company/receipts", cfg.companyGateway.handleCompanyReceipts)
+		internalMux.HandleFunc("/internal/company/redrive", cfg.companyGateway.handleCompanyRedrive)
+	}
 	internalMux.HandleFunc("/healthz", handleHealthz)
 
 	publicSrv := &http.Server{
@@ -1972,15 +1988,27 @@ func handleReact(cfg config) http.HandlerFunc {
 }
 
 func postReactionToSlack(token string, req slackReactionsAddReq) (*slackReactionsAddResp, error) {
+	return postReactionMethod(http.DefaultClient, token, "reactions.add", req)
+}
+
+// postReactionMethod is the single Slack reactions POST path, parameterized by
+// method ("reactions.add" | "reactions.remove") and HTTP client. handleReact
+// (add, DefaultClient) and the company visible-ack path (add/remove over the
+// gateway's timeout-bounded client) both route through here, so there is no
+// second reactions POST implementation.
+func postReactionMethod(client *http.Client, token, method string, req slackReactionsAddReq) (*slackReactionsAddResp, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
 	body, _ := json.Marshal(req)
-	httpReq, err := http.NewRequest(http.MethodPost, slackAPIBase+"/reactions.add", bytes.NewReader(body))
+	httpReq, err := http.NewRequest(http.MethodPost, slackAPIBase+"/"+method, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json; charset=utf-8")
 
-	httpResp, err := http.DefaultClient.Do(httpReq)
+	httpResp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -1997,6 +2025,17 @@ func postReactionToSlack(token string, req slackReactionsAddReq) (*slackReaction
 }
 
 func postToSlack(token string, req slackPostMessageReq) (*slackPostMessageResp, error) {
+	return postMessageWithClient(http.DefaultClient, token, req)
+}
+
+// postMessageWithClient is the single Slack chat.postMessage path, parameterized
+// by HTTP client. postToSlack (DefaultClient) and the company visible-ack failure
+// reply (the gateway's timeout-bounded client) both route through here, so there
+// is no second chat.postMessage implementation.
+func postMessageWithClient(client *http.Client, token string, req slackPostMessageReq) (*slackPostMessageResp, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
 	body, _ := json.Marshal(req)
 	httpReq, err := http.NewRequest(http.MethodPost, slackAPIBase+"/chat.postMessage", bytes.NewReader(body))
 	if err != nil {
@@ -2005,7 +2044,7 @@ func postToSlack(token string, req slackPostMessageReq) (*slackPostMessageResp, 
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json; charset=utf-8")
 
-	httpResp, err := http.DefaultClient.Do(httpReq)
+	httpResp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}

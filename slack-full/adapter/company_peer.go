@@ -34,6 +34,11 @@ const (
 	peerParkCorrelationPending = "correlation_pending"
 	peerParkAmbiguousPending   = "ambiguous_pending_delegations"
 	peerParkResolutionPending  = "author_resolution_pending"
+	// peerParkCorrelationError is the S1 fail-closed park when the synthesis
+	// group cannot be pinned across the bounded re-lock loop (or on a
+	// correlation-layer I/O error): every-sweep cadence, never demoted to a
+	// frozen peer_input.
+	peerParkCorrelationError = "correlation_error"
 )
 
 // peerWake is a refined bot-authored wake: the agent to wake, the frozen
@@ -45,6 +50,11 @@ type peerWake struct {
 	Agent         CompanyAgent
 	Kind          string
 	DelegationKey string
+	// Snapshot is the frozen synthesis snapshot, non-nil iff Kind is
+	// peer_result (a fresh claim carries the just-computed snapshot; a replay
+	// hit carries the record's stored, S10-normalized snapshot). It rides up to
+	// deliverReceipt, which freezes it onto the receipt in the routing commit.
+	Snapshot *companySynthesisSnapshot
 }
 
 // Five-condition peer-trust checklist reasons (design "Trust and Authority").
@@ -275,7 +285,11 @@ type companyPeerEnv struct {
 	delegationsDir string
 	intentsDir     string
 	locksDir       string
-	now            func() time.Time
+	// retention bounds S4 replay acceptance: an idempotent claim hit is honored
+	// only while -300s <= now - result_claimed_at <= retention (the receipt-
+	// retention constant, plumbed from the gateway's value).
+	retention time.Duration
+	now       func() time.Time
 }
 
 // delegationMatch pairs a parsed record with its on-disk filename.
@@ -450,34 +464,85 @@ func (env companyPeerEnv) resolvePeerWakes(msg CompanyMessage, author *CompanyAg
 }
 
 // resolveResultWake handles one requester candidate for a gc_delegation_result
-// message under the delegation-tuple lock.
+// message. It runs the S1 preflight/re-check dance: scan without locks to
+// derive the synthesis group, acquire dgroup THEN dtuple (the pinned lock
+// order — no path holds a lower-rank lock while acquiring a higher one),
+// re-scan, and if the derived group changed between the two scans release both
+// locks, re-derive, and retry (at most companySynthesisRelockAttempts). On
+// exhaustion the receipt parks correlation_error — never demoted to a frozen
+// peer_input, since a result consumed as peer_input can never claim later.
 func (env companyPeerEnv) resolveResultWake(msg CompanyMessage, meta slackMessageMetadata, tuple companyDelegationTuple, requester CompanyAgent) (peerWake, string, error) {
-	lock, err := acquireCompanyLock(env.locksDir, tuple.lockName())
-	if err != nil {
-		return peerWake{}, "", err
-	}
-	defer lock.release()
-
-	matches, err := env.scanDelegations(tuple)
-	if err != nil {
-		return peerWake{}, "", err
-	}
-
 	payload := parseResultPayload(meta.EventPayload)
 
-	// Replay: a record already claimed by THIS result ts is an idempotent hit.
+	for attempt := 0; attempt < companySynthesisRelockAttempts; attempt++ {
+		pre, err := env.scanDelegations(tuple)
+		if err != nil {
+			return peerWake{}, "", err
+		}
+		groupLock := resultGroupLockName(pre, payload, tuple)
+
+		gl, err := acquireCompanyLock(env.locksDir, groupLock)
+		if err != nil {
+			return peerWake{}, "", err
+		}
+		tl, err := acquireCompanyLock(env.locksDir, tuple.lockName())
+		if err != nil {
+			gl.release()
+			return peerWake{}, "", err
+		}
+
+		matches, err := env.scanDelegations(tuple)
+		if err != nil {
+			tl.release()
+			gl.release()
+			return peerWake{}, "", err
+		}
+		if resultGroupLockName(matches, payload, tuple) != groupLock {
+			// A sibling materialized/vanished between the unlocked preflight and
+			// the locked re-scan, changing the derived group: release both,
+			// re-derive from the fresh scan, re-acquire, re-scan.
+			tl.release()
+			gl.release()
+			continue
+		}
+
+		pw, park, rerr := env.resolveResultLocked(msg, payload, tuple, requester, matches)
+		tl.release()
+		gl.release()
+		return pw, park, rerr
+	}
+	return peerWake{}, peerParkCorrelationError, nil
+}
+
+// resolveResultLocked is the correlation decision for one result under the held
+// dgroup+dtuple locks: the S4 replay window, TTL pruning of stale pendings,
+// and the metadata-gated claim that freezes the synthesis snapshot.
+func (env companyPeerEnv) resolveResultLocked(msg CompanyMessage, payload gcResultPayload, tuple companyDelegationTuple, requester CompanyAgent, matches []delegationMatch) (peerWake, string, error) {
+	// Replay (S4): a record already claimed by THIS result ts+nonce is an
+	// idempotent hit, honored only while within the bounded replay window.
 	for _, m := range matches {
 		if m.record.Status == companyDelegationClaimed &&
 			m.record.ResultTS == msg.TS &&
 			m.record.Nonce == payload.Nonce {
-			return peerWake{Agent: requester, Kind: wakeKindPeerResult, DelegationKey: m.filename}, "", nil
+			if !env.replayWithinWindow(m.record) {
+				// Outside the window, or an unparseable result_claimed_at (S9
+				// fail-closed read): ordinary peer input, never a second claim.
+				return peerWake{Agent: requester, Kind: wakeKindPeerInput}, "", nil
+			}
+			snap := env.storedSnapshot(m.filename)
+			return peerWake{Agent: requester, Kind: wakeKindPeerResult, DelegationKey: m.filename, Snapshot: &snap}, "", nil
 		}
 	}
 
 	// Live pending matches (TTL-valid). Expired pendings are rewritten under
-	// the lock and excluded.
+	// the lock and excluded. A claimed record for the tuple is remembered so a
+	// second, different result bypasses the correlation-pending park (S4).
 	var pending []delegationMatch
+	claimedTuple := false
 	for _, m := range matches {
+		if m.record.Status == companyDelegationClaimed {
+			claimedTuple = true
+		}
 		if m.record.Status != companyDelegationPending {
 			continue
 		}
@@ -490,6 +555,12 @@ func (env companyPeerEnv) resolveResultWake(msg CompanyMessage, meta slackMessag
 
 	switch len(pending) {
 	case 0:
+		// An already-claimed tuple bypasses the posting-intent check entirely
+		// (S4): a lagging posting intent must never park a claimed tuple
+		// correlation_pending. Deliver the extra result as ordinary peer input.
+		if claimedTuple {
+			return peerWake{Agent: requester, Kind: wakeKindPeerInput}, "", nil
+		}
 		exists, ierr := env.postingIntentExists(tuple)
 		if ierr != nil {
 			return peerWake{}, "", ierr
@@ -504,10 +575,19 @@ func (env companyPeerEnv) resolveResultWake(msg CompanyMessage, meta slackMessag
 		// Metadata gate + route window are load-bearing for claim admission.
 		gated := payload.Nonce == m.record.Nonce && payload.DelegationTS == m.record.TS
 		if gated && env.withinRouteWindow(m.record) {
-			if cerr := env.claimRecord(m, msg.TS); cerr != nil {
+			// Freeze the snapshot over the group with this record substituted in
+			// as claimed (S3), sharing snapshotAt with result_claimed_at, then
+			// persist both in the one atomic rewrite (S1).
+			snapshotAt := env.now().UTC().Format(time.RFC3339)
+			claimedView := *m.record
+			claimedView.Status = companyDelegationClaimed
+			claimedView.ResultTS = msg.TS
+			claimedView.ResultClaimedAt = snapshotAt
+			snap := env.computeSynthesisSnapshot(&claimedView, m.filename, snapshotAt)
+			if cerr := env.claimRecord(m, msg.TS, snapshotAt, snap); cerr != nil {
 				return peerWake{}, "", cerr
 			}
-			return peerWake{Agent: requester, Kind: wakeKindPeerResult, DelegationKey: m.filename}, "", nil
+			return peerWake{Agent: requester, Kind: wakeKindPeerResult, DelegationKey: m.filename, Snapshot: &snap}, "", nil
 		}
 		// Clarifying question / hand-typed / out-of-window: peer input only.
 		return peerWake{Agent: requester, Kind: wakeKindPeerInput}, "", nil
@@ -516,10 +596,25 @@ func (env companyPeerEnv) resolveResultWake(msg CompanyMessage, meta slackMessag
 	}
 }
 
+// replayWithinWindow reports whether an already-claimed record's replay is
+// still honorable: -300s <= now - result_claimed_at <= retention (S4). An
+// unparseable result_claimed_at fails closed (S9) — the replay is treated as
+// ordinary peer input, never rewritten.
+func (env companyPeerEnv) replayWithinWindow(r *companyDelegationRecord) bool {
+	claimed, err := time.Parse(time.RFC3339, r.ResultClaimedAt)
+	if err != nil {
+		return false
+	}
+	delta := env.now().Sub(claimed)
+	return delta >= -companyRouteWindowBack && delta <= env.retention
+}
+
 // claimRecord transitions a pending record to result_claimed under the held
-// tuple lock, generation-checked. Re-reads on disk to defend against a lost
-// race even though the lock already serializes writers.
-func (env companyPeerEnv) claimRecord(m delegationMatch, resultTS string) error {
+// tuple lock, generation-checked, freezing the synthesis snapshot into the SAME
+// atomic rewrite (S1). Re-reads on disk to defend against a lost race even
+// though the lock already serializes writers. claimedAt must equal the
+// snapshot's synthesis_snapshot_at (S3).
+func (env companyPeerEnv) claimRecord(m delegationMatch, resultTS, claimedAt string, snap companySynthesisSnapshot) error {
 	path := filepath.Join(env.delegationsDir, m.filename)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -536,10 +631,18 @@ func (env companyPeerEnv) claimRecord(m delegationMatch, resultTS string) error 
 		return fmt.Errorf("delegation %s not claimable (status=%s gen=%d)", m.filename, onDisk.Status, onDisk.Generation)
 	}
 	out, err := companyRewriteDelegation(data, map[string]any{
-		"status":            companyDelegationClaimed,
-		"result_ts":         resultTS,
-		"result_claimed_at": env.now().UTC().Format(time.RFC3339),
-		"generation":        onDisk.Generation + 1,
+		"status":                      companyDelegationClaimed,
+		"result_ts":                   resultTS,
+		"result_claimed_at":           claimedAt,
+		"generation":                  onDisk.Generation + 1,
+		"synthesis_state_version":     snap.Version,
+		"synthesis_state_available":   snap.Available,
+		"compatible_delegation_count": snap.Compatible,
+		"responded_delegation_count":  snap.Responded,
+		"pending_delegation_count":    snap.Pending,
+		"pending_delegations":         snap.PendingIDs,
+		"synthesis_ready":             snap.Ready,
+		"synthesis_snapshot_at":       snap.SnapshotAt,
 	})
 	if err != nil {
 		return err

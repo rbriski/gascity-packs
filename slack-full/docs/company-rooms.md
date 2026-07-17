@@ -500,6 +500,15 @@ with metadata correlation, one visible result, restart recovery mid-flight,
 a Slack redelivery absorbed by the receipt store, and a captured real
 agent-app post event pinning the wire shape the mention extractor and
 author classifier rely on — before creating the remaining identities.
+Partially verified live (2026-07-17, workspace `T0ARJCFV8QL`, via
+`chat.postMessage` + `conversations.history` readback): a real agent-app
+post carries NO `subtype`, has `user`/`bot_id`/top-level
+`app_id`/`bot_profile.app_id` (the classifier's corroboration chain),
+Slack synthesizes `rich_text` mention elements for text-only posts, and
+metadata round-trips on history reads with `include_all_metadata=true`.
+Still pending the deployed events endpoint: metadata embedded in
+`message.channels` event deliveries (load-bearing for receipt-based
+reconciliation).
 
 ## Acceptance Gate
 

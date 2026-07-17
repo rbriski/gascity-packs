@@ -99,6 +99,30 @@ type companyGateway struct {
 	// triggerDelivery before the goroutine starts.
 	deliverWG sync.WaitGroup
 
+	// chains is the per-root in-process ownership registry (S5): one active
+	// chain per root triple, so a sweep pass or a live result trigger for an
+	// owned root enqueues into the running chain instead of racing it.
+	chains *chainRegistry
+
+	// companyCorrelationParked is the sweep-computed count of receipts parked
+	// correlation_pending or ambiguous_pending_delegations, surfaced on
+	// /healthz (S7/D5 operator signal).
+	companyCorrelationParked atomic.Int64
+
+	// visibleAcks gates the config-driven visible-ack reactions
+	// (SLACK_COMPANY_VISIBLE_ACKS). Off by default; all ack traffic is
+	// best-effort, asynchronous inside the delivery worker, and never changes
+	// receipt status or counts as a delivery failure.
+	visibleAcks bool
+
+	// reactHook performs one visible-ack reaction (add/remove) over the
+	// switchboard token and classifies it into the ack taxonomy; replyHook
+	// posts the one threaded failure notice. Both are function fields so tests
+	// can observe ack traffic without a live Slack; production wraps slackReact
+	// and the chat.postMessage path (the single reactions/message POST paths).
+	reactHook func(method, channel, ts, name string) ackOutcome
+	replyHook func(channel, threadTS, text string) bool
+
 	retention     time.Duration
 	sweepInterval time.Duration
 	staleWindow   time.Duration
@@ -163,6 +187,8 @@ func newCompanyGateway(cfg config, dir *companyDirectoryStore, bind *companyBind
 		turnsDir:       cfg.companyTurnsDir,
 		locksDir:       cfg.companyLocksDir,
 		inflight:       make(map[string]bool),
+		chains:         newChainRegistry(),
+		visibleAcks:    cfg.companyVisibleAcks,
 		retention:      companyReceiptRetention,
 		sweepInterval:  companySweepInterval,
 		staleWindow:    companyStaleReclaimWindow,
@@ -170,6 +196,24 @@ func newCompanyGateway(cfg config, dir *companyDirectoryStore, bind *companyBind
 	}
 	g.hydrate = func(msg CompanyMessage) companyHydration {
 		return fetchCompanyHydration(g.slackToken, g.slackClient, msg)
+	}
+	// Visible-ack hooks: the switchboard token owns reactions:write and the
+	// receipt lifecycle. Both reuse the single existing POST paths (no second
+	// reactions/message implementation) over the gateway's timeout-bounded
+	// client so a hung Slack call cannot wedge the delivery worker.
+	g.reactHook = func(method, channel, ts, name string) ackOutcome {
+		return slackReact(g.slackClient, g.slackToken, method, channel, ts, name)
+	}
+	g.replyHook = func(channel, threadTS, text string) bool {
+		if _, err := postMessageWithClient(g.slackClient, g.slackToken, slackPostMessageReq{
+			Channel:  channel,
+			ThreadTS: threadTS,
+			Text:     text,
+		}); err != nil {
+			log.Printf("company: visible-ack failure reply channel=%s thread=%s: %v", channel, threadTS, err)
+			return false
+		}
+		return true
 	}
 	if receipts != nil {
 		g.receipts.Store(receipts)
@@ -185,6 +229,7 @@ func (g *companyGateway) peerEnv() companyPeerEnv {
 		delegationsDir: g.delegationsDir,
 		intentsDir:     g.intentsDir,
 		locksDir:       g.locksDir,
+		retention:      g.retention,
 		now:            g.now,
 	}
 }
@@ -364,6 +409,12 @@ func (g *companyGateway) triggerDelivery(origin ReceiptOrigin) {
 	if g == nil {
 		return
 	}
+	// S5/S6: a live result-bearing trigger for a root with an active replay
+	// chain is routed into that chain instead of racing it (the chain owner
+	// will deliver it in order). Cheap when no chain is active.
+	if g.enqueueForRoot(origin) {
+		return
+	}
 	// Use the non-counting acquire: a company receipt that finds no slot
 	// stays durably pending for the sweep (backpressure), which is NOT a
 	// dropped delivery. Counting it would pollute dispatch_dropped_total and
@@ -389,28 +440,50 @@ func (g *companyGateway) triggerDelivery(origin ReceiptOrigin) {
 // status once every target settles. A receipt whose channel matches no
 // room in the current snapshot is parked (never terminally resolved,
 // never legacy-delivered).
-func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) {
+func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 	if g == nil {
-		return
+		return deliverError
 	}
 	id := receiptID(origin)
 	if !g.acquireSingleFlight(id) {
-		return
+		return deliverBusy
 	}
 	defer g.releaseSingleFlight(id)
 
 	store := g.store()
 	if store == nil {
-		return // degraded: no store to deliver against yet
+		return deliverError // degraded: no store to deliver against yet
 	}
 	r, err := store.Get(origin)
 	if err != nil {
 		log.Printf("company: delivery read receipt %s: %v", id, err)
-		return
+		return deliverError
 	}
 	if r == nil || isTerminalStatus(r.Status) {
-		return
+		return deliverTerminal // already settled — safe to advance the chain
 	}
+
+	msg := decodeCompanyMessage(origin, r.Event)
+
+	// S6 live ordering: hold dgser (root serialization lock) across the whole
+	// result-bearing path — from before correlation through finalize — so the
+	// snapshot order at the requester equals delivery order. Gated on the
+	// message classification (bot-authored AND gc_delegation_result metadata,
+	// the only messages that can claim); dgser is the highest-rank lock, so it
+	// is always acquired before dgroup/dtuple (deadlock freedom).
+	if isResultBearing(msg) {
+		lock, lerr := acquireCompanyLock(g.locksDir, rootSerialLockName(origin.TeamID, origin.ChannelID, deriveHumanRootTS(msg)))
+		if lerr != nil {
+			log.Printf("company: dgser acquire receipt=%s: %v", id, lerr)
+			return deliverError
+		}
+		defer lock.release()
+	}
+
+	// Visible-ack admission hook (config-gated, best-effort): the first
+	// delivery attempt puts 👀 on the origin message. Never blocks or fails
+	// delivery, never changes receipt status.
+	g.applyAdmissionAck(r)
 
 	dir := g.dirStore.Snapshot()
 	room, ok := dir.RoomByChannel(origin.TeamID, origin.ChannelID)
@@ -418,10 +491,8 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) {
 		// Channel matches no room in the CURRENT snapshot (directory
 		// removed, shrunk, or failed to load) — park it.
 		g.parkReceipt(r)
-		return
+		return deliverParkedPreclaim
 	}
-
-	msg := decodeCompanyMessage(origin, r.Event)
 
 	// Frozen route (design step 9 / plan 1d): the wake set is computed ONCE,
 	// at first delivery. When the receipt already carries recorded targets a
@@ -440,7 +511,7 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) {
 			switch res.Outcome {
 			case botResolveTransient:
 				g.parkWithReason(r, peerParkResolutionPending)
-				return
+				return deliverParkedPreclaim
 			case botResolveOK:
 				msg.ResolvedBotUserID = res.Agent.BotUserID
 				authorAgent = res.Agent
@@ -451,7 +522,7 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) {
 		decision := ComputeWakeSet(dir, msg, g.cfg.companySelfBotUserID)
 		if decision.Room == nil {
 			g.parkReceipt(r)
-			return
+			return deliverParkedPreclaim
 		}
 		if len(decision.Wakes) == 0 {
 			// Admitted but nobody woken (bot author, empty ambient set,
@@ -462,8 +533,10 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) {
 				cur.Reason = decision.Reason
 			}); err != nil {
 				log.Printf("company: finalize no_delivery %s: %v", id, err)
+				return deliverError
 			}
-			return
+			g.applyTerminalAck(r)
+			return deliverTerminal
 		}
 
 		// Freeze the wake set into (agent, kind, delegation_key) triples. For
@@ -474,7 +547,25 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) {
 		frozen, park := g.freezeWakes(dir, room, msg, decision, authorAgent)
 		if park != "" {
 			g.parkWithReason(r, park)
-			return
+			return g.parkAdvanceOutcome(r)
+		}
+
+		// Freeze the synthesis snapshot for the peer_result leg (at most one per
+		// receipt) into the SAME routing commit that freezes targets, so a
+		// redrive re-renders byte-identical synthesis fields even if the record
+		// is later pruned — the same frozen-bytes discipline as Hydration.
+		var synthesis json.RawMessage
+		for _, fw := range frozen {
+			if fw.Kind != wakeKindPeerResult || fw.Snapshot == nil {
+				continue
+			}
+			data, merr := json.Marshal(fw.Snapshot)
+			if merr != nil {
+				log.Printf("company: marshal synthesis snapshot %s: %v", id, merr)
+				return deliverError
+			}
+			synthesis = data
+			break
 		}
 
 		// Claim: mark routing and record every target — with its idempotency
@@ -486,10 +577,19 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) {
 		if err := g.commitReceipt(r, func(cur *IngressReceipt) {
 			cur.Status = ingressStatusRouting
 			cur.Reason = ""
+			if len(synthesis) > 0 {
+				cur.Synthesis = synthesis
+			}
+			// A redrive that finds the record materialized (Python's lazy
+			// reconciliation ran) claims and delivers normally: clear the S7
+			// recovery backoff fields so a prior correlation park leaves no trace.
+			cur.RecoveryAttempts = 0
+			cur.RecoveryNextAt = time.Time{}
+			cur.RecoveryReason = ""
 			g.ensureTargets(cur, room, frozen, bindings, now)
 		}); err != nil {
 			log.Printf("company: claim routing %s: %v", id, err)
-			return
+			return deliverError
 		}
 	}
 
@@ -509,13 +609,13 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) {
 		data, merr := json.Marshal(hy)
 		if merr != nil {
 			log.Printf("company: marshal hydration %s: %v", id, merr)
-			return
+			return deliverError
 		}
 		if err := g.commitReceipt(r, func(cur *IngressReceipt) {
 			cur.Hydration = data
 		}); err != nil {
 			log.Printf("company: freeze hydration %s (leaving pending, no delivery): %v", id, err)
-			return
+			return deliverError
 		}
 	}
 	var hydration companyHydration
@@ -558,7 +658,7 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) {
 			log.Printf("company: pointer write receipt=%s session=%s: %v", id, td.Session, perr)
 			continue
 		}
-		body := renderCompanyReminder(room, companyReminderAuthorClass(td.Kind), td.Kind, msg.Text, origin.TS, threadRootTS, hydration)
+		body := renderCompanyReminder(room, companyReminderAuthorClass(td.Kind), td.Kind, msg.Text, origin.TS, threadRootTS, hydration, r.Synthesis)
 		delivered, retryable, detail := g.postCompanyBody(td, body)
 		td.Attempts++
 		td.UpdatedAt = now
@@ -596,7 +696,28 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) {
 		cur.Reason = reason
 	}); err != nil {
 		log.Printf("company: finalize %s: %v", id, err)
+		return deliverError
 	}
+	if isTerminalStatus(r.Status) {
+		// delivered / failed / no_delivery: run the terminal visible-ack hook
+		// (👀→✅ / 👀→⚠️+threaded reply / removes-only), then advance the chain.
+		g.applyTerminalAck(r)
+		return deliverTerminal
+	}
+	// Still routing (a pending/retryable target remains): abort the chain
+	// remainder — the next sweep pass rebuilds and resumes.
+	return deliverPending
+}
+
+// parkAdvanceOutcome classifies a freezeWakes-park exit: a correlation park
+// that terminalized under the S7 budget (correlation_recovery_exhausted) is a
+// committed terminal state; any other park is pre-claim. Both advance the chain,
+// but the distinction keeps the outcome honest for the sequencer and tests.
+func (g *companyGateway) parkAdvanceOutcome(r *IngressReceipt) deliverOutcome {
+	if isTerminalStatus(r.Status) {
+		return deliverTerminal
+	}
+	return deliverParkedPreclaim
 }
 
 // frozenWake is a routing decision resolved to (agent, kind, delegation_key),
@@ -607,6 +728,10 @@ type frozenWake struct {
 	Agent         CompanyAgent
 	Kind          string
 	DelegationKey string
+	// Snapshot is the frozen synthesis snapshot for the peer_result leg
+	// (non-nil iff Kind is peer_result); deliverReceipt marshals it into the
+	// receipt's Synthesis field in the routing commit that freezes targets.
+	Snapshot *companySynthesisSnapshot
 }
 
 // freezeWakes converts a RouteDecision into frozen wakes. Human decisions map
@@ -643,14 +768,21 @@ func (g *companyGateway) freezeWakes(dir *CompanyDirectory, room *CompanyRoom, m
 	}
 	peerWakes, park, err := g.peerEnv().resolvePeerWakes(msg, authorAgent, decision.Wakes)
 	if err != nil {
+		// S7: a correlation-layer I/O or scan error (ReadDir, lock open/flock,
+		// intent scan) must NOT consume the attempt budget. Park under the
+		// distinct, non-counting correlation_error reason (plain every-sweep
+		// cadence) rather than the budget-consuming correlation_pending, so a
+		// transient degraded-infra window can never terminalize a trusted,
+		// claimable result. This mirrors the S1 relock-exhaustion path
+		// (resolveResultWake), which already returns peerParkCorrelationError.
 		log.Printf("company: peer correlation error: %v", err)
-		return nil, peerParkCorrelationPending
+		return nil, peerParkCorrelationError
 	}
 	if park != "" {
 		return nil, park
 	}
 	for _, pw := range peerWakes {
-		frozen = append(frozen, frozenWake{Agent: pw.Agent, Kind: pw.Kind, DelegationKey: pw.DelegationKey})
+		frozen = append(frozen, frozenWake{Agent: pw.Agent, Kind: pw.Kind, DelegationKey: pw.DelegationKey, Snapshot: pw.Snapshot})
 	}
 	return frozen, ""
 }
@@ -835,9 +967,17 @@ func (g *companyGateway) parkReceipt(r *IngressReceipt) {
 
 // parkWithReason records a non-terminal parked state carrying a
 // machine-readable reason (directory park, author-resolution-pending, or a
-// peer correlation park). Idempotent — an already-parked receipt with the
-// same reason is left untouched to avoid generation churn on every sweep.
+// peer correlation park). For the two backoff reasons (correlation_pending and
+// ambiguous_pending_delegations) it drives the S7 attempt schedule via
+// parkWithRecovery; for every other reason it stays idempotent — an already-
+// parked receipt with the same reason is left untouched to avoid generation
+// churn on every sweep (correlation_error, author_resolution_pending, and the
+// directory park all keep their plain every-sweep cadence).
 func (g *companyGateway) parkWithReason(r *IngressReceipt, reason string) {
+	if isRecoveryReason(reason) {
+		g.parkWithRecovery(r, reason)
+		return
+	}
 	if r.Status == ingressStatusReceived && r.Reason == reason {
 		return
 	}
@@ -847,6 +987,81 @@ func (g *companyGateway) parkWithReason(r *IngressReceipt, reason string) {
 		cur.Reason = reason
 	}); err != nil {
 		log.Printf("company: park receipt %s: %v", r.ID, err)
+	}
+}
+
+// isRecoveryReason reports whether a park reason is subject to the S7 bounded
+// backoff. correlation_error and the Phase 1/2 parks explicitly are not: they
+// keep the plain every-sweep cadence and never consume the attempt budget.
+func isRecoveryReason(reason string) bool {
+	return reason == peerParkCorrelationPending || reason == peerParkAmbiguousPending
+}
+
+// isCorrelationParked reports whether a receipt is currently parked under a
+// correlation reason counted on /healthz as company_correlation_parked
+// (correlation_pending or ambiguous_pending_delegations).
+func isCorrelationParked(r *IngressReceipt) bool {
+	return r.Status == ingressStatusReceived &&
+		(r.Reason == peerParkCorrelationPending || r.Reason == peerParkAmbiguousPending)
+}
+
+// parkWithRecovery drives the S7 correlation-park backoff. The first park under
+// a recovery reason is immediately eligible on the next pass (no initial delay,
+// attempts unchanged). A re-park under the SAME reason is exactly the case
+// "a redrive re-ran resolveResultWake and found the posting intent still in
+// flight" (the idempotent-early-return case): it counts one attempt and either
+// schedules the next backed-off pass or terminalizes. correlation_pending goes
+// terminal (failed / correlation_recovery_exhausted, counted in
+// deliveryFailures) at attempt 6; the Slack-born ambiguous park (D5) uses the
+// same schedule but NEVER terminalizes — it keeps retrying at the 15-minute cap.
+func (g *companyGateway) parkWithRecovery(r *IngressReceipt, reason string) {
+	alreadyParked := r.Status == ingressStatusReceived && r.Reason == reason
+	if !alreadyParked {
+		// First park under this recovery reason: immediately eligible next pass.
+		// The attempt budget is scoped PER reason — a transition to a different
+		// recovery reason (or from a non-recovery park, e.g. a correlation_error
+		// interlude) starts a fresh streak, so an unrelated prior streak (a
+		// long-lived ambiguous park, or a burst of correlation_error re-parks)
+		// can never near-instantly terminalize this genuine correlation_pending.
+		log.Printf("company: parking receipt %s reason=%s (recovery)", r.ID, reason)
+		if err := g.commitReceipt(r, func(cur *IngressReceipt) {
+			cur.Status = ingressStatusReceived
+			cur.Reason = reason
+			cur.RecoveryReason = reason
+			cur.RecoveryAttempts = 0
+			cur.RecoveryNextAt = time.Time{}
+		}); err != nil {
+			log.Printf("company: park receipt %s: %v", r.ID, err)
+		}
+		return
+	}
+	attempts := r.RecoveryAttempts + 1
+	if reason == peerParkCorrelationPending && attempts >= companyPeerRecoveryMaxAttempts {
+		log.Printf("company: correlation park exhausted receipt=%s attempts=%d -> terminal", r.ID, attempts)
+		if err := g.commitReceipt(r, func(cur *IngressReceipt) {
+			cur.Status = ingressStatusFailed
+			cur.Reason = companyReasonRecoveryExhausted
+			cur.RecoveryReason = reason
+			cur.RecoveryAttempts = attempts
+			cur.RecoveryNextAt = time.Time{}
+		}); err != nil {
+			log.Printf("company: terminalize correlation park %s: %v", r.ID, err)
+			return
+		}
+		g.deliveryFailures.Add(1)
+		g.applyTerminalAck(r)
+		return
+	}
+	next := g.now().UTC().Add(nextRecoveryDelay(attempts))
+	log.Printf("company: correlation park backoff receipt=%s reason=%s attempts=%d next=%s", r.ID, reason, attempts, next.Format(time.RFC3339))
+	if err := g.commitReceipt(r, func(cur *IngressReceipt) {
+		cur.Status = ingressStatusReceived
+		cur.Reason = reason
+		cur.RecoveryReason = reason
+		cur.RecoveryAttempts = attempts
+		cur.RecoveryNextAt = next
+	}); err != nil {
+		log.Printf("company: schedule correlation park %s: %v", r.ID, err)
 	}
 }
 
@@ -936,7 +1151,12 @@ func (g *companyGateway) startRecovery(ctx context.Context) {
 }
 
 // recoverPending runs one synchronous Pending() scan and enqueues every
-// non-terminal receipt for delivery. It does NOT open the barrier — the
+// eligible non-terminal receipt for delivery. Per-root replay chains
+// (result-bearing receipts and correlation parks) are ordered per S5 and driven
+// sequentially by one worker chain; every other receipt keeps the store's
+// (ReceivedAt, Origin.TS) order and is triggered concurrently as before. It
+// applies the same recoveryDue eligibility as the sweep so a restart neither
+// bypasses the S7 backoff nor bumps attempts. It does NOT open the barrier — the
 // caller does that on success — so tests can drive it directly.
 func (g *companyGateway) recoverPending() error {
 	store := g.store()
@@ -947,10 +1167,43 @@ func (g *companyGateway) recoverPending() error {
 	if err != nil {
 		return err
 	}
+	now := g.now()
+	var eligible []*IngressReceipt
 	for _, rec := range pending {
+		if !recoveryDue(rec, now) {
+			continue
+		}
+		eligible = append(eligible, rec)
+	}
+	chains, rest := g.orderPendingForReplay(eligible)
+	for _, c := range chains {
+		g.triggerChain(c)
+	}
+	for _, rec := range rest {
 		g.triggerDelivery(rec.Origin)
 	}
 	return nil
+}
+
+// triggerChain acquires one dispatch slot for a whole replay chain and drives
+// it sequentially and synchronously in a goroutine (deliverChain). The single
+// slot bounds a chain to the same process-wide backpressure as an individual
+// delivery; on saturation the chain is left durably pending for the next sweep.
+func (g *companyGateway) triggerChain(c replayChain) {
+	if g == nil || len(c.Origins) == 0 {
+		return
+	}
+	release, _, ok := g.cfg.tryAcquireDispatchSlot()
+	if !ok {
+		log.Printf("company: dispatch slot unavailable; replay chain of %d left pending for sweep", len(c.Origins))
+		return
+	}
+	g.deliverWG.Add(1)
+	go func() {
+		defer g.deliverWG.Done()
+		defer release()
+		g.deliverChain(c)
+	}()
 }
 
 // runSweep is the periodic redrive loop. It waits one interval before its
@@ -976,17 +1229,45 @@ func (g *companyGateway) sweepOnce() {
 	if store == nil {
 		return
 	}
-	pending, _, err := store.SweepAndPending(g.retention)
+	pending, healNeeded, _, err := store.SweepAndPending(g.retention)
 	if err != nil {
 		log.Printf("company: sweep: %v", err)
 		return
 	}
 	now := g.now()
+	parked := 0
+	var eligible []*IngressReceipt
 	for _, rec := range pending {
+		if isCorrelationParked(rec) {
+			// Count every correlation/ambiguity park (eligible or backed-off) for
+			// the /healthz operator signal — computed in this existing scan (S7).
+			parked++
+		}
 		if !sweepEligible(rec, now, g.staleWindow) {
 			continue
 		}
+		eligible = append(eligible, rec)
+	}
+	g.companyCorrelationParked.Store(int64(parked))
+	// Per-root replay chains (S5) are driven sequentially; every other eligible
+	// receipt keeps store order and is triggered concurrently as before.
+	chains, rest := g.orderPendingForReplay(eligible)
+	for _, c := range chains {
+		g.triggerChain(c)
+	}
+	for _, rec := range rest {
 		g.triggerDelivery(rec.Origin)
+	}
+	// Terminal-ack sweep-healing (Phase 3b): a terminal receipt stranded on
+	// AckState=="eyes"/"warned" (its terminal ack was rate-limited or the process
+	// crashed between finalize and the ack commit) is healed here, within
+	// retention. The heal set rides the same SweepAndPending scan (no second
+	// full-store pass); it is applied only when acks are enabled — the default
+	// (off) pays nothing.
+	if g.visibleAcks {
+		for _, r := range healNeeded {
+			g.applyTerminalAck(r)
+		}
 	}
 	// Read-only scan of the intents dir for the /healthz operator signal:
 	// intents stuck in "posting" past their retry_deadline (a wedged Python
@@ -1007,6 +1288,12 @@ func (g *companyGateway) sweepOnce() {
 // UpdatedAt is reclaimed immediately.
 func sweepEligible(r *IngressReceipt, now time.Time, window time.Duration) bool {
 	if isTerminalStatus(r.Status) {
+		return false
+	}
+	// S7 backoff gate: a correlation park scheduled for a future RecoveryNextAt
+	// is not yet due (an adapter restart neither bypasses the backoff nor bumps
+	// the attempt count — recoverPending consults recoveryDue too).
+	if !recoveryDue(r, now) {
 		return false
 	}
 	if r.Status != ingressStatusRouting {
@@ -1054,13 +1341,14 @@ func (g *companyGateway) healthzDetail() string {
 		storeErr = *p
 	}
 	return fmt.Sprintf(
-		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_stale_posting_intents=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\n",
+		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\n",
 		g.barrier.Load(),
 		storeReady,
 		storeErr,
 		writeFailures,
 		g.deliveryFailures.Load(),
 		g.stalePostingIntents.Load(),
+		g.companyCorrelationParked.Load(),
 		g.dirStore.Snapshot() != nil,
 		g.bindStore.Snapshot() != nil,
 	)
