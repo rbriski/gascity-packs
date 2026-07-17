@@ -237,10 +237,13 @@ receipt, not the emoji, is authoritative.
 Startup recovery is a barrier scoped to the company path: legacy routes,
 `/healthz`, interactions, and the internal publish listener serve
 immediately; company-room events receive HTTP 503 (retryable) until one
-synchronous recovery pass — posting/delegation intents first, then pending
-ingress receipts — succeeds. `/healthz` reports barrier state. The
-periodic sweep starts only after one full success and waits one interval
-before its first scan.
+synchronous scan of pending ingress receipts succeeds. Posting-intent
+recovery is deliberately not part of the adapter barrier: outbound
+intents are owned by the CLI side and reconciled lazily on every company
+verb invocation (against the receipt store, never by reposting), with
+stale intents surfaced on `/healthz` as the operator signal. `/healthz`
+reports barrier state. The periodic sweep starts only after one full
+success and waits one interval before its first scan.
 
 Receipt states are pack-native (`received`, `routing`, terminal
 `delivered` / `no_delivery` / `failed`, with parked-pending as a reason on
@@ -345,6 +348,7 @@ gc slack import-company-directory --file <rooms.toml>
 gc slack bind-company-agent --room <name> --agent <name> --session <name>
 gc slack peers [--room <name>]
 gc slack delegate --to <agent> --body-file <path>
+gc slack delegate --cancel --to <agent>
 ```
 
 `import-company-directory` validates and normalizes the TOML, verifies
@@ -372,15 +376,26 @@ Metadata is a correlation breadcrumb only — workspace-visible and mutable;
 the durable record remains authoritative and must also match responder,
 workspace, channel, thread root, and recorded Slack `ts`.
 
-On a peer delegation, `gc slack reply-current` posts the result as a
-threaded reply to the delegation message, mentioning only the recorded
-sender. On a peer result, the requester is directed back to the verified
-human root without mentioning ambient or prior peer agents. Results match a
-durable outbound delegation record and the expected responder; an unmatched
-reply is never an implicitly trusted result — potentially in-flight
-references are parked for recovery, identifiable replies to the switchboard
-itself are rejected, and other unmatched replies remain ordinary peer
-input.
+On a peer delegation, `gc slack reply-current` posts the result into the
+same human-root thread, mentioning only the recorded requester. Slack has
+no nested replies, so a result cannot reference the delegation message
+directly; correlation is by durable record. A claim requires the full
+peer trust checklist plus: the message is in thread `thread_root_ts` and
+authored by the expected responder; its native mentions include the
+recorded requester; and its result metadata matches the record's nonce
+and delegation `ts` — the metadata gate is load-bearing for claim
+admission (a clarifying question or hand-typed post from the responder
+delivers as ordinary peer input and consumes nothing), while authorship
+remains the trust anchor, so metadata alone can never claim. `delegate`
+enforces at most one pending delegation per `(team, channel,
+thread_root_ts, responder, requester)` under a cross-process lock, and
+`gc slack delegate --cancel` recovers a wedged tuple without waiting out
+the TTL. On a peer result, the requester is directed back to the
+verified human root without mentioning ambient or prior peer agents. An
+unmatched reply is never an implicitly trusted result — potentially
+in-flight references are parked for recovery, identifiable replies to
+the switchboard itself are rejected, and other unmatched replies remain
+ordinary peer input.
 
 Multi-specialist synthesis keeps the Discord contract: the requester issues
 every intended sibling delegation before waiting; result claims for the
@@ -453,8 +468,10 @@ the final phase, after room parity.
 - Bot messages without a native target mention never ambient-wake agents;
   unknown bots, spoofed textual mentions, wrong rooms, unbound targets,
   replays, and ambiguous identities produce no delivery.
-- Requests, results, and delivery failures remain visible in the company
-  room. DMs never substitute for room delivery of delegations or results.
+- Requests, results, and delivery failures remain visible in the human
+  root's thread in the company room (`reply_broadcast` is never set, so
+  they do not appear in the channel timeline outside the thread). DMs
+  never substitute for room delivery of delegations or results.
 - The switchboard uses HTTP Events API delivery (the existing public
   endpoint); Socket Mode is not built for this scope.
 

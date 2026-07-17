@@ -393,44 +393,328 @@ mocked).
 ## Phase 2a — agent identity app provisioning
 
 Manifest template for agent identity apps (`manifest/agent-app.json` +
-README): bot user, `chat:write`, `app_home.messages_tab_enabled: true`,
-`messages_tab_read_only_enabled: false`, interactivity off, **no event
-subscriptions** (the DM phase adds `message.im` + `im:history`). Operator
-steps documented: create/install per agent, harvest `app_id` +
+README section): bot user, `chat:write`, `app_home.messages_tab_enabled:
+true`, `messages_tab_read_only_enabled: false`, interactivity off, **no
+event subscriptions** (the DM phase adds `message.im` + `im:history`).
+Switchboard manifest (`manifest/app.json`) gains `channels:read`,
+`groups:read` (membership checks) and `users:read` (`bots.info` author
+resolution) — scope changes require reinstall, called out in the runbook.
+Operator steps documented: create/install per agent, harvest `app_id` +
 `bot_user_id` into the directory TOML, register each signing secret with
-the adapter (existing `import-app` flow), drop each bot token into
-`secrets/bot-token-<agent>.txt` (0600/0700), invite each member bot to its
-rooms. Switchboard manifest gains `channels:read`, `groups:read`
-(membership checks, Phase 1) and `users:read` (`bots.info` author
-resolution, Phase 2) — scope changes require reinstall, called out in the
-runbook.
+the adapter (existing `import-app` flow), drop each bot token into the
+company secrets dir (the token loader refuses files not 0600, dirs not
+0700, and symlinks — validation, not trust), invite each member bot to
+its rooms. These apps are internal, never Marketplace-distributed
+(distribution would demote `conversations.*` rate tiers).
 
 ## Phase 2 — identities, delegation, results, hydration
 
-- Token selection by directory agent name; delegation/result posts use the
-  acting agent's token (real identity); `chat:write.customize` untouched
-  for legacy rooms.
-- Durable posting intents before any `chat.postMessage`
-  (`prepared → posting → published`, CAS attempts, bounded retries
-  honoring `Retry-After`, explicit HTTP timeout), content-addressed nonce
-  in `metadata.event_payload`; crash reconciliation via
-  `conversations.replies` **with `include_all_metadata=true`**;
-  reconciliation that cannot find the nonce parks the intent (fail-closed
-  test: absent metadata → park, never repost).
-- Composition contract enforced and tested: company posts are top-level
-  `text` only — no `blocks`, no `link_names`, default `parse` — with
-  entity-escaped bodies; test that `@channel @here #general <!channel>`
-  in a body produces no live notification entities.
-- Author resolution: cached `bot_id` → `bots.info` → `user_id` mapping
-  against the directory (requires `users:read`); `event.user`
-  corroboration when present; ambiguity fails closed. Turns on the
-  bot-mention wake leg in `ComputeWakeSet` (AuthorCompanyBot resolution).
-- `gc slack delegate` / `reply-current` result semantics; delegation
-  records keyed by posted `(channel, ts)` + expected responder; peer trust
-  checklist; `slack_peer_delegation` / `slack_peer_result` envelopes with
-  `peer_authority` / `root_provenance`; bounded room-excerpt hydration.
-- Pilot step: capture one real agent-app post event and assert the mention
-  extractor and author classifier match its wire shape.
+Ownership split (mirrors the Discord reference): **Python owns company
+outbound** — intents, per-agent token files, `chat.postMessage`,
+delegation-record creation, lazy recovery, pruning — exactly as
+`discord_chat_delegate.py` / `discord_intake_common.py` do; **Go owns
+ingress** — author resolution, trust checklist, result-claim and expiry
+transitions on delegation records, peer envelopes, hydration, the
+per-session current-turn pointer. Both sides write shared on-disk state
+under the adapter state root; every schema below is the cross-language
+contract, validated fail-closed on both sides, serialized by the lock
+contract below.
+
+### Shared state contract (pins 2b and 2c)
+
+Paths (env override > `<GC_CITY_PATH>/.gc/slack/<leaf>` >
+`/tmp/gc-slack-adapter/<leaf>`, matching Phase 1 conventions):
+- `SLACK_COMPANY_SECRETS_DIR` > `secrets/` — token files
+  `bot-token-<agent>.txt`, 0600 in 0700 dir, one per directory agent.
+- `SLACK_COMPANY_INTENTS_DIR` > `company-delegation-intents/` —
+  `<nonce>.json`, written by Python only.
+- `SLACK_COMPANY_DELEGATIONS_DIR` > `company-delegations/` — created
+  once by Python at publish (O_EXCL/link create-once; `EEXIST` = adopt
+  the existing record, never overwrite); status transitions
+  (claim/expiry) written by Go, expiry also by Python's lazy pruner.
+- `SLACK_COMPANY_TURNS_DIR` > `company-current-turn/` —
+  `<session>.json`, written by Go only (the delivery worker), read by
+  the Python verbs.
+- `SLACK_COMPANY_LOCKS_DIR` > `locks/` — advisory lock files (below).
+
+**Lock contract.** All cross-process critical sections use an advisory
+`flock(LOCK_EX)` (`fcntl.flock` in Python, `syscall.Flock` in Go) on
+`locks/<label>-<sha256hex(NUL-joined key fields)[:16]>.lock`. Two locks
+exist in Phase 2: the **delegation-tuple lock** (label `dtuple`, key =
+team, channel, thread_root_ts, responder_bot_user_id,
+requester_bot_user_id), held by `delegate` across its
+scan → intent-create → post → record-materialize section, by `--cancel`,
+by Go's claim transition, and by any expiry rewrite; and the
+**intent lock** (label `intent`, key = nonce) for attempts-CAS updates.
+Generation checks remain on top of the locks (defense in depth), but
+the locks are what make cross-process read-modify-write sound.
+
+**Filename sanitizer (byte-for-byte cross-language spec).** For each
+component: bytes outside `[A-Za-z0-9._-]`, a leading `.`, the string
+`..`, or length > 64 cause the component to be replaced by
+`h<sha256hex(component)[:16]>`; otherwise the component passes through.
+Delegation filename: `dg-<san(team)>-<san(channel)>-<san(ts)>-`
+`<sha256hex(team NUL channel NUL ts)[:12]>.json` (digest suffix always
+present, mirroring Go `receiptID`). 2d ships golden filename fixtures
+both suites must reproduce exactly.
+
+**Root derivation (normative).** From the triggering receipt's stored
+event: `human_root_ts := Event.thread_ts if non-empty else Event.ts`.
+`thread_ts` on `chat.postMessage` must always be a parent — Slack
+documents replying to a reply as invalid. 2c's root verifier grants
+`root_provenance: human_root_verified` only when the fetched root is a
+parent (`thread_ts` absent or equal to `ts`) AND its author is a non-bot
+human; otherwise `root_unverified`.
+
+`company-delegation-intents/<nonce>.json` — created BEFORE any provider
+POST. Nonce = `gcs-` + first 20 hex of sha256 over the canonical
+anticipated record: (source app_id, source bot_user_id, target agent,
+target bot_user_id, team, channel, human_root_ts, body_sha256,
+retry_seq) — `retry_seq` is the count of existing intent files for the
+same tuple regardless of status, making crash retries of one logical
+delegation idempotent (same seq) while successive logical delegations
+mint fresh nonces:
+
+```json
+{
+  "schema_version": 1,
+  "nonce": "gcs-<20hex>",
+  "retry_seq": 0,
+  "status": "prepared",
+  "attempts": 0, "max_attempts": 3,
+  "created_at": "<RFC3339>", "updated_at": "<RFC3339>",
+  "retry_deadline": "<RFC3339: first attempt + 120s>",
+  "ttl_seconds": 86400,
+  "source_agent": "ollie", "source_app_id": "A…", "source_bot_user_id": "U…",
+  "target_agent": "riley", "target_bot_user_id": "U…",
+  "team_id": "T…", "channel_id": "C…", "room": "orchestrator-team",
+  "human_root_ts": "1700000000.000100",
+  "requester_session": "ollie-main",
+  "body_sha256": "<hex>",
+  "posted_ts": ""
+}
+```
+
+Statuses: `prepared → posting → published | failed | expired`.
+Attempts updates under the intent lock. **Recovery is lazy and
+Python-owned** (accepted deviation from the Phase 1 barrier-ordering
+sentence, which is amended): every company verb invocation first runs a
+bounded reconciliation pass over `posting` intents. Reconciliation does
+NOT call the Slack API: the delegation post, arriving back through the
+switchboard, is itself admitted as a bot-message receipt whose stored
+raw event embeds the posted metadata — reconciliation scans the
+receipts dir (read-only) for a bot-authored receipt in (team, channel)
+whose `metadata.event_payload.nonce` equals the intent nonce; found →
+adopt its origin `ts` as `posted_ts`, mark `published`, materialize the
+delegation record if absent; not found and past `retry_deadline` → the
+intent stays parked (`posting`) — never repost on ambiguity
+(`chat.postMessage` is not idempotent). The Go sweep surfaces a count of
+stale `posting` intents (age > retry_deadline) on `/healthz` as the
+operator signal. Existing-nonce handling at `delegate` time: `posting` →
+resume reconciliation; `published` with its delegation record still
+`pending` → the one-pending error below; anything terminal → `retry_seq`
+has already advanced, fresh nonce.
+
+`company-delegations/<key>.json` (key per the sanitizer spec) —
+materialized before the CLI reports success:
+
+```json
+{
+  "schema_version": 1,
+  "generation": 1,
+  "nonce": "gcs-<20hex>",
+  "room": "orchestrator-team",
+  "team_id": "T…", "channel_id": "C…", "ts": "<posted_ts>",
+  "thread_root_ts": "<human_root_ts>",
+  "requester_agent": "ollie", "requester_bot_user_id": "U…",
+  "requester_session": "ollie-main",
+  "expected_responder_agent": "riley",
+  "expected_responder_bot_user_id": "U…",
+  "created_at": "<RFC3339>", "ttl_seconds": 86400,
+  "status": "pending",
+  "result_ts": "", "result_claimed_at": ""
+}
+```
+
+**Result correlation (normative; Slack deviation from Discord).** Slack
+has no nested replies — delegation and result share the human root's
+thread. A claim requires ALL of: (1) the message passes the five-part
+peer trust checklist; (2) it is in thread `thread_root_ts`, authored by
+`expected_responder_bot_user_id`; (3) its native mention set includes
+`requester_bot_user_id`; (4) its `metadata.event_type ==
+"gc_delegation_result"` with `event_payload.nonce == record.nonce` and
+`event_payload.delegation_ts == record.ts` (the breadcrumb is
+load-bearing for claim ADMISSION — responder chatter, clarifying
+questions, and hand-typed posts deliver as ordinary peer input without
+consuming the claim; authorship remains the Slack-authoritative trust
+anchor, so metadata alone can never claim); (5) route window
+`-300s <= now - created_at <= ttl`. `delegate` enforces **at most one
+pending delegation per (team, channel, thread_root_ts, responder,
+requester)** under the tuple lock; TTL-expired `pending` records count
+as not-pending (and are rewritten `expired` under the lock). Go's claim
+(`pending → result_claimed`, under the tuple lock, generation-checked)
+is replay-idempotent; >1 pending record matching one claim key parks
+the receipt fail-closed (`ambiguous_pending_delegations`). A wedged
+flow is recoverable without the TTL: `gc slack delegate --cancel --to
+<agent>` transitions the caller's own pending record to `expired` under
+the lock.
+
+**Pruning (lazy, Python-owned).** Every company verb invocation prunes:
+terminal intents and terminal/expired delegation records older than 7
+days (retention floor 24h, matching receipts). `retry_seq` counts files
+present; pruned files cannot collide because intent creation is O_EXCL
+on a fresh nonce.
+
+`company-current-turn/<session>.json` — written atomically by the Go
+delivery worker on EVERY company wake, before the gc session POST; the
+deterministic context source for the Python verbs (no receipt scanning):
+
+```json
+{
+  "schema_version": 1,
+  "session": "ollie-main",
+  "receipt_id": "in-…",
+  "team_id": "T…", "channel_id": "C…", "ts": "<origin ts>",
+  "room": "orchestrator-team",
+  "kind": "ambient | targeted | peer_delegation | peer_result",
+  "thread_root_ts": "<derived root>",
+  "agent": "ollie",
+  "delegation_key": "<delegations filename, peer turns only>",
+  "delivered_at": "<RFC3339>"
+}
+```
+
+The delivered reminder text also displays the origin `ts`, and the verbs
+accept `--origin-ts` to pin a specific turn when a newer wake has
+overwritten the pointer (mismatch without the flag is a hard error
+telling the agent to pass it).
+
+Message metadata: delegations post `metadata: {event_type:
+"gc_delegation", event_payload: {v: 1, nonce, root_ts, requester,
+target}}`; results post `metadata: {event_type: "gc_delegation_result",
+event_payload: {v: 1, nonce, delegation_ts}}`. Metadata is embedded in
+the switchboard's `message.*` events (no extra scope) and is
+workspace-visible and mutable — breadcrumbs plus claim-admission gate;
+the durable record stays authoritative. Pilot wire capture must confirm
+metadata presence on a real agent-app post event.
+
+Composition contract (both verbs): top-level `text` only — no `blocks`,
+no `link_names`, `reply_broadcast` never set, default `parse` (bare URLs
+may auto-link; harmless, no notification) — body entity-escaped (`&`,
+`<`, `>`); the service-constructed mention is the only live entity.
+Delegation text: `<@target_bot_user_id> <escaped body>` with
+`thread_ts=human_root_ts`. Result text: `<@requester_bot_user_id>
+<escaped body>` with `thread_ts=thread_root_ts`. Synthesis: escaped
+body, no live mentions, `thread_ts=thread_root_ts`. All company posts
+are therefore visible in the human root's thread (not the channel
+timeline). Retry policy on `chat.postMessage`: explicit timeout; 429
+honors `Retry-After` within `max_attempts`; definitive 4xx → intent
+`failed`; timeout/5xx → reconcile-before-repost.
+
+Identity plumbing: the session namespace is the bound session NAME,
+obtained from `GC_SESSION_NAME` (hard error if unset); the anti-spoof
+check compares it to the pointer file's `session` and the (room, agent)
+binding. `bind-company-agent` rejects binding a session already bound
+to a DIFFERENT agent in the same room, so `delegate`'s reverse
+resolution session → (room, agent) is unambiguous.
+
+### 2b — Python outbound (`scripts/slack_company_outbound.py` + verbs)
+
+New module `slack_company_outbound.py` (intents store with lock/CAS,
+token loader with permission/symlink refusal, sanitizer, escaping/
+composition, postMessage with metadata, bounded retries, receipt-based
+reconciliation, lazy pruner) + `gc slack delegate` verb (3-file
+wrapper, including `--cancel`) + `reply-current` gaining
+company-context awareness: it reads `company-current-turn/<session>`;
+`kind: peer_delegation` → post the result (acting agent's own token,
+metadata gate attached) and report `posted_ts` only on success; `kind:
+peer_result` → post the synthesis to the human root with no live
+mentions; ambient/targeted → unchanged legacy behavior for non-company
+context, company rooms answer into the root thread. Tests: hermetic
+(mocked Slack API), covering intent lifecycle incl. receipt-based
+reconciliation (nonce receipt found → adopt + materialize; absent →
+parked, never reposted), retry_seq nonce freshness after terminal
+intents, one-pending-per-tuple under two concurrent delegates (real
+flock race test), `--cancel`, composition/escaping (`@channel @here
+#general <!channel>` inert; only the target mention live), root
+derivation from threaded and unthreaded triggers, token
+selection/permission refusal, Retry-After honored, definitive 4xx →
+failed, record create-once (EEXIST adopts), pointer-file consumption +
+`--origin-ts` mismatch error, pruning.
+
+### 2c — Go ingress (author resolution, trust, correlation, envelopes)
+
+- `company_authors.go`: cached `bot_id → bots.info → user_id` resolver
+  (switchboard token, `users:read`), TTL cache + singleflight.
+  Outcomes are split: definitive `bot_not_found`/`deleted` → unknown
+  bot (terminal for that message); transient (ratelimited — honor
+  `Retry-After` — timeout, 5xx, network) → park the receipt
+  non-terminally (`author_resolution_pending`) for sweep retry, never
+  a terminal `no_delivery`. Corroboration: the event's own
+  `app_id`/`bot_profile` fields pre-check, `bots.info`'s `app_id` must
+  match the directory agent's `app_id`, `event.user` must match when
+  present; any mismatch → unknown bot.
+- `company_routing.go`: `CompanyMessage` gains `ResolvedBotUserID
+  string` (populated by the delivery worker; keeps ComputeWakeSet
+  pure) and `Metadata json.RawMessage`; `slackMessageEvent` gains
+  `Metadata json.RawMessage`. The bot-authored mention-wake leg turns
+  on: AuthorCompanyBot (resolved, room member) with a native mention of
+  an eligible member routes per the table. Reason-code taxonomy
+  replacing `company_bot_phase2`: `company_bot_no_mention`,
+  `company_bot_not_member`, `unknown_bot`, `company_self` (existing),
+  plus routing-stage `mentioned_not_eligible` reasons — Phase 1 tests
+  pinning `company_bot_phase2` are updated in the same change.
+- `company_peer.go`: five-condition trust checklist with
+  machine-readable failure reasons; result-claim per the shared
+  contract (tuple lock + generation, metadata gate, requester-mention
+  check, replay-idempotent, `ambiguous_pending_delegations` parking);
+  plausible in-flight tuple (a `posting` intent exists) → park
+  `correlation_pending`; unmatched identifiable replies to the
+  switchboard rejected; everything else = ordinary peer delegation
+  processing.
+- `company_delivery.go`: writes `company-current-turn/<session>.json`
+  before each gc POST; envelope stays a single reminder string (gc API
+  unchanged) rendered from a pinned template with sections for kind,
+  `peer_authority: peer_only`, `root_provenance`, verified human root,
+  and the bounded excerpt — every interpolated value (root JSON fields,
+  each excerpt line) passes `neutralizeMarkupBoundaries`.
+  `TargetDelivery.Kind` grows `peer_delegation`/`peer_result` (Phase 1
+  fixtures updated). **Hydration is frozen**: the verified root and the
+  excerpt (`conversations.history`/`replies`: max 8 messages, 12KiB
+  total, 1024 chars each; failure → `context_status:
+  context_unavailable`, never broader routing) are fetched once at
+  first delivery and stored in a new receipt field `Hydration
+  json.RawMessage`, so redrives re-render identical bytes under the
+  same Idempotency-Key. Sweep gains the stale-`posting`-intent count
+  for `/healthz` (read-only scan).
+- Tests: acceptance 3 (trusted Ollie `@Riley` wakes Riley exactly once
+  through the full checklist), 5 (Riley's metadata-gated threaded
+  result wakes only Ollie and claims the record; a clarifying question
+  without result metadata delivers as peer input and claims nothing;
+  replay claims nothing twice), 7 (dormant mentioned agent gets
+  current message + verified root + bounded excerpt, no duplicate;
+  threaded human trigger derives the parent root), remaining rule-4
+  legs (unknown bot, non-member author, self, unresolvable
+  `bot_message`, mention of non-member, expired/claimed/ambiguous
+  results fall to peer input or park), transient `bots.info` failure
+  parks then delivers exactly once, hydration-failure marker, excerpt
+  bounds, frozen-hydration byte-identity across redrives,
+  pointer-file write ordering.
+
+### 2d — cross-language wire tests
+
+`slack-full/tests/fixtures/company/` golden files: intent record,
+delegation record, current-turn pointer, and sanitizer filename
+fixtures (hostile/long/dotted components). The Go and Python suites
+each parse, validate, and re-derive the same bytes. A Python test
+writes a delegation record via the real code path; a Go test claims it
+via the real code path against the same tempdir layout (lock + O_EXCL
+interop proven end-to-end); a Go test writes a pointer file the Python
+verb path consumes.
+
+Pilot step: capture one real agent-app post event and assert the
+mention extractor, author classifier, AND embedded metadata match the
+wire shape the contract assumes.
 
 ## Phase 3 — synthesis + redrive parity
 
