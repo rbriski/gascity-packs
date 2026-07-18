@@ -76,6 +76,13 @@ const (
 	ingressStatusFailed     = "failed"
 )
 
+// Receipt-level conversation kinds (IngressReceipt.Kind). Empty is the
+// room / legacy default carried by every Phase 1-3 receipt; "dm" marks a
+// per-agent DM receipt (Phase 4). The same "dm" literal is the wake kind on
+// the single DM target and the current-turn pointer kind, so one value spans
+// receipt, target, and pointer.
+const receiptKindDM = "dm"
+
 // ingressRetentionFloor is the minimum accepted Sweep retention. Terminal
 // receipts are the dedup memory for Slack's Delayed Events redelivery
 // horizon (hourly retries for 24h), so retention below 24h is rejected —
@@ -136,14 +143,24 @@ type TargetDelivery struct {
 // inner Slack event so async routing and post-crash replay never depend
 // on re-fetching from Slack.
 type IngressReceipt struct {
-	ID          string        `json:"id"` // "in-" + sanitized origin
-	Generation  int64         `json:"generation"`
-	Origin      ReceiptOrigin `json:"origin"`
-	EventID     string        `json:"event_id"`
-	APIAppID    string        `json:"api_app_id"`
-	RetryNum    int           `json:"retry_num"`
-	RetryReason string        `json:"retry_reason,omitempty"`
-	ReceivedAt  time.Time     `json:"received_at"`
+	ID         string        `json:"id"` // "in-" + sanitized origin
+	Generation int64         `json:"generation"`
+	Origin     ReceiptOrigin `json:"origin"`
+	EventID    string        `json:"event_id"`
+	APIAppID   string        `json:"api_app_id"`
+	// Kind is the receipt-level conversation kind: "" (room / legacy,
+	// Phases 1-3) or "dm" (per-agent DM, Phase 4). Distinct from
+	// TargetDelivery.Kind (the wake kind). Empty on every pre-Phase-4
+	// receipt, so the field is omitempty for byte-compatible room receipts.
+	Kind string `json:"kind,omitempty"`
+	// OwnerAppID is the delivering app's api_app_id for a DM receipt — the
+	// single admission owner, joined against company_directory.json
+	// agents[].app_id to derive the owner agent at routing time. Empty for
+	// room receipts (the switchboard is the implicit owner there).
+	OwnerAppID  string    `json:"owner_app_id,omitempty"`
+	RetryNum    int       `json:"retry_num"`
+	RetryReason string    `json:"retry_reason,omitempty"`
+	ReceivedAt  time.Time `json:"received_at"`
 	// UpdatedAt is refreshed on Admit and on every Update. The delivery
 	// sweep uses it as the claim timestamp for the stale-reclaim window: a
 	// "routing" receipt whose UpdatedAt is fresher than the window is a live
@@ -532,9 +549,9 @@ func (s *IngressReceiptStore) Sweep(retention time.Duration) (removed int, err e
 // posted and only the ⚠️ reaction remains, so healing re-applies the reaction
 // WITHOUT re-posting the reply. healNeeded is always collected (cheap on the
 // already-decoded receipt); the caller applies it only when acks are enabled.
-func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending, healNeeded []*IngressReceipt, removed int, err error) {
+func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending, healNeeded []*IngressReceipt, removed int, dmCounts dmReceiptStatusCounts, err error) {
 	if retention < ingressRetentionFloor {
-		return nil, nil, 0, fmt.Errorf("ingress receipts: retention %s below %s floor", retention, ingressRetentionFloor)
+		return nil, nil, 0, dmCounts, fmt.Errorf("ingress receipts: retention %s below %s floor", retention, ingressRetentionFloor)
 	}
 	cutoff := time.Now().Add(-retention)
 
@@ -543,7 +560,7 @@ func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending,
 
 	paths, err := s.receiptFiles()
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, dmCounts, err
 	}
 	removedAny := false
 	for _, p := range paths {
@@ -557,7 +574,8 @@ func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending,
 		}
 		if !isTerminalStatus(r.Status) {
 			pending = append(pending, r)
-			continue // never sweep in-flight work
+			dmCounts.tally(r) // Phase 4 /healthz DM gauge, folded into this scan
+			continue          // never sweep in-flight work
 		}
 		if !r.ReceivedAt.Before(cutoff) {
 			// Terminal but within retention: not swept. Collect a stranded
@@ -566,6 +584,7 @@ func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending,
 			if r.AckState == ackStateEyes || r.AckState == ackStateWarned {
 				healNeeded = append(healNeeded, r)
 			}
+			dmCounts.tally(r) // survives the sweep → counted on the gauge
 			continue
 		}
 		if derr := os.Remove(p); derr != nil {
@@ -589,7 +608,7 @@ func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending,
 		}
 		return pending[i].Origin.TS < pending[j].Origin.TS
 	})
-	return pending, healNeeded, removed, nil
+	return pending, healNeeded, removed, dmCounts, nil
 }
 
 // WriteFailures returns the monotonic count of failed Admit/Update
@@ -597,6 +616,30 @@ func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending,
 // /healthz detail as the receipt-store outage paging hook.
 func (s *IngressReceiptStore) WriteFailures() uint64 {
 	return s.writeFailures.Load()
+}
+
+// tally folds one DM receipt (Kind == "dm") into the /healthz company_dm_receipts
+// gauge by status. Non-DM receipts are ignored. It rides the single
+// SweepAndPending scan (which already decodes every receipt) so the gauge costs
+// no extra I/O and no extra time under the store mutex the HTTP admission hot
+// path contends for (m8: the former DMReceiptStatusCounts second full scan is
+// gone).
+func (c *dmReceiptStatusCounts) tally(r *IngressReceipt) {
+	if r == nil || r.Kind != receiptKindDM {
+		return
+	}
+	switch r.Status {
+	case ingressStatusReceived:
+		c.Received++
+	case ingressStatusRouting:
+		c.Routing++
+	case ingressStatusDelivered:
+		c.Delivered++
+	case ingressStatusNoDelivery:
+		c.NoDelivery++
+	case ingressStatusFailed:
+		c.Failed++
+	}
 }
 
 // pathForID returns the on-disk receipt path for a receipt id.

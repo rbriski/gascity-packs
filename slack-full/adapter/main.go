@@ -276,7 +276,14 @@ type config struct {
 	accountID           string
 	slackBotToken       string
 	slackSigningKey     string
-	registerOnStart     bool
+	// slackAppID is the switchboard app's own Slack api_app_id (SLACK_APP_ID).
+	// When set, an event_callback whose api_app_id equals it verifies against
+	// the env signing secret ONLY (Phase 4 verification rule 2, the rooms path)
+	// — never the legacy trial set and never a registered agent record that
+	// happens to share the id. Empty preserves the pre-Phase-4 behavior (the
+	// switchboard's events fall through to the legacy lookupSigningSecrets path).
+	slackAppID      string
+	registerOnStart bool
 	// identityStorePath is the JSON file backing the per-session Slack
 	// identity registry (chat:write.customize username/avatar overrides).
 	// Persisted so adapter restarts don't strip identity from running
@@ -459,6 +466,19 @@ type config struct {
 	companyDirectoryPath string
 	companyBindingsPath  string
 	companyIngressDir    string
+	// companyDMBindingsPath / companyAgentAppsPath are the Phase 4 per-agent
+	// DM registries (dm_bindings.json, agent_apps.json), resolved exactly
+	// like the two Phase 1 registries above (env override >
+	// <GC_CITY_PATH>/.gc/slack/<file> > /tmp default). Sourced from
+	// SLACK_COMPANY_DM_BINDINGS_PATH and SLACK_COMPANY_AGENT_APPS_PATH.
+	companyDMBindingsPath string
+	companyAgentAppsPath  string
+	// companyVerifySessions gates the advisory session-existence guard
+	// (Phase 4): when set, delivery checks GET /v0/city/{city}/session/{id}
+	// before the first attempt per (city, session). Advisory only — a guard
+	// error or a 404/409 never terminalizes; it just leaves the target
+	// pending for the sweep. Sourced from SLACK_COMPANY_VERIFY_SESSIONS.
+	companyVerifySessions bool
 	// Phase 2 shared-state directories (secrets/intents/delegations/turns/
 	// locks). Resolved exactly like the Python side: env override >
 	// <GC_CITY_PATH>/.gc/slack/<leaf> > /tmp/gc-slack-adapter/<leaf>. The Go
@@ -534,6 +554,7 @@ func loadConfigFromEnv(getenv func(string) string) (config, error) {
 		accountID:            getenv("SLACK_WORKSPACE_ID"),
 		slackBotToken:        getenv("SLACK_BOT_TOKEN"),
 		slackSigningKey:      getenv("SLACK_SIGNING_SECRET"),
+		slackAppID:           getenv("SLACK_APP_ID"),
 		registerOnStart:      envOrFn("REGISTER_ON_START", "true") == "true",
 		identityStorePath:    envOrFn("IDENTITY_STORE_PATH", "/tmp/gc-slack-adapter/identities.json"),
 		handlePrefix:         envOrFn("HANDLE_PREFIX", "@"),
@@ -584,14 +605,20 @@ func loadConfigFromEnv(getenv func(string) string) (config, error) {
 	// MUST match scripts/slack_company_directory.py file for file.
 	defaultCompanyDirectoryPath := "/tmp/gc-slack-adapter/company_directory.json"
 	defaultCompanyBindingsPath := "/tmp/gc-slack-adapter/company_bindings.json"
+	defaultCompanyDMBindingsPath := "/tmp/gc-slack-adapter/dm_bindings.json"
+	defaultCompanyAgentAppsPath := "/tmp/gc-slack-adapter/agent_apps.json"
 	defaultCompanyIngressDir := "/tmp/gc-slack-adapter/chat-ingress"
 	if cfg.cityPath != "" {
 		defaultCompanyDirectoryPath = filepath.Join(cfg.cityPath, ".gc", "slack", "company_directory.json")
 		defaultCompanyBindingsPath = filepath.Join(cfg.cityPath, ".gc", "slack", "company_bindings.json")
+		defaultCompanyDMBindingsPath = filepath.Join(cfg.cityPath, ".gc", "slack", "dm_bindings.json")
+		defaultCompanyAgentAppsPath = filepath.Join(cfg.cityPath, ".gc", "slack", "agent_apps.json")
 		defaultCompanyIngressDir = filepath.Join(cfg.cityPath, ".gc", "slack", "chat-ingress")
 	}
 	cfg.companyDirectoryPath = envOrFn("SLACK_COMPANY_DIRECTORY_PATH", defaultCompanyDirectoryPath)
 	cfg.companyBindingsPath = envOrFn("SLACK_COMPANY_BINDINGS_PATH", defaultCompanyBindingsPath)
+	cfg.companyDMBindingsPath = envOrFn("SLACK_COMPANY_DM_BINDINGS_PATH", defaultCompanyDMBindingsPath)
+	cfg.companyAgentAppsPath = envOrFn("SLACK_COMPANY_AGENT_APPS_PATH", defaultCompanyAgentAppsPath)
 	cfg.companyIngressDir = envOrFn("SLACK_COMPANY_INGRESS_DIR", defaultCompanyIngressDir)
 	cfg.companySelfBotUserID = getenv("SLACK_SWITCHBOARD_BOT_USER_ID")
 	if raw := getenv("SLACK_COMPANY_CITY_APIS"); raw != "" {
@@ -614,6 +641,11 @@ func loadConfigFromEnv(getenv func(string) string) (config, error) {
 	// than "0" (the same truthiness the rest of the company config uses).
 	if v := strings.TrimSpace(getenv("SLACK_COMPANY_VISIBLE_ACKS")); v != "" && v != "0" {
 		cfg.companyVisibleAcks = true
+	}
+	// Advisory session-existence guard (Phase 4): same truthiness convention.
+	// Default off — the guard must never reduce availability below flag-off.
+	if v := strings.TrimSpace(getenv("SLACK_COMPANY_VERIFY_SESSIONS")); v != "" && v != "0" {
+		cfg.companyVerifySessions = true
 	}
 
 	// Phase 2 shared-state directories. Same resolution precedence as the
@@ -1170,9 +1202,10 @@ func main() {
 	}
 	cfg.companyGateway = companyGW
 	companyHealthStatus.Store(companyGW)
-	log.Printf("company gateway: directory=%s bindings=%s ingress=%s self_bot=%q dir_loaded=%v bindings_loaded=%v store_ready=%v",
-		cfg.companyDirectoryPath, cfg.companyBindingsPath, cfg.companyIngressDir, cfg.companySelfBotUserID,
-		companyDirStore.Snapshot() != nil, companyBindStore.Snapshot() != nil, receipts != nil)
+	log.Printf("company gateway: directory=%s bindings=%s dm_bindings=%s agent_apps=%s ingress=%s self_bot=%q dir_loaded=%v bindings_loaded=%v dm_bindings_loaded=%v registered_agent_apps=%d verify_sessions=%v store_ready=%v",
+		cfg.companyDirectoryPath, cfg.companyBindingsPath, cfg.companyDMBindingsPath, cfg.companyAgentAppsPath, cfg.companyIngressDir, cfg.companySelfBotUserID,
+		companyDirStore.Snapshot() != nil, companyBindStore.Snapshot() != nil,
+		companyGW.dmBindStore.Snapshot() != nil, companyGW.agentApps.Snapshot().Len(), cfg.companyVerifySessions, receipts != nil)
 
 	// Public mux: only /slack/events + /slack/interactions
 	// (HMAC-verified) and /healthz. Bound to 0.0.0.0 by default so
@@ -2094,19 +2127,23 @@ func handleSlackEvents(cfg config, aliasReg *handleAliasRegistry, threadReg *thr
 			http.Error(w, "read body", http.StatusBadRequest)
 			return
 		}
-		// Resolve the candidate signing secrets BEFORE HMAC. Body is
-		// unsigned bytes by definition until verified — that's the
-		// whole point of the signature — so we parse only the small
-		// team_id field to choose which key(s) to trial-verify with.
-		// Standard Slack multi-tenant pattern. No team_id in body
-		// (e.g. malformed) falls through to env fallback inside
-		// lookupSigningSecrets.
-		teamID := parseTeamIDFromEventsBody(body)
-		secrets := lookupSigningSecrets(cfg.appsRegistry, cfg.slackSigningKey, teamID)
+		// Resolve the signing secret(s) BEFORE HMAC. Body is unsigned bytes by
+		// definition until verified, so we parse only the small type +
+		// api_app_id + team_id head to pick the Phase 4 verification path (env
+		// secret for the switchboard/legacy, the app's OWN secret for a
+		// registered agent app, trial for the url_verification handshake).
+		head := parseEventHead(body)
 		ts := r.Header.Get("X-Slack-Request-Timestamp")
 		sig := r.Header.Get("X-Slack-Signature")
-		if !verifySlackSignatureMulti(secrets, ts, body, sig) {
-			log.Printf("slack signature verify FAILED team_id=%q candidates=%d", clipTeamIDForLog(teamID), len(secrets))
+		// Resolve the agent-apps registration snapshot ONCE per request so the
+		// HMAC decision and the DM admission gate agree even if a SIGHUP swaps
+		// the registry between them (m7): a mid-request register/deregister can
+		// no longer route an event verified as an agent-app DM into the legacy
+		// dispatcher, nor admit a legacy-trial-verified event as an owner DM.
+		agentApps := cfg.companyGateway.agentAppsSnapshot()
+		if !verifyInboundEvent(cfg, agentApps, head, body, ts, sig) {
+			log.Printf("slack signature verify FAILED type=%q api_app_id=%q team_id=%q",
+				clipTeamIDForLog(head.Type), clipTeamIDForLog(head.APIAppID), clipTeamIDForLog(head.TeamID))
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return
 		}
@@ -2132,7 +2169,7 @@ func handleSlackEvents(cfg config, aliasReg *handleAliasRegistry, threadReg *thr
 		// other event — no gateway, no directory, non-company channel,
 		// non-message type — falls through to the legacy path below
 		// byte-for-byte.
-		if cfg.companyGateway.tryHandleEvent(w, r, env) {
+		if cfg.companyGateway.tryHandleEvent(w, r, env, agentApps) {
 			return
 		}
 
@@ -2170,6 +2207,105 @@ func parseTeamIDFromEventsBody(body []byte) string {
 		return ""
 	}
 	return head.TeamID
+}
+
+// eventHead is the minimal pre-HMAC view of a /slack/events body: the fields
+// that select the Phase 4 verification path. Parsed from unsigned bytes, so it
+// carries no trust — it only routes the request to the right secret.
+type eventHead struct {
+	Type     string `json:"type"`
+	APIAppID string `json:"api_app_id"`
+	TeamID   string `json:"team_id"`
+}
+
+// parseEventHead extracts the type / api_app_id / team_id head. Returns a zero
+// value on any decode failure; every downstream branch fails closed on the
+// zero value (no api_app_id match, empty candidate list). Body is already
+// capped at 1 MiB upstream.
+func parseEventHead(body []byte) eventHead {
+	var h eventHead
+	_ = json.Unmarshal(body, &h)
+	return h
+}
+
+// verifyInboundEvent implements the Phase 4 verification order (event POSTs).
+// Fail-closed at every step; the switchboard/legacy path stays byte-for-byte
+// the existing rooms behavior (lookupSigningSecrets). agentApps is the caller's
+// once-per-request registration snapshot (m7): the SAME value must be handed to
+// tryHandleEvent so verification and admission never disagree across a SIGHUP.
+//
+//  1. url_verification: no api_app_id in the handshake — trial-HMAC across the
+//     env secret (+ any apps.json secret) and ALL registered agent secrets;
+//     echo on any match. Side-effect-free, so a trial is acceptable here and
+//     ONLY here.
+//  2. event_callback, api_app_id == SLACK_APP_ID (the switchboard's own app):
+//     verify against the env signing secret ONLY (the rooms path, unchanged).
+//     This branch is authoritative and takes precedence over any registered
+//     agent record that happens to carry the same api_app_id — the switchboard
+//     identity is pinned to the env secret, never a file-registered one. Empty
+//     SLACK_APP_ID disables the pin and lets the switchboard fall to rule 4.
+//  3. event_callback, api_app_id == a registered agent app: verify against
+//     exactly that record's secret. A mismatch — including a signature valid
+//     under a DIFFERENT registered app's secret — is a strict-bind reject
+//     (401, counter company_dm_sig_reject). The bind check is authoritative;
+//     no fallback (rule 12 spoof defense).
+//  4. otherwise (an unknown api_app_id): the legacy lookupSigningSecrets path,
+//     UNCHANGED — except a legacy trial that matches a secret which is ALSO a
+//     registered agent secret is rejected, because registration opts an app
+//     into strict binding permanently.
+func verifyInboundEvent(cfg config, agentApps *AgentApps, head eventHead, body []byte, ts, sig string) bool {
+	if head.Type == "url_verification" {
+		candidates := lookupSigningSecrets(cfg.appsRegistry, cfg.slackSigningKey, head.TeamID)
+		candidates = append(candidates, agentApps.SigningSecrets()...)
+		return verifySlackSignatureMulti(candidates, ts, body, sig)
+	}
+	// Rule 2: the switchboard's own api_app_id pins to the env secret only. It
+	// is checked BEFORE the registered-agent lookup so a registered record
+	// sharing SLACK_APP_ID can never shadow the env-secret path (spec §Verify
+	// order rule 2/3 precedence). A mismatch here is a plain 401 (the rooms
+	// path), not a company_dm_sig_reject.
+	if head.Type == "event_callback" && cfg.slackAppID != "" && head.APIAppID == cfg.slackAppID {
+		return verifySlackSignature(cfg.slackSigningKey, ts, body, sig)
+	}
+	if rec, ok := agentApps.Get(head.APIAppID); ok {
+		if verifySlackSignature(rec.SigningSecret, ts, body, sig) {
+			return true
+		}
+		// Strict binding: an event claiming a registered app must verify under
+		// that app's own secret or be rejected, even if it verifies under some
+		// other registered app's secret (the cross-app spoof).
+		cfg.companyGateway.recordDMSigReject()
+		return false
+	}
+	// The legacy trial set is the env/apps.json candidates PLUS every registered
+	// agent secret, so a match on a registered secret is DETECTED (not silently
+	// unmatched) and explicitly rejected: that app opted into strict binding via
+	// registration, so it may never be admitted through the unknown-api_app_id
+	// carve-out. A match on a non-registered legacy candidate is accepted.
+	candidates := lookupSigningSecrets(cfg.appsRegistry, cfg.slackSigningKey, head.TeamID)
+	candidates = append(candidates, agentApps.SigningSecrets()...)
+	matched, ok := firstMatchingSecret(candidates, ts, body, sig)
+	if !ok {
+		return false
+	}
+	if agentApps.isRegisteredSecret(matched) {
+		cfg.companyGateway.recordDMSigReject()
+		return false
+	}
+	return true
+}
+
+// firstMatchingSecret trials each candidate secret against the HMAC and
+// returns the first that verifies (and true). Fail-closed semantics per
+// verifySlackSignature. Used by the legacy verification path so the caller can
+// inspect WHICH secret matched (the strict-bind rejection above).
+func firstMatchingSecret(secrets []string, ts string, body []byte, sig string) (string, bool) {
+	for _, s := range secrets {
+		if verifySlackSignature(s, ts, body, sig) {
+			return s, true
+		}
+	}
+	return "", false
 }
 
 // verifySlackSignatureMulti trials each candidate secret against the

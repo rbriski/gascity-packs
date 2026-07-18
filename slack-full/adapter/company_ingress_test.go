@@ -230,7 +230,7 @@ func (h *companyHarness) admitViaHandler(t *testing.T, ev slackMessageEvent, ret
 		req.Header.Set("X-Slack-Retry-Reason", "http_timeout")
 	}
 	w := httptest.NewRecorder()
-	handled := h.gw.tryHandleEvent(w, req, env)
+	handled := h.gw.tryHandleEvent(w, req, env, h.gw.agentAppsSnapshot())
 	return w, handled
 }
 
@@ -693,7 +693,7 @@ func TestCompanyDegradedStore503NeverLegacyThenRecovers(t *testing.T) {
 	env := companyEnvelope(t, humanMessage(baseOrigin().TS, "hi"))
 	req := httptest.NewRequest(http.MethodPost, "/slack/events", nil)
 	w := httptest.NewRecorder()
-	if handled := gw.tryHandleEvent(w, req, env); !handled {
+	if handled := gw.tryHandleEvent(w, req, env, gw.agentAppsSnapshot()); !handled {
 		t.Fatal("degraded gateway did not own the company event (would fall to legacy)")
 	}
 	if w.Result().StatusCode != http.StatusServiceUnavailable {
@@ -732,7 +732,7 @@ func TestCompanyDegradedStore503NeverLegacyThenRecovers(t *testing.T) {
 	env2 := companyEnvelope(t, humanMessage("1700000000.000250", "hello again"))
 	req2 := httptest.NewRequest(http.MethodPost, "/slack/events", nil)
 	w2 := httptest.NewRecorder()
-	if handled := gw.tryHandleEvent(w2, req2, env2); !handled {
+	if handled := gw.tryHandleEvent(w2, req2, env2, gw.agentAppsSnapshot()); !handled {
 		t.Fatal("recovered gateway did not own the company event")
 	}
 	if w2.Result().StatusCode != http.StatusOK {
@@ -804,7 +804,7 @@ func TestCompanyAppMentionOwnedNoReceiptNoLegacy(t *testing.T) {
 		raw, _ := json.Marshal(ev)
 		amOther.Event = raw
 		w := httptest.NewRecorder()
-		if handled := h.gw.tryHandleEvent(w, httptest.NewRequest(http.MethodPost, "/slack/events", nil), amOther); handled {
+		if handled := h.gw.tryHandleEvent(w, httptest.NewRequest(http.MethodPost, "/slack/events", nil), amOther, h.gw.agentAppsSnapshot()); handled {
 			t.Error("app_mention in non-company channel was owned by gateway; want legacy fallthrough")
 		}
 	}
@@ -1122,6 +1122,34 @@ func TestSweepEligibleStaleReclaimBoundary(t *testing.T) {
 	}
 	if sweepEligible(&IngressReceipt{Status: ingressStatusRouting, UpdatedAt: now.Add(-window + time.Second)}, now, window) {
 		t.Error("sub-window routing claim reclaimed")
+	}
+	// A session-guard hold sits in routing with a fresh UpdatedAt but must be
+	// eligible on the 60s sweep, NOT deferred behind the 5m stale window (m6 /
+	// spec §Session-existence guard: "the 60s sweep re-checks").
+	for _, detail := range []string{companyDetailSessionMissing, companyDetailSessionAmbiguous} {
+		held := &IngressReceipt{
+			Status:    ingressStatusRouting,
+			UpdatedAt: now,
+			Targets: map[string]TargetDelivery{
+				"b-ollie": {Status: companyTargetPending, Detail: detail},
+			},
+		}
+		if !sweepEligible(held, now, window) {
+			t.Errorf("guard-held (%s) routing receipt not sweep-eligible within the stale window", detail)
+		}
+	}
+	// A delivered/failed target carrying a stale guard detail is NOT a live hold
+	// and must not force the fresh routing claim to be reclaimed early.
+	notHeld := &IngressReceipt{
+		Status:    ingressStatusRouting,
+		UpdatedAt: now,
+		Targets: map[string]TargetDelivery{
+			"b-ollie": {Status: companyTargetDelivered, Detail: companyDetailSessionMissing},
+			"b-riley": {Status: companyTargetPending, Detail: "current-turn pointer write: boom"},
+		},
+	}
+	if sweepEligible(notHeld, now, window) {
+		t.Error("non-guard pending target treated as guard-held (would steal live work)")
 	}
 }
 

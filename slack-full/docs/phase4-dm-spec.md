@@ -219,10 +219,16 @@ with the Python side).
 - Hydration: frozen-snapshot discipline as rooms, reading
   `conversations.history` on the DM channel with the owner token
   (`im:history`), same bounded window and `include_all_metadata`.
-- Current-turn pointer: DM turns get their OWN pointer file
-  `company-current-turn/<session>.dm.json` — a shared singleton would
-  let a room wake clobber a DM turn and misdirect a private reply into
-  a room (review C6). Pointer contract delta is explicit cross-language
+- Current-turn pointer: DM turns get their OWN pointer file in a
+  dedicated subdirectory `company-current-turn/dm/<session>.json`
+  (created 0700 on demand) — a shared singleton would let a room wake
+  clobber a DM turn and misdirect a private reply into a room (review
+  C6). A flat `<session>.dm.json` would still collide with the room
+  pointer of a session literally named `<session>.dm` (the shared
+  sanitizer passes interior dots through), so the DM pointer is
+  namespaced under its own subdirectory rather than by suffix, keeping
+  the DM and room namespaces disjoint for every session name. Pointer
+  contract delta is explicit cross-language
   work: add `"dm"` to `_TURN_KINDS` and the Go/Python kind sets; `room`
   field empty and permitted-empty for kind `dm` (validator relaxation
   in both languages); new `owner_app_id` field; golden + interop
@@ -283,7 +289,8 @@ after auto-disable, extmsg fabric adoption (`PHASE5-DM-FABRIC`).
    `dm_author_not_allowed`; absent → workspace humans allowed.
 6. Unbound agent → `failed_dm_unbound` target; import binding +
    company-redrive → delivered.
-7. DM pointer written to `<session>.dm.json`; concurrent room turn
+7. DM pointer written to `company-current-turn/dm/<session>.json`;
+   concurrent room turn (including one for a session named `<x>.dm`)
    does not clobber it; reply-current picks newest, `--kind` overrides;
    owner-token post; unbound session reply → spoof-guard refusal.
 8. Delegation verb from a dm-kind root → refused.

@@ -73,12 +73,12 @@ def _resolve_conversation(
 ) -> dict[str, str]:
     """Pick which Slack conversation to publish into."""
     explicit = (args.conversation_id or "").strip()
-    user_set_kind = args.kind != _DEFAULT_KIND
+    user_set_kind = args.kind is not None
     if explicit:
         workspace = os.environ.get("SLACK_WORKSPACE_ID", "").strip()
         if not workspace:
             raise SystemExit("SLACK_WORKSPACE_ID must be set when using --conversation-id")
-        kind = args.kind if user_set_kind else _slack_kind_from_channel_id(explicit, args.kind)
+        kind = args.kind if user_set_kind else _slack_kind_from_channel_id(explicit, _DEFAULT_KIND)
         return {
             "scope_id": common.gc_city_name(),
             "provider": "slack",
@@ -91,7 +91,7 @@ def _resolve_conversation(
         payload = event.get("payload") or {}
         cid = (payload.get("conversation_id") or "").strip()
         if cid:
-            kind = args.kind if user_set_kind else _slack_kind_from_channel_id(cid, args.kind)
+            kind = args.kind if user_set_kind else _slack_kind_from_channel_id(cid, _DEFAULT_KIND)
             return {
                 "scope_id": common.gc_city_name(),
                 "provider": "slack",
@@ -106,7 +106,7 @@ def _resolve_conversation(
             "provider": binding.get("provider", "slack"),
             "account_id": binding.get("account_id", os.environ.get("SLACK_WORKSPACE_ID", "")),
             "conversation_id": binding.get("conversation_id", ""),
-            "kind": binding.get("kind", args.kind),
+            "kind": binding.get("kind", _DEFAULT_KIND),
         }
     raise SystemExit(
         "no inbound event and no binding found for this session; "
@@ -139,23 +139,34 @@ def _maybe_company_reply(args: argparse.Namespace) -> int | None:
         import slack_company_outbound as outbound  # type: ignore
     except ImportError:
         return None
+    # `--kind room|dm` overrides which pointer this reply acts on when both a
+    # room and a DM turn are live; anything else (thread / unset) leaves the
+    # newest-by-delivered-at default. A non-room/dm value is ignored here and
+    # left to the legacy conversation-kind path.
+    kind_override = args.kind if args.kind in ("room", "dm") else ""
+    origin_ts = (getattr(args, "origin_ts", "") or "").strip()
     try:
-        turn = outbound.read_current_turn(session_name)
-        if turn is None:
-            return None
-        kind = turn.get("kind")
+        source = outbound.resolve_reply_pointer_source(
+            session_name, kind_override=kind_override)
+        if source is None:
+            return None  # no company pointer — fall through to the legacy path
         body = _load_body(args)
-        origin_ts = (getattr(args, "origin_ts", "") or "").strip()
-        if kind == "peer_delegation":
-            result = outbound.post_peer_result(
+        if source == "dm":
+            result = outbound.post_company_dm_reply(
                 body=body, origin_ts=origin_ts, session_name=session_name)
-        elif kind == "peer_result":
-            result = outbound.post_peer_synthesis(
-                body=body, origin_ts=origin_ts, session_name=session_name,
-                allow_partial=bool(getattr(args, "allow_partial", False)))
-        else:  # ambient / targeted / peer_input → root reply
-            result = outbound.post_company_root_reply(
-                body=body, origin_ts=origin_ts, session_name=session_name)
+        else:
+            turn = outbound.read_current_turn(session_name)
+            kind = turn.get("kind") if turn is not None else None
+            if kind == "peer_delegation":
+                result = outbound.post_peer_result(
+                    body=body, origin_ts=origin_ts, session_name=session_name)
+            elif kind == "peer_result":
+                result = outbound.post_peer_synthesis(
+                    body=body, origin_ts=origin_ts, session_name=session_name,
+                    allow_partial=bool(getattr(args, "allow_partial", False)))
+            else:  # ambient / targeted / peer_input → root reply
+                result = outbound.post_company_root_reply(
+                    body=body, origin_ts=origin_ts, session_name=session_name)
     except (outbound.OutboundError, outbound.TransientPostError,
             outbound.DefinitivePostError) as exc:
         raise SystemExit(f"company reply failed: {exc}") from exc
@@ -170,10 +181,13 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--session", default="", help="Override session id")
     parser.add_argument("--conversation-id", default="",
                         help="Override Slack channel/DM id")
-    parser.add_argument("--kind", default=_DEFAULT_KIND,
+    parser.add_argument("--kind", default=None,
                         help=("Conversation kind (dm/room/thread). When omitted, "
                               "auto-detected from channel id prefix (C/G=room, "
-                              "D=dm). Default fallback: dm"))
+                              "D=dm; default fallback dm). Company rooms: on a "
+                              "session with both a room and a DM current-turn "
+                              "pointer, 'room'/'dm' overrides which the reply "
+                              "acts on (default: newest by delivered-at)."))
     parser.add_argument("--reply-to", default="",
                         help="Slack message ts to reply to (threaded reply)")
     parser.add_argument(

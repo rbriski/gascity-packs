@@ -269,6 +269,23 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 	}
 	room, _ := g.dirStore.Snapshot().RoomByChannel(r.Origin.TeamID, r.Origin.ChannelID)
 	bindings := g.bindStore.Snapshot()
+	// A failed-unbound target re-resolves from its recorded Agent name against
+	// the CURRENT bindings: a DM receipt resolves through dm_bindings (keyed by
+	// agent), a room receipt through the room bindings (keyed by room+agent).
+	resolveUnbound := func(agent string) (session, city string) {
+		if r.Kind == receiptKindDM {
+			if bd, ok := g.dmBindStore.Snapshot().BindingFor(agent); ok {
+				return bd.Session, bd.City
+			}
+			return "", ""
+		}
+		if room != nil {
+			if bd, ok := bindings.BindingFor(room.Name, agent); ok {
+				return bd.Session, bd.City
+			}
+		}
+		return "", ""
+	}
 
 	resetSessions := []string{}
 	unresolvable := []string{}
@@ -294,12 +311,7 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 		if td.Agent == "" {
 			continue // no agent recorded — cannot re-resolve (defensive)
 		}
-		session, city := "", ""
-		if room != nil {
-			if bd, ok := bindings.BindingFor(room.Name, td.Agent); ok {
-				session, city = bd.Session, bd.City
-			}
-		}
+		session, city := resolveUnbound(td.Agent)
 		// Scope: default (no --target) selects every failed-unbound target; a
 		// --target filter matches the recorded agent name or the resolved session.
 		if len(targetFilter) > 0 && !targetFilter[td.Agent] && (session == "" || !targetFilter[session]) {

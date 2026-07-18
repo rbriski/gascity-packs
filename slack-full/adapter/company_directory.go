@@ -47,6 +47,11 @@ type companyDirectoryFile struct {
 	ImportedAt    string         `json:"imported_at"`
 	Agents        []CompanyAgent `json:"agents"`
 	Rooms         []CompanyRoom  `json:"rooms"`
+	// DMAllowedHumans is the optional directory-wide DM allowlist (Phase 4,
+	// D-DM2). A pointer so the loader can distinguish "key absent" (nil =
+	// all workspace humans allowed) from "key present but empty" (non-nil
+	// empty = nobody allowed). Fail-closed allowlist semantics.
+	DMAllowedHumans *[]string `json:"dm_allowed_humans,omitempty"`
 }
 
 // CompanyDirectory is a parsed, validated, and normalized view of
@@ -63,8 +68,16 @@ type CompanyDirectory struct {
 
 	agentsByName      map[string]*CompanyAgent
 	agentsByBotUserID map[string]*CompanyAgent
+	agentsByAppID     map[string]*CompanyAgent
 	roomsByName       map[string]*CompanyRoom
 	roomsByChannel    map[string]*CompanyRoom
+
+	// dmAllowedHumans is the parsed DM allowlist (Phase 4). nil ⇒ the
+	// dm_allowed_humans key was absent (all workspace humans allowed); a
+	// non-nil (possibly empty) set ⇒ allowlist mode, where only listed Slack
+	// user ids are allowed and an empty set allows nobody. Fail-closed.
+	dmAllowedHumans map[string]bool
+	dmAllowlistMode bool
 }
 
 // companyDirectorySchemaVersion is the only directory schema this build
@@ -107,8 +120,22 @@ func ParseCompanyDirectory(data []byte) (*CompanyDirectory, error) {
 		rooms:             make([]CompanyRoom, 0, len(file.Rooms)),
 		agentsByName:      make(map[string]*CompanyAgent, len(file.Agents)),
 		agentsByBotUserID: make(map[string]*CompanyAgent, len(file.Agents)),
+		agentsByAppID:     make(map[string]*CompanyAgent, len(file.Agents)),
 		roomsByName:       make(map[string]*CompanyRoom, len(file.Rooms)),
 		roomsByChannel:    make(map[string]*CompanyRoom, len(file.Rooms)),
+	}
+	if file.DMAllowedHumans != nil {
+		// Allowlist mode: the key is present (even if empty). Normalize into a
+		// set; an empty set allows nobody. Absent (nil) leaves dmAllowlistMode
+		// false so all workspace humans are allowed.
+		d.dmAllowlistMode = true
+		d.dmAllowedHumans = make(map[string]bool, len(*file.DMAllowedHumans))
+		for _, u := range *file.DMAllowedHumans {
+			if u == "" {
+				continue
+			}
+			d.dmAllowedHumans[u] = true
+		}
 	}
 
 	seenAppID := make(map[string]string, len(file.Agents))     // app_id -> agent name
@@ -145,6 +172,7 @@ func ParseCompanyDirectory(data []byte) (*CompanyDirectory, error) {
 		a := &d.agents[i]
 		d.agentsByName[a.Name] = a
 		d.agentsByBotUserID[a.BotUserID] = a
+		d.agentsByAppID[a.AppID] = a
 	}
 
 	seenChannel := make(map[string]string, len(file.Rooms)) // (team,channel) -> room name
@@ -259,6 +287,34 @@ func (d *CompanyDirectory) AgentByBotUserID(id string) (*CompanyAgent, bool) {
 	}
 	a, ok := d.agentsByBotUserID[id]
 	return a, ok
+}
+
+// AgentByAppID resolves the agent whose Slack app_id equals id — the join
+// used to derive a DM's owner agent from the delivering app's api_app_id
+// (Phase 4). app_id is unique per directory (ParseCompanyDirectory rejects
+// duplicates), so this is a single-agent resolution.
+func (d *CompanyDirectory) AgentByAppID(id string) (*CompanyAgent, bool) {
+	if d == nil || id == "" {
+		return nil, false
+	}
+	a, ok := d.agentsByAppID[id]
+	return a, ok
+}
+
+// DMAuthorAllowed reports whether a DM author identified by Slack user id is
+// allowed to wake the bound agent under the directory's DM policy (Phase 4,
+// D-DM2). When the directory carries no dm_allowed_humans key, every
+// workspace human is allowed. When the key is present (even empty), only
+// listed user ids are allowed and an empty list allows nobody. The caller has
+// already established that the author is a workspace human in the bound team.
+func (d *CompanyDirectory) DMAuthorAllowed(userID string) bool {
+	if d == nil {
+		return false
+	}
+	if !d.dmAllowlistMode {
+		return true
+	}
+	return d.dmAllowedHumans[userID]
 }
 
 // AgentByName resolves the agent for a directory slug name.

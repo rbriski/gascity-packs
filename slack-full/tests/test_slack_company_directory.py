@@ -931,3 +931,258 @@ def test_bind_same_session_name_different_city_allowed(tmp_path: pathlib.Path, c
     # Same name, SAME city, different agent: rejected.
     assert mod.main(["bind-company-agent", "--room", "orchestrator-team",
                      "--agent", "riley", "--session", "teams.pm", "--city", "orchestration"]) != 0
+
+
+# --------------------------------------------------------------------------
+# bind-company-dm: per-agent singleton DM bindings (Phase 4, D-DM1).
+# --------------------------------------------------------------------------
+
+def test_dm_bind_create_replace_unchanged(tmp_path: pathlib.Path, capsys):
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    capsys.readouterr()
+
+    assert mod.main(["bind-company-dm", "--agent", "ollie", "--session", "ollie"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["action"] == "created" and out["total_dm_bindings"] == 1
+    stored = json.loads(mod.company_dm_bindings_path().read_text())
+    assert stored["schema_version"] == 1
+    assert stored["dm_bindings"] == [{"agent": "ollie", "session": "ollie"}]
+
+    # Rebind same agent, different session -> replaced (still one entry).
+    assert mod.main(["bind-company-dm", "--agent", "ollie", "--session", "ollie-2"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["action"] == "replaced"
+    stored = json.loads(mod.company_dm_bindings_path().read_text())
+    assert stored["dm_bindings"] == [{"agent": "ollie", "session": "ollie-2"}]
+
+    # Identical re-run -> unchanged.
+    assert mod.main(["bind-company-dm", "--agent", "ollie", "--session", "ollie-2"]) == 0
+    assert json.loads(capsys.readouterr().out)["action"] == "unchanged"
+
+
+def test_dm_bind_singleton_per_agent_and_session_guard(tmp_path: pathlib.Path, capsys):
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    capsys.readouterr()
+    assert mod.main(["bind-company-dm", "--agent", "ollie", "--session", "shared"]) == 0
+    capsys.readouterr()
+    # A different agent may not DM-bind the same (session, city).
+    assert mod.main(["bind-company-dm", "--agent", "riley", "--session", "shared"]) != 0
+    err = capsys.readouterr().err
+    assert "already bound to DM agent 'ollie'" in err
+    # Two agents remain distinct singletons on distinct sessions.
+    assert mod.main(["bind-company-dm", "--agent", "riley", "--session", "riley"]) == 0
+    stored = json.loads(mod.company_dm_bindings_path().read_text())
+    assert {e["agent"] for e in stored["dm_bindings"]} == {"ollie", "riley"}
+
+
+def test_dm_bind_city_qualified(tmp_path: pathlib.Path, capsys):
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    capsys.readouterr()
+    assert mod.main(["bind-company-dm", "--agent", "ollie",
+                     "--session", "teams__pm", "--city", "platform"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["city"] == "platform"
+    stored = json.loads(mod.company_dm_bindings_path().read_text())
+    assert stored["dm_bindings"][0]["city"] == "platform"
+    # Same session NAME, different city is a different session: another agent
+    # may bind it.
+    assert mod.main(["bind-company-dm", "--agent", "riley",
+                     "--session", "teams__pm", "--city", "substrate"]) == 0
+    # Same session, SAME city, different agent: rejected.
+    assert mod.main(["bind-company-dm", "--agent", "riley",
+                     "--session", "teams__pm", "--city", "platform"]) != 0
+    capsys.readouterr()
+    # Dropping --city clears the qualifier (replaced; key absent on disk).
+    assert mod.main(["bind-company-dm", "--agent", "ollie", "--session", "teams__pm"]) == 0
+    capsys.readouterr()
+    stored = json.loads(mod.company_dm_bindings_path().read_text())
+    ollie = next(e for e in stored["dm_bindings"] if e["agent"] == "ollie")
+    assert "city" not in ollie
+
+
+def test_dm_bind_rejects_url_significant_city(tmp_path: pathlib.Path, capsys):
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    capsys.readouterr()
+    for bad in ("a/b", "a b", "a#b", "a?b", "a%b"):
+        assert mod.main(["bind-company-dm", "--agent", "ollie",
+                         "--session", "ollie", "--city", bad]) != 0
+        capsys.readouterr()
+
+
+def test_dm_bindings_golden_fixture_matches_writer_bytes(tmp_path: pathlib.Path, capsys):
+    """C4/m12: the committed dm_bindings.json fixture is BYTE-IDENTICAL to what
+    cmd_bind_dm actually writes (omitted-empty city for ollie, city-qualified for
+    riley), so a drift in the writer's serialization breaks a test rather than
+    shipping a fixture no writer can produce."""
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    capsys.readouterr()
+    assert mod.main(["bind-company-dm", "--agent", "ollie", "--session", "ollie"]) == 0
+    assert mod.main(["bind-company-dm", "--agent", "riley",
+                     "--session", "riley-main", "--city", "riley-city"]) == 0
+    capsys.readouterr()
+    produced = mod.company_dm_bindings_path().read_bytes()
+    fixture = (PACK_DIR / "tests" / "fixtures" / "company" / "dm_bindings.json").read_bytes()
+    assert produced == fixture
+
+
+def test_dm_bind_unknown_agent_errors(tmp_path: pathlib.Path):
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    assert mod.main(["bind-company-dm", "--agent", "nobody", "--session", "x"]) != 0
+
+
+def test_dm_bind_session_guard_normalizes_aliases(tmp_path: pathlib.Path, capsys):
+    """m5: two agents cannot bind alias-equivalent spellings of one running
+    session (config dot form vs gc-runtime dunder form)."""
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    capsys.readouterr()
+    assert mod.main(["bind-company-dm", "--agent", "ollie", "--session", "a.b"]) == 0
+    capsys.readouterr()
+    # riley tries the dunder spelling of the SAME session — rejected.
+    assert mod.main(["bind-company-dm", "--agent", "riley", "--session", "a__b"]) != 0
+    assert "already bound to DM agent 'ollie'" in capsys.readouterr().err
+
+
+def test_dm_unbind_removes_binding(tmp_path: pathlib.Path, capsys):
+    """m11: --remove clears a binding (the unbind recovery path)."""
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    capsys.readouterr()
+    assert mod.main(["bind-company-dm", "--agent", "ollie", "--session", "ollie"]) == 0
+    capsys.readouterr()
+    assert mod.main(["bind-company-dm", "--remove", "ollie"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["action"] == "removed" and out["total_dm_bindings"] == 0
+    assert mod.load_dm_bindings()["dm_bindings"] == []
+    # Removing a non-existent binding errors.
+    assert mod.main(["bind-company-dm", "--remove", "ollie"]) != 0
+
+
+def test_dm_bind_stale_row_does_not_block_and_unbind_recovers(tmp_path: pathlib.Path, capsys):
+    """m11: a row whose agent left the directory must not block binding that
+    session to a live agent; --remove clears the stale row outright."""
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    capsys.readouterr()
+    # Hand-write a stale binding: agent "ghost" (not in the directory) on session "s".
+    dest = mod.company_dm_bindings_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps({
+        "schema_version": 1,
+        "dm_bindings": [{"agent": "ghost", "session": "s"}]}))
+    # A live agent may claim that session despite the stale row (the guard skips
+    # directory-absent agents, matching every read surface).
+    assert mod.main(["bind-company-dm", "--agent", "ollie", "--session", "s"]) == 0
+    capsys.readouterr()
+    # The stale row is still recoverable via --remove.
+    assert mod.main(["bind-company-dm", "--remove", "ghost"]) == 0
+    agents = {e["agent"] for e in mod.load_dm_bindings()["dm_bindings"]}
+    assert agents == {"ollie"}
+
+
+def test_load_dm_bindings_rejects_bad_schema_version(tmp_path: pathlib.Path):
+    """m10: Python honors schema_version, failing closed on the same document
+    the Go loader rejects."""
+    mod = _mod()
+    dest = mod.company_dm_bindings_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps({"schema_version": 9, "dm_bindings": []}))
+    with pytest.raises(mod.DirectoryError) as exc:
+        mod.load_dm_bindings()
+    assert "schema_version" in str(exc.value)
+
+
+def test_dm_bind_without_directory_errors(tmp_path: pathlib.Path):
+    mod = _mod()
+    assert mod.main(["bind-company-dm", "--agent", "ollie", "--session", "ollie"]) != 0
+
+
+def test_load_dm_bindings_empty_when_absent(tmp_path: pathlib.Path):
+    mod = _mod()
+    data = mod.load_dm_bindings()
+    assert data == {"schema_version": 1, "dm_bindings": []}
+
+
+def test_peers_reports_dm_bindings(tmp_path: pathlib.Path, monkeypatch, capsys):
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    capsys.readouterr()
+    monkeypatch.setattr(mod, "verify_memberships", lambda directory: [])
+    mod.main(["bind-company-dm", "--agent", "ollie", "--session", "ollie"])
+    capsys.readouterr()
+    assert mod.main(["peers"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["dm_bindings"] == [{"agent": "ollie", "session": "ollie"}]
+
+
+def test_peers_drops_stale_dm_binding_with_warning(tmp_path: pathlib.Path, monkeypatch, capsys):
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    capsys.readouterr()
+    monkeypatch.setattr(mod, "verify_memberships", lambda directory: [])
+    # Write a dm binding referencing an agent not in the directory.
+    mod.company_dm_bindings_path().write_text(json.dumps({
+        "schema_version": 1,
+        "dm_bindings": [{"agent": "ghost", "session": "ghost"}]}))
+    assert mod.main(["peers"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["dm_bindings"] == []
+    assert any("dm binding agent='ghost'" in w for w in report["binding_warnings"])
+
+
+# --------------------------------------------------------------------------
+# dm_allowed_humans directory import (Phase 4, D-DM2) — the Python IMPORT
+# surface. The allow/deny POLICY evaluation is Go-only (admission), so it is
+# not exercised here.
+# --------------------------------------------------------------------------
+
+_ALLOW_TOML = VALID_TOML  # reused base; allowlist prepended per case
+
+
+def test_import_preserves_dm_allowed_humans(tmp_path: pathlib.Path):
+    mod = _mod()
+    toml = 'dm_allowed_humans = ["U111", "U222", "U111"]\n' + VALID_TOML
+    src = _write_toml(tmp_path, toml)
+    assert mod.main(["import-company-directory", "--file", str(src)]) == 0
+    data = json.loads(mod.company_directory_path().read_text())
+    # Deduped, order-preserving.
+    assert data["dm_allowed_humans"] == ["U111", "U222"]
+
+
+def test_import_preserves_present_empty_allowlist(tmp_path: pathlib.Path):
+    mod = _mod()
+    toml = "dm_allowed_humans = []\n" + VALID_TOML
+    src = _write_toml(tmp_path, toml)
+    assert mod.main(["import-company-directory", "--file", str(src)]) == 0
+    data = json.loads(mod.company_directory_path().read_text())
+    # Present-but-empty must survive as a distinct signal (Go: nobody allowed).
+    assert "dm_allowed_humans" in data and data["dm_allowed_humans"] == []
+
+
+def test_import_absent_allowlist_omits_key(tmp_path: pathlib.Path):
+    mod = _mod()
+    src = _write_toml(tmp_path, VALID_TOML)
+    assert mod.main(["import-company-directory", "--file", str(src)]) == 0
+    data = json.loads(mod.company_directory_path().read_text())
+    # Absent must stay absent (Go: nil => all workspace humans allowed).
+    assert "dm_allowed_humans" not in data
+
+
+def test_import_rejects_non_string_allowlist_entry(tmp_path: pathlib.Path):
+    mod = _mod()
+    toml = "dm_allowed_humans = [123]\n" + VALID_TOML
+    src = _write_toml(tmp_path, toml)
+    assert mod.main(["import-company-directory", "--file", str(src)]) != 0
+
+
+def test_import_rejects_non_array_allowlist(tmp_path: pathlib.Path):
+    mod = _mod()
+    toml = 'dm_allowed_humans = "U111"\n' + VALID_TOML
+    src = _write_toml(tmp_path, toml)
+    assert mod.main(["import-company-directory", "--file", str(src)]) != 0

@@ -44,17 +44,55 @@ const (
 	ackUnchanged                   // ratelimited or transient HTTP/network — leave AckState as is
 )
 
+// react / reply dispatch each visible-ack call. The untyped hook takes
+// precedence when set — it is the room-only test spy, which a test installs
+// AFTER newCompanyGateway has wired the production token-aware hook — so a room
+// ack test observes its spy. Production leaves the untyped hooks nil and routes
+// through the token-parameterized hook, choosing the actor token per receipt
+// (switchboard for rooms, owner agent for DMs).
+func (g *companyGateway) react(token, method, channel, ts, name string) ackOutcome {
+	if g.reactHook != nil {
+		return g.reactHook(method, channel, ts, name)
+	}
+	if g.reactHookTok != nil {
+		return g.reactHookTok(token, method, channel, ts, name)
+	}
+	return ackUnchanged
+}
+
+func (g *companyGateway) reply(token, channel, threadTS, text string) bool {
+	if g.replyHook != nil {
+		return g.replyHook(channel, threadTS, text)
+	}
+	if g.replyHookTok != nil {
+		return g.replyHookTok(token, channel, threadTS, text)
+	}
+	return true
+}
+
+// hasReactHook reports whether any reaction hook is wired (either variant).
+func (g *companyGateway) hasReactHook() bool {
+	return g.reactHookTok != nil || g.reactHook != nil
+}
+
 // applyAdmissionAck runs the "" → eyes hook on the first delivery attempt for a
 // receipt whose AckState is still empty. Idempotent across redrives (the
 // AckState guard), gated on SLACK_COMPANY_VISIBLE_ACKS, never blocks delivery.
+// The ack actor's token is chosen per receipt (switchboard for rooms, owner
+// agent for DMs); a DM whose owner token is missing degrades silently.
 func (g *companyGateway) applyAdmissionAck(r *IngressReceipt) {
-	if g == nil || !g.visibleAcks || g.reactHook == nil || r == nil {
+	if g == nil || !g.visibleAcks || !g.hasReactHook() || r == nil {
 		return
 	}
 	if r.AckState != ackStateNone {
 		return
 	}
-	switch g.reactHook("reactions.add", r.Origin.ChannelID, r.Origin.TS, ackEmojiEyes) {
+	token, ok := g.ackActorToken(r)
+	if !ok {
+		g.noteDMAckDegraded(r) // DM owner token missing → acks degrade, but COUNTED
+		return
+	}
+	switch g.react(token, "reactions.add", r.Origin.ChannelID, r.Origin.TS, ackEmojiEyes) {
 	case ackSuccess:
 		g.commitAckState(r, ackStateEyes)
 	case ackDegrade:
@@ -70,7 +108,7 @@ func (g *companyGateway) applyAdmissionAck(r *IngressReceipt) {
 // "eyes" cursor so a degraded/absent 👀 is skipped and a terminal ack ratelimit
 // leaves "eyes" for the sweep to heal. Gated, best-effort, never fails delivery.
 func (g *companyGateway) applyTerminalAck(r *IngressReceipt) {
-	if g == nil || !g.visibleAcks || g.reactHook == nil || r == nil {
+	if g == nil || !g.visibleAcks || !g.hasReactHook() || r == nil {
 		return
 	}
 	// "eyes" is the pre-terminal cursor; "warned" is the terminal-failed
@@ -78,11 +116,16 @@ func (g *companyGateway) applyTerminalAck(r *IngressReceipt) {
 	if r.AckState != ackStateEyes && r.AckState != ackStateWarned {
 		return
 	}
+	token, ok := g.ackActorToken(r)
+	if !ok {
+		g.noteDMAckDegraded(r) // DM owner token missing → acks degrade, but COUNTED
+		return
+	}
 	switch r.Status {
 	case ingressStatusDelivered:
 		// 👀 → ✅ : remove is best-effort (its outcome does not drive the cursor).
-		g.reactHook("reactions.remove", r.Origin.ChannelID, r.Origin.TS, ackEmojiEyes)
-		g.settleTerminalAck(r, g.reactHook("reactions.add", r.Origin.ChannelID, r.Origin.TS, ackEmojiCheck))
+		g.react(token, "reactions.remove", r.Origin.ChannelID, r.Origin.TS, ackEmojiEyes)
+		g.settleTerminalAck(r, g.react(token, "reactions.add", r.Origin.ChannelID, r.Origin.TS, ackEmojiCheck))
 	case ingressStatusFailed:
 		// 👀 → ⚠️ plus EXACTLY ONE concise switchboard reply into the message's
 		// thread root (entity-escaped, no live mentions). The reply is posted at
@@ -93,9 +136,9 @@ func (g *companyGateway) applyTerminalAck(r *IngressReceipt) {
 		// only the reaction, never the reply. The sole re-post window is a crash
 		// between the reply POST and the warned commit — the same narrow
 		// at-most-once window the receipt lifecycle already tolerates.
-		g.reactHook("reactions.remove", r.Origin.ChannelID, r.Origin.TS, ackEmojiEyes)
+		g.react(token, "reactions.remove", r.Origin.ChannelID, r.Origin.TS, ackEmojiEyes)
 		if r.AckState == ackStateEyes {
-			if !g.postFailureReply(r) {
+			if !g.postFailureReply(r, token) {
 				// Reply POST failed (transient/unknown): leave "eyes" so the next
 				// sweep retries the reply before any ⚠️. Never advance the cursor
 				// or apply the reaction on a receipt with no posted reply.
@@ -103,11 +146,11 @@ func (g *companyGateway) applyTerminalAck(r *IngressReceipt) {
 			}
 			g.commitAckState(r, ackStateWarned)
 		}
-		g.settleTerminalAck(r, g.reactHook("reactions.add", r.Origin.ChannelID, r.Origin.TS, ackEmojiWarning))
+		g.settleTerminalAck(r, g.react(token, "reactions.add", r.Origin.ChannelID, r.Origin.TS, ackEmojiWarning))
 	case ingressStatusNoDelivery:
 		// A green check on a message that woke nobody would misreport — remove
 		// the 👀 only; the remove outcome drives the cursor.
-		g.settleTerminalAck(r, g.reactHook("reactions.remove", r.Origin.ChannelID, r.Origin.TS, ackEmojiEyes))
+		g.settleTerminalAck(r, g.react(token, "reactions.remove", r.Origin.ChannelID, r.Origin.TS, ackEmojiEyes))
 	}
 }
 
@@ -129,20 +172,37 @@ func (g *companyGateway) settleTerminalAck(r *IngressReceipt, out ackOutcome) {
 	}
 }
 
-// postFailureReply posts the switchboard's threaded failure reply into the
-// message's derived human root: body exactly "delivery failed for receipt <id>"
-// (entity-escaped, no live mentions). It reports whether the post succeeded so
-// the caller can advance the durable "warned" cursor only on a confirmed post
-// (guaranteeing the reply is sent at most once). A nil hook is treated as a
-// successful no-op so a test/config without a reply hook still advances the
-// cursor rather than looping on the reply forever.
-func (g *companyGateway) postFailureReply(r *IngressReceipt) bool {
-	if g.replyHook == nil {
+// postFailureReply posts the threaded failure reply into the message's derived
+// human root: body exactly "delivery failed for receipt <id>" (entity-escaped,
+// no live mentions), through the ack actor's token (switchboard for rooms,
+// owner agent for DMs). It reports whether the post succeeded so the caller can
+// advance the durable "warned" cursor only on a confirmed post (at most once).
+// A nil hook is treated as a successful no-op so a test/config without a reply
+// hook still advances the cursor rather than looping on the reply forever.
+func (g *companyGateway) postFailureReply(r *IngressReceipt, token string) bool {
+	if g.replyHookTok == nil && g.replyHook == nil {
 		return true
 	}
 	msg := decodeCompanyMessage(r.Origin, r.Event)
-	return g.replyHook(r.Origin.ChannelID, deriveHumanRootTS(msg),
+	return g.reply(token, r.Origin.ChannelID, deriveHumanRootTS(msg),
 		"delivery failed for receipt "+neutralizeMarkupBoundaries(r.ID))
+}
+
+// noteDMAckDegraded records that a DM receipt's visible ack could not be placed
+// because the owner token is missing (spec §Acks: "Missing owner token → acks
+// silently degrade (counted)"). The switchboard token must never touch a DM
+// channel, so the ack genuinely cannot happen — this makes the degradation
+// observable on company_dm_token_missing instead of being a silent no-op. It
+// commits the durable ackStateDegraded cursor so the count is once-per-receipt
+// (a redrive short-circuits) and no further ack calls are attempted. No-op for
+// non-DM receipts (rooms always resolve the switchboard token, so they never
+// reach here) and idempotent once the cursor is degraded.
+func (g *companyGateway) noteDMAckDegraded(r *IngressReceipt) {
+	if r == nil || r.Kind != receiptKindDM || r.AckState == ackStateDegraded {
+		return
+	}
+	g.dmTokenMissing.Add(1)
+	g.commitAckState(r, ackStateDegraded)
 }
 
 // commitAckState persists an AckState transition through the normal

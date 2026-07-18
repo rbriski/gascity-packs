@@ -3,7 +3,7 @@
     "name": "REPLACE-agent-name",
     "description": "Gas City agent identity app — the mentionable Slack identity and outbound sender for one named company agent.",
     "background_color": "#1f2933",
-    "long_description": "One agent identity app is provisioned per named company agent. Its bot user is the agent's real, mentionable <@U…> identity in company rooms and its bot token is the agent's outbound sending identity for gc slack delegate / reply-current. In the rooms phases it observes nothing — no event subscriptions — so the switchboard app stays the single admission owner for room traffic. The App Home Messages tab is enabled ahead of the per-agent DM phase, which later adds message.im + im:history. This app is internal to one visibility boundary and is never distributed on the Slack Marketplace. See https://github.com/gastownhall/gascity/tree/main/examples/slack-pack for setup."
+    "long_description": "One agent identity app is provisioned per named company agent. Its bot user is the agent's real, mentionable <@U…> identity in company rooms and its bot token is the agent's outbound sending identity for gc slack delegate / reply-current. For room traffic it still observes nothing — the switchboard app stays the single admission owner. The per-agent DM phase adds a message.im subscription (im:history) so a human can DM this agent directly, and reactions:write so the agent app is the ack actor on its own DM channel. Point the event Request URL at the same public funnel as the switchboard and register the app's signing secret with gc slack register-agent-app before saving it. This app is internal to one visibility boundary and is never distributed on the Slack Marketplace. See https://github.com/gastownhall/gascity/tree/main/examples/slack-pack for setup."
   },
   "features": {
     "bot_user": {
@@ -20,11 +20,18 @@
   "oauth_config": {
     "scopes": {
       "bot": [
-        "chat:write"
+        "chat:write",
+        "im:history",
+        "reactions:write"
       ]
     }
   },
   "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "message.im"
+      ]
+    },
     "interactivity": {
       "is_enabled": false
     },

@@ -66,7 +66,7 @@ DEFAULT_SLACK_API_BASE = "https://slack.com/api"
 
 _AGENT_KEYS = frozenset({"name", "app_id", "bot_user_id"})
 _ROOM_KEYS = frozenset({"name", "team_id", "channel_id", "members", "ambient_wake", "mention_wake"})
-_TOP_KEYS = frozenset({"schema_version", "agents", "rooms"})
+_TOP_KEYS = frozenset({"schema_version", "agents", "rooms", "dm_allowed_humans"})
 
 
 class DirectoryError(RuntimeError):
@@ -102,6 +102,10 @@ def company_directory_path() -> pathlib.Path:
 
 def company_bindings_path() -> pathlib.Path:
     return _registry_path("SLACK_COMPANY_BINDINGS_PATH", "company_bindings.json")
+
+
+def company_dm_bindings_path() -> pathlib.Path:
+    return _registry_path("SLACK_COMPANY_DM_BINDINGS_PATH", "dm_bindings.json")
 
 
 # --- validation helpers ---------------------------------------------------
@@ -271,7 +275,30 @@ def normalize_directory(parsed: Any) -> dict[str, Any]:
             "mention_wake": mention,
         })
 
-    return {"schema_version": SCHEMA_VERSION, "agents": agents, "rooms": rooms}
+    body: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "agents": agents, "rooms": rooms}
+
+    # dm_allowed_humans (D-DM2, Phase 4): optional directory-wide DM allowlist.
+    # The absent-vs-present distinction is load-bearing and fail-closed — the Go
+    # loader reads it as a *[]string (nil = key absent = all workspace humans
+    # allowed; non-nil, even empty = allowlist mode where an empty list allows
+    # nobody). So the key is emitted ONLY when present in the source, preserving
+    # that distinction across the JSON round-trip.
+    if "dm_allowed_humans" in parsed:
+        raw_allow = parsed.get("dm_allowed_humans")
+        if not isinstance(raw_allow, list):
+            raise DirectoryError("dm_allowed_humans must be an array of Slack user ids")
+        allow: list[str] = []
+        seen_allow: set[str] = set()
+        for tok in raw_allow:
+            if not isinstance(tok, str) or not tok:
+                raise DirectoryError(
+                    "dm_allowed_humans entries must be non-empty strings")
+            if tok not in seen_allow:
+                seen_allow.add(tok)
+                allow.append(tok)
+        body["dm_allowed_humans"] = allow
+
+    return body
 
 
 # --- atomic JSON writer ---------------------------------------------------
@@ -387,6 +414,45 @@ def load_bindings() -> dict[str, Any]:
     if not isinstance(data, dict) or not isinstance(data.get("bindings"), list):
         raise DirectoryError(f"company bindings {path} is malformed")
     return data
+
+
+def load_dm_bindings() -> dict[str, Any]:
+    """Read ``dm_bindings.json`` (per-agent singleton DM bindings).
+
+    Mirrors :func:`load_bindings`: a missing file is the empty registry.
+    ``schema_version`` is honored (rejected when != 1) so Python fails closed on
+    the SAME unsupported document the Go loader rejects (m10) rather than
+    silently driving the spoof guard from bytes Go refuses. ``dm_bindings`` is
+    the sibling of ``company_bindings`` in the same state dir.
+    """
+    path = company_dm_bindings_path()
+    if not path.exists():
+        return {"schema_version": SCHEMA_VERSION, "dm_bindings": []}
+    raw = _read_registry_bytes(path, "dm bindings")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DirectoryError(f"cannot read dm bindings {path}: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("dm_bindings"), list):
+        raise DirectoryError(f"dm bindings {path} is malformed")
+    if data.get("schema_version") != SCHEMA_VERSION:
+        raise DirectoryError(
+            f"dm bindings {path} has unsupported schema_version "
+            f"{data.get('schema_version')!r} (want {SCHEMA_VERSION})")
+    return data
+
+
+def _canonical_dm_session(session: str) -> str:
+    """Collapse a session name to the form gc actually runs (dot -> dunder).
+
+    gc sanitizes a configured named session by replacing every dot with a double
+    underscore (config ``teams.it`` runs as ``GC_SESSION_NAME=teams__it``), so a
+    config-form ``a.b`` and a runtime-form ``a__b`` name the same session. This
+    is the shared cross-language DM-binding collision key (the Go loader's
+    ``canonicalSessionKey`` normalizes identically), so two alias-equivalent
+    spellings can never bind two different agents to one running session (m5).
+    """
+    return (session or "").replace(".", "__")
 
 
 # --- membership verification (best-effort) --------------------------------
@@ -634,6 +700,128 @@ def cmd_bind(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- subcommand: bind-company-dm ------------------------------------------
+
+def cmd_bind_dm(args: argparse.Namespace) -> int:
+    """Record the singleton ``agent -> (session, city)`` DM binding, or unbind.
+
+    Mirrors :func:`cmd_bind` (the identical read-validate-write mechanism and
+    ``(session, city)`` guard the room bindings use) but keyed by agent alone:
+    each agent has exactly one DM-bound session (D-DM1). ``city`` empty/absent
+    means the adapter's own city, matching ``company_bindings``. ``--remove
+    <agent>`` deletes an agent's binding (the unbind recovery path, D-DM1 /
+    test-plan item 6); it does not require the agent to still be in the directory
+    so a stale row left by a rename can be cleared.
+    """
+    remove = (getattr(args, "remove", "") or "").strip()
+    if remove:
+        return _cmd_unbind_dm(remove)
+
+    agent = (getattr(args, "agent", "") or "").strip()
+    session = (getattr(args, "session", "") or "").strip()
+    city = (getattr(args, "city", "") or "").strip()
+    if not agent:
+        raise DirectoryError("--agent is required (or use --remove <agent> to unbind)")
+    if not session:
+        raise DirectoryError("--session must be non-empty")
+    # City is optional; when present it is interpolated into
+    # /v0/city/{city}/... URLs by the adapter, so URL-significant or whitespace
+    # bytes fail closed (identical rule to bind-company-agent / the Go loader).
+    if any(ch in city for ch in "/?#% \t"):
+        raise DirectoryError(
+            f"--city {city!r} contains URL-significant or whitespace characters")
+
+    directory = load_directory()
+    agent_names = {a.get("name") for a in directory.get("agents", [])}
+    if agent not in agent_names:
+        raise DirectoryError(f"unknown agent {agent!r} (not in the company directory)")
+
+    dm_bindings = load_dm_bindings()
+    entries: list[dict[str, str]] = dm_bindings["dm_bindings"]
+
+    # (session, city) guard: a DM session is one agent's identity, and the
+    # delivery worker keys the DM current-turn pointer by the session name, so
+    # two agents sharing one running session could reply as each other. Reject
+    # binding a (session, city) a DIFFERENT agent already claims, comparing the
+    # gc-runtime CANONICAL session (dot->dunder) so alias-equivalent spellings
+    # cannot slip past (m5, matching the Go loader). A row whose agent is no
+    # longer in the directory is dropped by every read surface (Go loader,
+    # cmd_peers), so it must not block a live binding either (m11).
+    canon = _canonical_dm_session(session)
+    for entry in entries:
+        e_agent = entry.get("agent")
+        if e_agent == agent or e_agent not in agent_names:
+            continue
+        if (
+            _canonical_dm_session(entry.get("session") or "") == canon
+            and (entry.get("city") or "") == city
+        ):
+            raise DirectoryError(
+                f"session {session!r} (city {city or 'own'!r}) is already bound "
+                f"to DM agent {e_agent!r}; a session may DM-bind only "
+                "one agent")
+
+    action = "created"
+    for entry in entries:
+        if entry.get("agent") == agent:
+            # Singleton per agent: the existing binding is replaced when the
+            # session or city differs, unchanged when identical.
+            unchanged = (entry.get("session") == session
+                         and (entry.get("city") or "") == city)
+            action = "unchanged" if unchanged else "replaced"
+            entry["session"] = session
+            if city:
+                entry["city"] = city
+            else:
+                entry.pop("city", None)
+            break
+    else:
+        new_entry = {"agent": agent, "session": session}
+        if city:
+            new_entry["city"] = city
+        entries.append(new_entry)
+    entries.sort(key=lambda e: e.get("agent", ""))
+
+    dest = company_dm_bindings_path()
+    _atomic_write_json(dest, {"schema_version": SCHEMA_VERSION, "dm_bindings": entries})
+
+    print(json.dumps({
+        "dm_bindings_path": str(dest),
+        "agent": agent,
+        "session": session,
+        **({"city": city} if city else {}),
+        "action": action,
+        "total_dm_bindings": len(entries),
+    }, indent=2))
+    return 0
+
+
+def _cmd_unbind_dm(agent: str) -> int:
+    """Remove ``agent``'s DM binding (the unbind recovery path).
+
+    The agent need NOT be in the directory: the whole point is to clear a stale
+    row whose agent was renamed/removed, which the (session, city) guard would
+    otherwise treat as a live conflict blocking the replacement binding.
+    """
+    dm_bindings = load_dm_bindings()
+    entries: list[dict[str, str]] = dm_bindings["dm_bindings"]
+    remaining = [e for e in entries if e.get("agent") != agent]
+    if len(remaining) == len(entries):
+        raise DirectoryError(f"no DM binding for agent {agent!r} to remove")
+    remaining.sort(key=lambda e: e.get("agent", ""))
+
+    dest = company_dm_bindings_path()
+    _atomic_write_json(dest, {"schema_version": SCHEMA_VERSION, "dm_bindings": remaining})
+
+    print(json.dumps({
+        "dm_bindings_path": str(dest),
+        "agent": agent,
+        "action": "removed",
+        "total_dm_bindings": len(remaining),
+    }, indent=2))
+    return 0
+
+
 # --- subcommand: peers ----------------------------------------------------
 
 def cmd_peers(args: argparse.Namespace) -> int:
@@ -657,6 +845,23 @@ def cmd_peers(args: argparse.Namespace) -> int:
             continue
         per_room.setdefault(b_room, []).append(
             {"agent": b_agent, "session": entry.get("session", "")})
+
+    # DM bindings are per-agent singletons (no room); drop any referencing an
+    # agent no longer in the directory (surfaced as a warning, reader-side rule).
+    dm_bindings = load_dm_bindings()
+    dm_report: list[dict[str, str]] = []
+    for entry in dm_bindings.get("dm_bindings", []):
+        d_agent = entry.get("agent", "")
+        if d_agent not in agent_names:
+            binding_warnings.append(
+                f"dm binding agent={d_agent!r} references a name not in the "
+                f"directory; dropped")
+            continue
+        rec: dict[str, str] = {"agent": d_agent, "session": entry.get("session", "")}
+        if entry.get("city"):
+            rec["city"] = entry["city"]
+        dm_report.append(rec)
+    dm_report.sort(key=lambda b: b["agent"])
 
     rooms = directory.get("rooms", [])
     if args.room:
@@ -684,6 +889,7 @@ def cmd_peers(args: argparse.Namespace) -> int:
 
     print(json.dumps({
         "rooms": report_rooms,
+        "dm_bindings": dm_report,
         "membership_warnings": membership_warnings,
         "binding_warnings": binding_warnings,
     }, indent=2, sort_keys=True))
@@ -719,6 +925,25 @@ def build_parser() -> argparse.ArgumentParser:
              "own city (city-qualified binding; the adapter needs a matching "
              "SLACK_COMPANY_CITY_APIS entry)")
     p_bind.set_defaults(func=cmd_bind)
+
+    p_bind_dm = sub.add_parser(
+        "bind-company-dm",
+        help="Record (or --remove) the singleton agent -> session per-agent DM "
+             "binding.",
+    )
+    p_bind_dm.add_argument("--agent", default="", help="Directory agent name (slug)")
+    p_bind_dm.add_argument("--session", default="", help="gc session name to DM-bind")
+    p_bind_dm.add_argument(
+        "--city", default="",
+        help="gc city hosting the session when it differs from the adapter's "
+             "own city (city-qualified binding; the adapter needs a matching "
+             "SLACK_COMPANY_CITY_APIS entry)")
+    p_bind_dm.add_argument(
+        "--remove", default="", metavar="AGENT",
+        help="Unbind: remove AGENT's DM binding. The agent need not still be in "
+             "the directory, so a stale row left by a rename can be cleared "
+             "(the documented redrive-recovery path).")
+    p_bind_dm.set_defaults(func=cmd_bind_dm)
 
     p_peers = sub.add_parser(
         "peers",

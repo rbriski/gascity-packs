@@ -47,6 +47,12 @@ const (
 	// delegation_key. peer_delegation and peer_result ALWAYS carry a
 	// non-empty delegation_key; peer_input never does.
 	wakeKindPeerInput = "peer_input"
+	// wakeKindDM is the single wake on an admitted per-agent DM (Phase 4):
+	// an allowed human's direct message to an agent app, delivered to that
+	// agent's singleton DM-bound session. No mention/ambient/delegation
+	// semantics — one owner, one target. Shares the "dm" literal with the
+	// receipt kind and the current-turn pointer kind.
+	wakeKindDM = receiptKindDM
 )
 
 // Machine-readable no-delivery reasons. An empty Reason on a RouteDecision
@@ -61,6 +67,18 @@ const (
 	wakeReasonUnknownBot           = "unknown_bot"            // unknown bot / webhook / integration
 	wakeReasonNoAmbientMembers     = "no_ambient_members"     // unmentioned human, room has no ambient wake set
 	wakeReasonMentionedNoEligible  = "mentioned_no_eligible"  // mentioned agents are not member+eligible
+	// DM no-delivery reasons (Phase 4). A DM that wakes nobody carries one
+	// of these on the terminal receipt so the denial is machine-readable
+	// (policy denials must never be silent drops).
+	wakeReasonDMSelfEcho         = "dm_self_echo"          // the owner app's own outbound post, echoed back
+	wakeReasonDMAuthorNotAllowed = "dm_author_not_allowed" // human author denied by the DM allowlist / team check
+	wakeReasonDMOwnerUnknown     = "dm_owner_unknown"      // owner app no longer joins a directory agent
+	// wakeReasonDMAppUnregistered parks (non-terminal, sweep-recoverable) a DM
+	// receipt whose agent-apps registry is unavailable at routing (nil snapshot,
+	// or the owner record missing) — a transient infra/reload failure, not a
+	// policy answer. Distinct from dm_author_not_allowed, which is the terminal
+	// denial reserved for a LIVE registry that answered the policy question.
+	wakeReasonDMAppUnregistered = "dm_app_unregistered"
 )
 
 // AdmissibleSubtype reports whether a Slack message subtype is admissible:

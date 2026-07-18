@@ -541,3 +541,126 @@ def test_company_ambient_targeted_posts_root_reply(
     assert p["thread_ts"] == "1700000000.000100"
     assert "<@" not in p["text"]
     assert "metadata" not in p
+
+
+# --------------------------------------------------------------------------
+# Per-agent DM reply path (Phase 4) — reply-current diverts to the DM pointer.
+# --------------------------------------------------------------------------
+
+def _write_dm_bindings(outbound, *, session: str = "ollie-main", agent: str = "ollie") -> None:
+    slackdir = pathlib.Path(_os.environ["GC_CITY_PATH"]) / ".gc" / "slack"
+    slackdir.mkdir(parents=True, exist_ok=True)
+    (slackdir / "dm_bindings.json").write_text(json.dumps({
+        "schema_version": 1, "dm_bindings": [{"agent": agent, "session": session}]}))
+
+
+def _write_dm_turn(outbound, *, session: str, agent: str = "ollie",
+                   ts: str = "1700000000.000900",
+                   delivered_at: str = "2026-07-18T12:00:05Z") -> None:
+    tdir = outbound.turns_dir()
+    tdir.mkdir(parents=True, exist_ok=True)
+    turn = {
+        "schema_version": 1, "session": session, "receipt_id": "in-dm",
+        "team_id": "T0AAAAAAA", "channel_id": "D0HUMANOLLIE", "ts": ts,
+        "room": "", "kind": "dm", "thread_root_ts": ts, "agent": agent,
+        "owner_app_id": "A0AAAAAA1", "delivered_at": delivered_at,
+    }
+    dm_dir = tdir / "dm"
+    dm_dir.mkdir(parents=True, exist_ok=True)
+    (dm_dir / f"{session}.json").write_text(json.dumps(turn))
+
+
+def test_company_dm_pointer_posts_dm_reply(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    rc, _common = _import_modules()
+    outbound = _import_outbound()
+    _setup_company(outbound, tmp_path)
+    _write_dm_bindings(outbound, session="ollie-main")
+    _write_dm_turn(outbound, session="ollie-main")
+    monkeypatch.setenv("GC_SESSION_NAME", "ollie-main")
+
+    captured: list = []
+
+    def fake_post(method, token, payload, *, api_base, timeout):
+        captured.append({"token": token, "payload": payload})
+        return 200, {}, {"ok": True, "ts": "1700000000.001000"}
+    monkeypatch.setattr(outbound, "_slack_web_post", fake_post)
+
+    rc_code = rc.main(["--body", "hello human"])
+    assert rc_code == 0
+    assert len(captured) == 1
+    p = captured[0]["payload"]
+    assert captured[0]["token"] == "xoxb-ollie"  # owner agent token
+    assert p["channel"] == "D0HUMANOLLIE"
+    assert p["text"] == "hello human"
+    assert "<@" not in p["text"]
+    assert p["metadata"]["event_type"] == "gc_dm_reply"
+
+
+def test_company_kind_override_selects_room_over_newer_dm(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    rc, _common = _import_modules()
+    outbound = _import_outbound()
+    _setup_company(outbound, tmp_path)
+    _write_dm_bindings(outbound, session="ollie-main")
+    # Room pointer (older) + DM pointer (newer). Newest would pick DM.
+    _write_turn(outbound, session="ollie-main", kind="targeted", agent="ollie",
+                ts="1700000000.000500")
+    _write_dm_turn(outbound, session="ollie-main", delivered_at="2026-07-18T13:00:00Z")
+    monkeypatch.setenv("GC_SESSION_NAME", "ollie-main")
+
+    captured: list = []
+
+    def fake_post(method, token, payload, *, api_base, timeout):
+        captured.append({"token": token, "payload": payload})
+        return 200, {}, {"ok": True, "ts": "1700000000.001000"}
+    monkeypatch.setattr(outbound, "_slack_web_post", fake_post)
+
+    # --kind room forces the room pointer despite the newer DM.
+    assert rc.main(["--body", "to the room", "--kind", "room"]) == 0
+    p = captured[0]["payload"]
+    assert p["channel"] == "C0AAAAAAA"  # room channel, not the DM channel
+    assert "metadata" not in p  # ambient/targeted room reply carries no metadata
+
+
+def test_company_newest_dm_wins_without_override(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    rc, _common = _import_modules()
+    outbound = _import_outbound()
+    _setup_company(outbound, tmp_path)
+    _write_dm_bindings(outbound, session="ollie-main")
+    _write_turn(outbound, session="ollie-main", kind="targeted", agent="ollie",
+                ts="1700000000.000500")  # delivered 2026-07-17T12:00:00Z
+    _write_dm_turn(outbound, session="ollie-main", delivered_at="2026-07-18T13:00:00Z")
+    monkeypatch.setenv("GC_SESSION_NAME", "ollie-main")
+
+    captured: list = []
+
+    def fake_post(method, token, payload, *, api_base, timeout):
+        captured.append({"token": token, "payload": payload})
+        return 200, {}, {"ok": True, "ts": "1700000000.001000"}
+    monkeypatch.setattr(outbound, "_slack_web_post", fake_post)
+
+    assert rc.main(["--body", "auto"]) == 0
+    assert captured[0]["payload"]["channel"] == "D0HUMANOLLIE"  # DM wins (newer)
+
+
+def test_kind_room_does_not_hijack_non_company_session(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """A non-company session passing --kind room must reach the legacy path,
+    not error on a missing company room pointer (regression guard)."""
+    rc, common = _import_modules()
+    monkeypatch.setenv("GC_SESSION_NAME", "not-a-company-session")
+    monkeypatch.setenv("SLACK_WORKSPACE_ID", "T0TESTWS")
+
+    seen = {}
+
+    def fake_publish(**kwargs):
+        seen.update(kwargs)
+        return {"delivered": True}
+    monkeypatch.setattr(common, "publish_via_gc_outbound", fake_publish)
+    monkeypatch.setattr(common, "current_session_id", lambda: "sess-id")
+
+    rc_code = rc.main(["--conversation-id", "C0LEGACY", "--kind", "room", "--body", "hi"])
+    assert rc_code == 0
+    assert seen["kind"] == "room"  # honored as the legacy conversation kind

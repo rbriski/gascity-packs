@@ -899,3 +899,310 @@ def test_session_name_aliases_dot_dunder():
     assert mod.session_name_aliases("teams.it") == ["teams.it", "teams__it"]
     assert mod.session_name_aliases("plain") == ["plain"]
     assert mod.session_name_aliases("") == []
+
+
+# --------------------------------------------------------------------------
+# 12. Per-agent DMs (Phase 4): pointer contract, resolution, spoof guard,
+#     durable DM posting + reconciliation, delegation refusal.
+# --------------------------------------------------------------------------
+
+DM_BINDINGS = {
+    "schema_version": 1,
+    "dm_bindings": [
+        {"agent": "ollie", "session": "ollie-dm"},
+        {"agent": "riley", "session": "riley-dm"},
+    ],
+}
+
+
+def _write_dm_bindings(tmp_path: pathlib.Path, obj=None) -> None:
+    slackdir = tmp_path / ".gc" / "slack"
+    slackdir.mkdir(parents=True, exist_ok=True)
+    (slackdir / "dm_bindings.json").write_text(json.dumps(obj or DM_BINDINGS))
+
+
+def _write_dm_turn(mod, session: str, **overrides) -> dict:
+    tdir = mod.turns_dir()
+    tdir.mkdir(parents=True, exist_ok=True)
+    turn = {
+        "schema_version": 1,
+        "session": session,
+        "receipt_id": "in-dm",
+        "team_id": "T0AAAAAAA",
+        "channel_id": "D0HUMANOLLIE",
+        "ts": "1700000000.000900",
+        "room": "",
+        "kind": "dm",
+        "thread_root_ts": "1700000000.000900",
+        "agent": "ollie",
+        "owner_app_id": "A0AAAAAA1",
+        "delivered_at": "2026-07-18T12:00:00Z",
+    }
+    turn.update(overrides)
+    dm_dir = tdir / "dm"
+    dm_dir.mkdir(parents=True, exist_ok=True)
+    (dm_dir / f"{session}.json").write_text(json.dumps(turn))
+    return turn
+
+
+def test_dm_pointer_parses_with_empty_room(env) -> None:
+    turn = _write_dm_turn(env, "ollie-dm")
+    parsed = env.read_current_turn_dm("ollie-dm")
+    assert parsed is not None
+    assert parsed["kind"] == "dm" and parsed["room"] == ""
+    assert parsed["owner_app_id"] == "A0AAAAAA1"
+
+
+def test_dm_pointer_requires_owner_app_id(env) -> None:
+    _write_dm_turn(env, "ollie-dm", owner_app_id="")
+    with pytest.raises(env.OutboundError) as exc:
+        env.read_current_turn_dm("ollie-dm")
+    assert "owner_app_id" in str(exc.value)
+
+
+def test_non_dm_pointer_still_requires_room(env) -> None:
+    # A room-kind pointer with an empty room stays invalid (relaxation is
+    # dm-only).
+    tdir = env.turns_dir(); tdir.mkdir(parents=True, exist_ok=True)
+    turn = _write_turn(env, "ollie-main")
+    turn["room"] = ""
+    (tdir / "ollie-main.json").write_text(json.dumps(turn))
+    with pytest.raises(env.OutboundError):
+        env.read_current_turn("ollie-main")
+
+
+def test_room_pointer_without_owner_app_id_is_byte_compatible(env) -> None:
+    # A pre-Phase-4 room pointer (no owner_app_id key) parses unchanged.
+    _write_turn(env, "ollie-main", kind="targeted")
+    on_disk = json.loads((env.turns_dir() / "ollie-main.json").read_text())
+    assert "owner_app_id" not in on_disk
+    parsed = env.read_current_turn("ollie-main")
+    assert parsed is not None and parsed["kind"] == "targeted"
+
+
+def test_resolve_source_none_without_pointers(env) -> None:
+    assert env.resolve_reply_pointer_source("ollie-main") is None
+
+
+def test_resolve_source_room_only_and_dm_only(env) -> None:
+    _write_turn(env, "ollie-main", kind="targeted")
+    assert env.resolve_reply_pointer_source("ollie-main") == "room"
+    _write_dm_turn(env, "ollie-dm")
+    assert env.resolve_reply_pointer_source("ollie-dm") == "dm"
+
+
+def test_resolve_source_newest_delivered_at_wins(env) -> None:
+    # Same session has both a room and a DM pointer; newest delivered_at wins.
+    _write_turn(env, "sess", kind="targeted", delivered_at="2026-07-18T12:00:00Z")
+    _write_dm_turn(env, "sess", delivered_at="2026-07-18T12:00:05Z")
+    assert env.resolve_reply_pointer_source("sess") == "dm"
+    # Move the room pointer newer.
+    _write_turn(env, "sess", kind="targeted", delivered_at="2026-07-18T12:00:09Z")
+    assert env.resolve_reply_pointer_source("sess") == "room"
+
+
+def test_resolve_source_tie_prefers_dm(env) -> None:
+    _write_turn(env, "sess", kind="targeted", delivered_at="2026-07-18T12:00:00Z")
+    _write_dm_turn(env, "sess", delivered_at="2026-07-18T12:00:00Z")
+    assert env.resolve_reply_pointer_source("sess") == "dm"
+
+
+def test_resolve_source_kind_override(env) -> None:
+    _write_turn(env, "sess", kind="targeted", delivered_at="2026-07-18T12:00:09Z")
+    _write_dm_turn(env, "sess", delivered_at="2026-07-18T12:00:00Z")
+    # Room is newer, but --kind dm forces the DM pointer.
+    assert env.resolve_reply_pointer_source("sess", kind_override="dm") == "dm"
+    assert env.resolve_reply_pointer_source("sess", kind_override="room") == "room"
+
+
+def test_resolve_source_kind_override_missing_pointer_errors(env) -> None:
+    _write_dm_turn(env, "ollie-dm")
+    with pytest.raises(env.OutboundError):
+        env.resolve_reply_pointer_source("ollie-dm", kind_override="room")
+
+
+def test_dm_reply_posts_with_owner_token(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    _write_dm_turn(env, "ollie-dm")
+    captured: list = []
+    env._slack_web_post = _mock_ok(captured, ["1700000000.001000"])
+    result = env.post_company_dm_reply(body="hi human", origin_ts="", session_name="ollie-dm")
+    assert result["status"] == "posted" and result["kind"] == "dm"
+    p = captured[0]["payload"]
+    assert captured[0]["token"] == "xoxb-test-token"  # ollie's own token
+    assert p["channel"] == "D0HUMANOLLIE"
+    assert p["thread_ts"] == "1700000000.000900"
+    assert p["text"] == "hi human"  # escaped, no live mention
+    assert "<@" not in p["text"]
+    assert p["metadata"]["event_type"] == "gc_dm_reply"
+    assert p["metadata"]["event_payload"]["nonce"] == result["nonce"]
+
+
+def test_dm_reply_escapes_body(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    _write_dm_turn(env, "ollie-dm")
+    captured: list = []
+    env._slack_web_post = _mock_ok(captured, ["1700000000.001000"])
+    env.post_company_dm_reply(body="<@U0AAAAAA2> & <b>", origin_ts="", session_name="ollie-dm")
+    text = captured[0]["payload"]["text"]
+    assert "<@" not in text and "&amp;" in text and "&lt;b&gt;" in text
+
+
+def test_dm_reply_spoof_guard_unbound_session(env, tmp_path) -> None:
+    # ollie's DM pointer, but the session is not ollie's dm-bound session.
+    _write_dm_bindings(tmp_path, {
+        "schema_version": 1, "dm_bindings": [{"agent": "ollie", "session": "someone-else"}]})
+    _write_dm_turn(env, "ollie-dm")
+    with pytest.raises(env.OutboundError) as exc:
+        env.post_company_dm_reply(body="x", origin_ts="", session_name="ollie-dm")
+    assert "spoof guard" in str(exc.value)
+
+
+def test_dm_reply_session_alias_accepted(env, tmp_path) -> None:
+    # dm_binding uses the dotted form; the session runs with the dunder form.
+    _write_dm_bindings(tmp_path, {
+        "schema_version": 1, "dm_bindings": [{"agent": "ollie", "session": "teams.pm"}]})
+    _write_dm_turn(env, "teams__pm")
+    captured: list = []
+    env._slack_web_post = _mock_ok(captured, ["1700000000.001000"])
+    result = env.post_company_dm_reply(body="ok", origin_ts="", session_name="teams__pm")
+    assert result["status"] == "posted"
+
+
+def test_dm_reply_owner_app_id_mismatch_rejected(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    _write_dm_turn(env, "ollie-dm", owner_app_id="A0WRONGAPP")
+    with pytest.raises(env.OutboundError) as exc:
+        env.post_company_dm_reply(body="x", origin_ts="", session_name="ollie-dm")
+    assert "owner_app_id" in str(exc.value)
+
+
+def test_dm_reply_origin_ts_mismatch(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    _write_dm_turn(env, "ollie-dm", ts="1700000000.000900")
+    with pytest.raises(env.OutboundError) as exc:
+        env.post_company_dm_reply(body="x", origin_ts="1700000000.999999",
+                                  session_name="ollie-dm")
+    assert "origin-ts" in str(exc.value)
+
+
+def test_dm_reply_transient_parks_then_reconciles(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    _write_dm_turn(env, "ollie-dm")
+    # First POST times out -> parked (no receipt yet).
+    env._slack_web_post = lambda *a, **k: (_ for _ in ()).throw(
+        env.TransientPostError("timeout"))
+    parked = env.post_company_dm_reply(body="deferred", origin_ts="", session_name="ollie-dm")
+    assert parked["status"] == "parked"
+    nonce = parked["nonce"]
+    intents = env.list_intents()
+    assert len(intents) == 1 and intents[0]["status"] == "posting"
+    assert intents[0]["op"] == "dm"
+    # The owner app's self-echo lands as a dm receipt carrying our nonce.
+    _drop_receipt(env, nonce, "1700000000.001100", channel="D0HUMANOLLIE",
+                  app_id="A0AAAAAA1", event_type="gc_dm_reply", name="in-dm-echo")
+    assert env.reconcile_posting_intents() == 1
+    resolved = env.list_intents()[0]
+    assert resolved["status"] == "published"
+    assert resolved["posted_ts"] == "1700000000.001100"
+    # A DM reply owns NO delegation record.
+    assert env.list_delegations() == []
+
+
+def test_dm_reply_no_company_pointer_needs_dm_pointer(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    # Only a room pointer exists; the DM verb refuses (no dm pointer).
+    _write_turn(env, "ollie-dm", kind="targeted")
+    with pytest.raises(env.OutboundError) as exc:
+        env.post_company_dm_reply(body="x", origin_ts="", session_name="ollie-dm")
+    assert "no DM current-turn pointer" in str(exc.value)
+
+
+def test_delegate_refused_from_dm_root(env, tmp_path) -> None:
+    # A DM turn can only reach delegate if it were the room pointer; the gate
+    # refuses a dm kind explicitly regardless.
+    _write_dm_bindings(tmp_path)
+    tdir = env.turns_dir(); tdir.mkdir(parents=True, exist_ok=True)
+    dm_as_room = {
+        "schema_version": 1, "session": "ollie-main", "receipt_id": "in-x",
+        "team_id": "T0AAAAAAA", "channel_id": "D0HUMANOLLIE", "ts": "1700000000.000900",
+        "room": "", "kind": "dm", "thread_root_ts": "1700000000.000900",
+        "agent": "ollie", "owner_app_id": "A0AAAAAA1",
+        "delivered_at": "2026-07-18T12:00:00Z",
+    }
+    (tdir / "ollie-main.json").write_text(json.dumps(dm_as_room))
+    with pytest.raises(env.OutboundError) as exc:
+        env.run_delegate(to="riley", body="x", origin_ts="", session_name="ollie-main")
+    assert "DM-rooted turn" in str(exc.value)
+
+
+# --------------------------------------------------------------------------
+# 13. Cross-language golden/interop fixtures for the DM surface (skip-if-absent;
+#     the Go/adapter side owns creating tests/fixtures/company/).
+# --------------------------------------------------------------------------
+
+def test_dm_bindings_golden_fixture_parses_if_present(env) -> None:
+    fx = FIXTURES / "dm_bindings.json"
+    if not fx.exists():
+        pytest.skip("dm_bindings.json golden fixture not present yet (adapter side)")
+    data = json.loads(fx.read_text())
+    assert data.get("schema_version") == 1
+    assert isinstance(data.get("dm_bindings"), list)
+    seen_agents = set()
+    for entry in data["dm_bindings"]:
+        assert entry["agent"] not in seen_agents  # singleton per agent
+        seen_agents.add(entry["agent"])
+        assert entry.get("session")
+
+
+def test_dm_pointer_golden_fixture_parses_if_present(env) -> None:
+    fx = FIXTURES / "dm_current_turn.json"
+    if not fx.exists():
+        pytest.skip("dm_current_turn.json golden fixture not present yet (adapter side)")
+    parsed = env.parse_current_turn(json.loads(fx.read_text()))
+    assert parsed["kind"] == "dm"
+    assert parsed["room"] == ""  # empty room permitted for kind dm
+    assert parsed["owner_app_id"]
+    assert "delegation_key" not in json.loads(fx.read_text())  # DM turns are keyless
+
+
+def test_self_echo_fixture_metadata_matches_dm_metadata(env) -> None:
+    """C4/m3: the committed self-echo wire fixture pins the EXACT metadata block
+    ``dm_metadata`` produces ({"event_type":"gc_dm_reply","event_payload":
+    {"v":1,"nonce":...}}), so a drift in either breaks a test."""
+    envelope = json.loads((FIXTURES / "message_im_self_echo.json").read_text())
+    inner_meta = envelope["event"]["metadata"]
+    nonce = inner_meta["event_payload"]["nonce"]
+    assert inner_meta == env.dm_metadata(nonce)
+
+
+def test_self_echo_fixture_reconciles_dm_intent(env) -> None:
+    """C4/m12: a stuck posting op=dm intent reconciles against the committed
+    self-echo fixture's nonce end-to-end through _scan_receipt_for_nonce — the
+    interop pin the fixture exists for (spec test-plan items 4 + 12)."""
+    envelope = json.loads((FIXTURES / "message_im_self_echo.json").read_text())
+    inner = envelope["event"]
+    nonce = inner["metadata"]["event_payload"]["nonce"]
+
+    rdir = env.ingress_dir()
+    rdir.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        "id": "in-selfecho",
+        "origin": {
+            "team_id": envelope["team_id"],
+            "channel_id": inner["channel"],
+            "ts": inner["ts"],
+        },
+        "event": inner,  # the exact wire event Slack echoed back
+    }
+    (rdir / "in-selfecho.json").write_text(json.dumps(receipt))
+
+    intent = {
+        "op": "dm",
+        "nonce": nonce,
+        "team_id": envelope["team_id"],
+        "channel_id": inner["channel"],
+        "source_app_id": inner["app_id"],
+        "source_bot_user_id": inner["user"],
+    }
+    assert env._scan_receipt_for_nonce(intent) == inner["ts"]

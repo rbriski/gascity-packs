@@ -146,14 +146,29 @@ identity app** — one minimal Slack app per named directory agent (see
 `docs/company-rooms.md`). Its bot user is the agent's real, mentionable
 `<@U…>` identity in company rooms, and its bot token is the agent's
 outbound sending identity for `gc slack delegate` / `reply-current`.
-It is deliberately minimal: bot user, `chat:write` **only**, App Home
-Messages tab enabled, interactivity/Socket Mode/token rotation off, and
-**no event subscriptions**. In the rooms phases the agent app observes
-nothing — the switchboard (`app.json`) stays the single admission owner
-for room traffic — so `agent-app.json` declares no `settings.event_
-subscriptions` at all. The per-agent DM phase later adds `message.im` +
-`im:history` to each agent app; until then the empty event set is load
-bearing, not an oversight.
+It is deliberately minimal: bot user, App Home Messages tab enabled,
+interactivity/Socket Mode/token rotation off. For **room** traffic the
+switchboard (`app.json`) stays the single admission owner — the agent app
+observes no room events.
+
+The **per-agent DM phase (Phase 4)** turns each agent app into the
+admission owner of its own DMs. The template now declares:
+
+- `oauth_config.scopes.bot`: `chat:write`, **`im:history`** (read the DM
+  channel for hydration), and **`reactions:write`** (the agent app is the
+  visible-ack actor on its own DM channel — the switchboard token is never
+  used on a DM channel).
+- `settings.event_subscriptions.bot_events`: **`message.im`**, pointed at
+  the **same public funnel `request_url` as the switchboard**. As with
+  `app.json`, the committed template omits `request_url` (it is
+  deployment-specific); add
+  `"request_url": "https://<your-funnel-host>/slack/events"` inside the
+  `event_subscriptions` block before pasting/updating.
+
+Scope + event changes require a per-app **reinstall** (18 apps + the pilot
+step). **Delayed Events must be enabled on every agent app** — the
+degraded-mode 503-redrive recovery depends on Slack's redelivery horizon
+exactly as rooms do.
 
 The template ships two `REPLACE-agent-name` placeholders
 (`display_information.name` and `features.bot_user.display_name`).
@@ -176,15 +191,25 @@ Replace both with the agent's directory slug before creating each app.
    user id). Write both into the agent's `[[agents]]` entry in the
    company-directory TOML (`name` / `app_id` / `bot_user_id`), then
    `gc slack import-company-directory --file <rooms.toml>`.
-3. **Signing secret: not needed yet.** Agent identity apps have no event
-   subscriptions in the rooms phases, so the adapter never verifies
-   their signatures and there is nothing to register. The DM phase
-   (which adds `message.im` per agent app) is where each agent app's
-   signing secret — Basic Information → App Credentials → Signing
-   Secret — must be registered onto its `(workspace_id, app_id)` app
-   record; the exact registration command ships with that phase (the
-   current `import-app` CLI has no signing-secret flag). Keep the
-   secret somewhere safe until then.
+3. **Register the signing secret, THEN wire the Request URL (order
+   matters).** Harvest the app's signing secret (Basic Information → App
+   Credentials → Signing Secret) and register it:
+
+   ```bash
+   gc slack register-agent-app --team-id <T…> --api-app-id <A…> --signing-secret <secret>
+   ```
+
+   This writes a `{team_id, api_app_id, signing_secret}` record into
+   `agent_apps.json` (a NEW registry, 0600, loaded at startup and on
+   SIGHUP — distinct from `apps.json`). Confirm `/healthz`
+   `registered_agent_apps` incremented **with no join warning**
+   (`registered_agent_apps_join_warnings=0`) — a warning means the
+   `api_app_id` has no matching `agents[].app_id` in the directory, and
+   the app will admit nothing until you fix the directory. Only **after**
+   registration, set the `message.im` Request URL in the manifest and
+   save: the verification handshake fires on save and verifies via the
+   trial path, so **registration MUST precede the Request URL, else the
+   handshake 401s.**
 4. **Drop the bot token into the company secrets dir.** Write the
    `xoxb-…` token to `secrets/bot-token-<agent>.txt` under the adapter
    state root (`SLACK_COMPANY_SECRETS_DIR`, else
@@ -203,12 +228,42 @@ Replace both with the agent's directory slug before creating each app.
    room can neither be delivered its events nor post into it (private
    rooms always require membership; this design never uses
    `chat:write.public`, so public rooms behave identically).
+6. **Reinstall, enable Delayed Events, then bind a DM session.**
+   Reinstall the app to the workspace to pick up the new scopes
+   (reinstall does **not** rotate the signing secret; the bot token
+   rotates only if you explicitly reissue it — if it did, re-drop
+   `bot-token-<agent>.txt`). Enable **Delayed Events** on the app. Then
+   bind a DM session and reload:
+
+   ```bash
+   gc slack bind-company-dm --agent ollie --session ollie   # per-agent singleton
+   kill -HUP <adapter-pid>                                   # or restart
+   ```
+
+   `bind-company-dm` writes/updates one `{agent, session[, city]}` row in
+   `dm_bindings.json` (singleton per agent; omit `--city` for the
+   adapter's own city). To unbind — including clearing a **stale row**
+   left by an agent rename so the redrive-recovery flow can rebind the
+   session — use `gc slack bind-company-dm --remove <agent>` (the agent
+   need not still be in the directory), then `kill -HUP <adapter-pid>`.
+
+   DM the app as a human: you should see 👀 → the session's reply → ✅ in
+   the DM. Pilot **OLLIE only**, prove replay + spoof against the live
+   endpoint, then roll the remaining 17.
+
+**Ordering recap (the whole fleet depends on it).** Deploy the Phase 4
+adapter + CLI first; then per app: `register-agent-app` → manifest
+Request URL → reinstall → Delayed Events → `dm_bindings` import → SIGHUP.
+`register-agent-app` must precede the Request URL (the save-time handshake
+verifies via the trial path), and the DM binding must precede live traffic
+(an unbound agent records a `failed_dm_unbound` target, drained later with
+`gc slack company-redrive`).
 
 **App Home Messages tab.** The template enables it
 (`app_home.messages_tab_enabled: true`,
-`messages_tab_read_only_enabled: false`) even though rooms don't need
-it: it is a hard Slack prerequisite for a human to DM a bot, so the per
-agent DM phase would be dead-on-arrival without it. Leave it on.
+`messages_tab_read_only_enabled: false`): it is a hard Slack prerequisite
+for a human to DM a bot, so the per-agent DM phase is dead-on-arrival
+without it. Leave it on.
 
 ### Switchboard changes for company rooms
 

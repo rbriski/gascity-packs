@@ -169,14 +169,18 @@ def test_agent_manifest_has_bot_user(agent_manifest: dict) -> None:
     assert bot.get("display_name"), "features.bot_user.display_name is required"
 
 
-def test_agent_manifest_scopes_are_exactly_chat_write(agent_manifest: dict) -> None:
-    # An agent identity app is an outbound sender only. Anything beyond
-    # chat:write is over-broad for the rooms phases; the DM phase adds
-    # im:history in a separate, reviewed change.
+def test_agent_manifest_scopes_are_dm_phase_minimal(agent_manifest: dict) -> None:
+    # Phase 4 (per-agent DMs) widens the agent app's scopes exactly to the
+    # DM-actor set (spec §Wire and manifest changes): chat:write (outbound
+    # sender) + im:history (DM hydration) + reactions:write (the DM ack actor
+    # is the agent app itself). Nothing beyond these three is justified — the
+    # switchboard stays the single room-admission owner.
     scopes = agent_manifest.get("oauth_config", {}).get("scopes", {}).get("bot")
-    assert scopes == ["chat:write"], (
-        f"agent app must declare exactly [chat:write], got {scopes!r}"
+    assert scopes == ["chat:write", "im:history", "reactions:write"], (
+        "agent app must declare exactly [chat:write, im:history, reactions:write], "
+        f"got {scopes!r}"
     )
+    assert scopes == sorted(scopes) and len(scopes) == len(set(scopes))
 
 
 def test_agent_manifest_messages_tab_enabled(agent_manifest: dict) -> None:
@@ -192,14 +196,17 @@ def test_agent_manifest_messages_tab_enabled(agent_manifest: dict) -> None:
     )
 
 
-def test_agent_manifest_has_no_event_subscriptions(agent_manifest: dict) -> None:
-    # The switchboard is the single admission owner in the rooms phases;
-    # an agent app that subscribes to anything would become a second
-    # observer. The DM phase adds message.im deliberately, elsewhere.
-    settings = agent_manifest.get("settings", {})
-    subs = settings.get("event_subscriptions")
-    assert not (subs and subs.get("bot_events")), (
-        "agent app must declare no bot event subscriptions in the rooms phases"
+def test_agent_manifest_subscribes_only_to_message_im(agent_manifest: dict) -> None:
+    # Phase 4: the agent app subscribes to message.im ONLY — its own 1:1 DMs.
+    # It must never observe room traffic (message.channels/groups/mpim or
+    # app_mention), which would make it a second admission owner; the
+    # switchboard remains the single room-admission owner. The event Request
+    # URL is operator-supplied on save (same public funnel), so the template
+    # carries no request_url.
+    subs = agent_manifest.get("settings", {}).get("event_subscriptions", {})
+    events = subs.get("bot_events")
+    assert events == ["message.im"], (
+        f"agent app must subscribe to exactly [message.im], got {events!r}"
     )
 
 

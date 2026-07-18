@@ -37,6 +37,12 @@ type companyGateway struct {
 
 	dirStore  *companyDirectoryStore
 	bindStore *companyBindingsStore
+	// dmBindStore / agentApps are the Phase 4 per-agent DM registries. Both
+	// share the never-fatal load contract of dirStore/bindStore (nil snapshot
+	// = feature dark). agentApps binds a delivering app's api_app_id to its
+	// signing secret; dmBindStore maps an agent to its singleton DM session.
+	dmBindStore *dmBindingsStore
+	agentApps   *agentAppsStore
 
 	// receipts is the durable ingress store. It may be nil at startup
 	// (degraded mode) when NewIngressReceiptStore failed; startRecovery
@@ -70,8 +76,14 @@ type companyGateway struct {
 	// Swappable in tests; the production value is an HTTP botInfoResolver.
 	authors companyAuthorResolver
 	// hydrate fetches the frozen context bundle for one message. Swappable in
-	// tests; the production value calls Slack conversations.*.
+	// tests; the production value calls Slack conversations.* with the
+	// switchboard token (room deliveries only).
 	hydrate func(msg CompanyMessage) companyHydration
+	// hydrateDM fetches the frozen context bundle for a DM using the OWNER
+	// agent's bot token (im:history) — the switchboard token must never touch
+	// a DM channel. Swappable in tests; the production value calls Slack
+	// conversations.* with the passed owner token.
+	hydrateDM func(token string, msg CompanyMessage) companyHydration
 
 	// Phase 2 shared-state directories the ingress side reads/writes.
 	intentsDir     string
@@ -122,11 +134,66 @@ type companyGateway struct {
 	// and the chat.postMessage path (the single reactions/message POST paths).
 	reactHook func(method, channel, ts, name string) ackOutcome
 	replyHook func(channel, threadTS, text string) bool
+	// reactHookTok / replyHookTok are the token-parameterized ack hooks used
+	// by DM receipts (the ack actor is the owner agent's token, not the
+	// switchboard). When set they take precedence over reactHook/replyHook, so
+	// production always routes through the token-aware path (rooms pass the
+	// switchboard token; DMs pass the owner token). Tests that only exercise
+	// rooms keep setting the untyped reactHook/replyHook spies.
+	reactHookTok func(token, method, channel, ts, name string) ackOutcome
+	replyHookTok func(token, channel, threadTS, text string) bool
+
+	// secretsDir is the company secrets dir (SLACK_COMPANY_SECRETS_DIR),
+	// shared with the Python side, from which DM owner bot tokens are loaded.
+	secretsDir string
+	// verifySessions gates the advisory session-existence guard (Phase 4).
+	verifySessions bool
+	// sessionCache is the positive-only session-existence cache: a (city,
+	// session) that GET-verified 200 is cached for sessionCacheTTL. Negatives
+	// are never cached (sessions 404-then-materialize; aliases 409 transiently).
+	sessionCacheMu sync.Mutex
+	sessionCache   map[string]time.Time
+
+	// dmSigRejects counts app-bound signature rejections (a DM event whose
+	// api_app_id does not match the secret it was signed with) — /healthz
+	// company_dm_sig_reject. dmTokenMissing counts DM deliveries that fell back
+	// to context_unavailable + degraded acks because the owner token was
+	// missing — /healthz company_dm_token_missing.
+	dmSigRejects   atomic.Uint64
+	dmTokenMissing atomic.Uint64
+	// dmStatusCounts is the sweep-computed gauge of DM receipts by status,
+	// surfaced on /healthz (company_dm_receipts). Stored as an immutable
+	// pointer swapped each sweep pass.
+	dmStatusCounts atomic.Pointer[dmReceiptStatusCounts]
 
 	retention     time.Duration
 	sweepInterval time.Duration
 	staleWindow   time.Duration
 	now           func() time.Time
+}
+
+// sessionCacheTTL bounds a positive session-existence cache entry (Phase 4).
+const sessionCacheTTL = 10 * time.Minute
+
+// Advisory session-guard target details (Phase 4). Left on a target that the
+// guard blocked; preserved through the attempt-cap exhaustion path so a
+// company-redrive shows why the target never posted.
+const (
+	companyDetailSessionMissing   = "session_missing"
+	companyDetailSessionAmbiguous = "session_ambiguous"
+	// companyReasonFailedDMUnbound is the definitive detail on a DM target
+	// whose owner agent has no dm_bindings row — recoverable via company-redrive
+	// after a binding is imported (the rooms unbound rule, not a park).
+	companyReasonFailedDMUnbound = "failed_dm_unbound"
+)
+
+// dmReceiptStatusCounts is the per-status DM receipt gauge for /healthz.
+type dmReceiptStatusCounts struct {
+	Received   int
+	Routing    int
+	Delivered  int
+	NoDelivery int
+	Failed     int
 }
 
 // Company delivery tunables. Retention is Discord parity (7 days); the
@@ -189,23 +256,40 @@ func newCompanyGateway(cfg config, dir *companyDirectoryStore, bind *companyBind
 		inflight:       make(map[string]bool),
 		chains:         newChainRegistry(),
 		visibleAcks:    cfg.companyVisibleAcks,
+		secretsDir:     cfg.companySecretsDir,
+		verifySessions: cfg.companyVerifySessions,
+		sessionCache:   make(map[string]time.Time),
 		retention:      companyReceiptRetention,
 		sweepInterval:  companySweepInterval,
 		staleWindow:    companyStaleReclaimWindow,
 		now:            time.Now,
 	}
+	// Phase 4 DM registries: loaded here (never-fatal) against the directory
+	// snapshot so a DM binding / agent-app join can be validated at load. An
+	// absent file installs a nil snapshot (feature dark), matching the two
+	// Phase 1 registries.
+	g.dmBindStore = &dmBindingsStore{}
+	_ = g.dmBindStore.Load(cfg.companyDMBindingsPath, dir.Snapshot())
+	g.agentApps = &agentAppsStore{}
+	_ = g.agentApps.Load(cfg.companyAgentAppsPath, dir.Snapshot())
 	g.hydrate = func(msg CompanyMessage) companyHydration {
 		return fetchCompanyHydration(g.slackToken, g.slackClient, msg)
 	}
-	// Visible-ack hooks: the switchboard token owns reactions:write and the
-	// receipt lifecycle. Both reuse the single existing POST paths (no second
-	// reactions/message implementation) over the gateway's timeout-bounded
-	// client so a hung Slack call cannot wedge the delivery worker.
-	g.reactHook = func(method, channel, ts, name string) ackOutcome {
-		return slackReact(g.slackClient, g.slackToken, method, channel, ts, name)
+	g.hydrateDM = func(token string, msg CompanyMessage) companyHydration {
+		return fetchCompanyHydration(token, g.slackClient, msg)
 	}
-	g.replyHook = func(channel, threadTS, text string) bool {
-		if _, err := postMessageWithClient(g.slackClient, g.slackToken, slackPostMessageReq{
+	// Visible-ack hooks (token-parameterized): the ack actor's token is chosen
+	// per receipt — the switchboard token owns reactions:write and the room
+	// receipt lifecycle; a DM receipt's actor is the owner agent's token. Both
+	// reuse the single existing POST paths (no second reactions/message
+	// implementation) over the gateway's timeout-bounded client so a hung Slack
+	// call cannot wedge the delivery worker. The untyped reactHook/replyHook
+	// fields are left nil in production; only room-only test spies set them.
+	g.reactHookTok = func(token, method, channel, ts, name string) ackOutcome {
+		return slackReact(g.slackClient, token, method, channel, ts, name)
+	}
+	g.replyHookTok = func(token, channel, threadTS, text string) bool {
+		if _, err := postMessageWithClient(g.slackClient, token, slackPostMessageReq{
 			Channel:  channel,
 			ThreadTS: threadTS,
 			Text:     text,
@@ -220,6 +304,25 @@ func newCompanyGateway(cfg config, dir *companyDirectoryStore, bind *companyBind
 		g.ingressDir = receipts.dir
 	}
 	return g
+}
+
+// agentAppsSnapshot returns the current agent-apps snapshot, nil-safe on a nil
+// gateway / nil store so the HTTP verification path can call through cfg
+// unconditionally (a nil *AgentApps answers every query fail-closed).
+func (g *companyGateway) agentAppsSnapshot() *AgentApps {
+	if g == nil || g.agentApps == nil {
+		return nil
+	}
+	return g.agentApps.Snapshot()
+}
+
+// recordDMSigReject increments the app-bound signature rejection counter
+// (/healthz company_dm_sig_reject). Nil-safe.
+func (g *companyGateway) recordDMSigReject() {
+	if g == nil {
+		return
+	}
+	g.dmSigRejects.Add(1)
 }
 
 // peerEnv bundles the Phase 2 shared-state directories plus the gateway clock
@@ -280,8 +383,10 @@ func (g *companyGateway) setStoreError(err error) {
 // tryHandleEvent applies the company-room admission gate. It returns true
 // (having written the HTTP response) when it owns the event, and false to
 // let the caller fall through to the legacy path byte-for-byte. A nil
-// gateway always returns false.
-func (g *companyGateway) tryHandleEvent(w http.ResponseWriter, r *http.Request, env slackEventEnvelope) bool {
+// gateway always returns false. agentApps is the caller's once-per-request
+// registration snapshot, forwarded to the DM gate so admission uses exactly the
+// snapshot the HMAC verification used (m7); a nil snapshot answers fail-closed.
+func (g *companyGateway) tryHandleEvent(w http.ResponseWriter, r *http.Request, env slackEventEnvelope, agentApps *AgentApps) bool {
 	if g == nil {
 		return false
 	}
@@ -311,6 +416,14 @@ func (g *companyGateway) tryHandleEvent(w http.ResponseWriter, r *http.Request, 
 	default:
 		// Other non-message types follow today's path byte-for-byte.
 		return false
+	}
+	// DM admission (Phase 4): a message.im from a registered agent app is a
+	// per-agent DM owned by the DM gateway. Any other channel_type falls
+	// through to the room/legacy paths; an im from an app that is NOT a
+	// registered agent app (a DM to the switchboard) also falls through so its
+	// existing legacy behavior is byte-for-byte preserved.
+	if ev.ChannelType == "im" {
+		return g.tryHandleDMEvent(w, r, env, ev, agentApps)
 	}
 	if _, ok := g.dirStore.Snapshot().RoomByChannel(env.TeamID, ev.Channel); !ok {
 		// Not an imported company room (including the nil-directory case):
@@ -464,6 +577,13 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 	}
 
 	msg := decodeCompanyMessage(origin, r.Event)
+
+	// DM branch (Phase 4): a per-agent DM has its own routing (owner-app join,
+	// self-echo, allowed-human policy) and its own owner-token custody. It
+	// never takes the result-serialization lock (a DM is never result-bearing).
+	if r.Kind == receiptKindDM {
+		return g.deliverDMReceipt(r, origin, msg)
+	}
 
 	// S6 live ordering: hold dgser (root serialization lock) across the whole
 	// result-bearing path — from before correlation through finalize — so the
@@ -641,6 +761,20 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 			results[key] = td
 			g.deliveryFailures.Add(1)
 			log.Printf("company: delivery exhausted receipt=%s session=%s attempts=%d", id, td.Session, td.Attempts)
+			continue
+		}
+		// Advisory session-existence guard (Phase 4, gated; applies to room and
+		// DM deliveries equally): a 404/409 leaves the target pending (do NOT
+		// post) with the guard detail, consuming one attempt so the cap still
+		// bounds the loop; the sweep re-checks. A guard error or flag-off never
+		// blocks.
+		if blocked, detail := g.sessionGuardBlock(td.City, td.Session); blocked {
+			td.Attempts++
+			td.UpdatedAt = now
+			td.Status = companyTargetPending
+			td.Detail = detail
+			results[key] = td
+			log.Printf("company: session guard held receipt=%s session=%s attempts=%d detail=%s", id, td.Session, td.Attempts, detail)
 			continue
 		}
 		// The current-turn pointer is written atomically BEFORE the gc POST on
@@ -1250,7 +1384,7 @@ func (g *companyGateway) sweepOnce() {
 	if store == nil {
 		return
 	}
-	pending, healNeeded, _, err := store.SweepAndPending(g.retention)
+	pending, healNeeded, _, dmCounts, err := store.SweepAndPending(g.retention)
 	if err != nil {
 		log.Printf("company: sweep: %v", err)
 		return
@@ -1294,6 +1428,10 @@ func (g *companyGateway) sweepOnce() {
 	// intents stuck in "posting" past their retry_deadline (a wedged Python
 	// outbound flow). The Go side never reposts — this is a count only.
 	g.stalePostingIntents.Store(int64(g.peerEnv().countStalePostingIntents()))
+	// Phase 4 DM receipt gauge (by status) for /healthz, computed inside the
+	// single SweepAndPending scan above (no second full-store pass under the
+	// store mutex — m8).
+	g.dmStatusCounts.Store(&dmCounts)
 }
 
 // sweepEligible reports whether the sweep should redrive a non-terminal
@@ -1320,10 +1458,35 @@ func sweepEligible(r *IngressReceipt, now time.Time, window time.Duration) bool 
 	if r.Status != ingressStatusRouting {
 		return true
 	}
+	// A session-existence guard hold commits the receipt back to routing with a
+	// fresh UpdatedAt, but it is NOT a live in-flight claim — the worker
+	// deliberately deferred and released. The spec promises the 60s sweep
+	// re-checks such holds, so exempt them from the 5-minute stale-reclaim gate
+	// (applies to room and DM deliveries equally). The in-process single-flight
+	// claim + generation-checked Update still bound concurrent redrives.
+	if guardHeldPending(r) {
+		return true
+	}
 	if r.UpdatedAt.IsZero() {
 		return true
 	}
 	return now.Sub(r.UpdatedAt) >= window
+}
+
+// guardHeldPending reports whether any of a receipt's targets is pending behind
+// a session-existence guard hold (session_missing / session_ambiguous). Such a
+// receipt sits in status routing but is not being actively worked — the last
+// worker held it for the sweep to re-check on the 60s cadence.
+func guardHeldPending(r *IngressReceipt) bool {
+	for _, td := range r.Targets {
+		if td.Status != companyTargetPending {
+			continue
+		}
+		if td.Detail == companyDetailSessionMissing || td.Detail == companyDetailSessionAmbiguous {
+			return true
+		}
+	}
+	return false
 }
 
 // reloadOnSIGHUP stages/commits both company stores independently of the
@@ -1337,8 +1500,18 @@ func (g *companyGateway) reloadOnSIGHUP() {
 	}
 	_ = g.dirStore.StageReload(g.cfg.companyDirectoryPath)
 	_ = g.bindStore.StageReload(g.cfg.companyBindingsPath, g.dirStore.Snapshot())
-	log.Printf("company registries reloaded: directory_loaded=%v bindings_loaded=%v",
-		g.dirStore.Snapshot() != nil, g.bindStore.Snapshot() != nil)
+	// Phase 4 registries reload on the same SIGHUP, after the directory (both
+	// validate against its snapshot). Each keeps its own last-known-good on a
+	// bad file (StageReload contract).
+	if g.dmBindStore != nil {
+		_ = g.dmBindStore.StageReload(g.cfg.companyDMBindingsPath, g.dirStore.Snapshot())
+	}
+	if g.agentApps != nil {
+		_ = g.agentApps.StageReload(g.cfg.companyAgentAppsPath, g.dirStore.Snapshot())
+	}
+	log.Printf("company registries reloaded: directory_loaded=%v bindings_loaded=%v dm_bindings_loaded=%v agent_apps=%d",
+		g.dirStore.Snapshot() != nil, g.bindStore.Snapshot() != nil,
+		g.dmBindStore.Snapshot() != nil, g.agentApps.Snapshot().Len())
 }
 
 // healthzDetail returns the company status lines appended to /healthz: the
@@ -1361,8 +1534,17 @@ func (g *companyGateway) healthzDetail() string {
 	if p := g.storeErr.Load(); p != nil {
 		storeErr = *p
 	}
+	var dm dmReceiptStatusCounts
+	if p := g.dmStatusCounts.Load(); p != nil {
+		dm = *p
+	}
+	// registered_agent_apps count + directory-join warnings (Phase 4). Warnings
+	// are recomputed against the live directory snapshot each call so an
+	// operator sees them clear once the directory is fixed (no restart needed).
+	apps := g.agentApps.Snapshot()
+	joinWarnings := apps.JoinWarnings(g.dirStore.Snapshot())
 	return fmt.Sprintf(
-		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\n",
+		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\n",
 		g.barrier.Load(),
 		storeReady,
 		storeErr,
@@ -1372,5 +1554,15 @@ func (g *companyGateway) healthzDetail() string {
 		g.companyCorrelationParked.Load(),
 		g.dirStore.Snapshot() != nil,
 		g.bindStore.Snapshot() != nil,
+		g.dmBindStore.Snapshot() != nil,
+		apps.Len(),
+		len(joinWarnings),
+		g.dmSigRejects.Load(),
+		g.dmTokenMissing.Load(),
+		dm.Received,
+		dm.Routing,
+		dm.Delivered,
+		dm.NoDelivery,
+		dm.Failed,
 	)
 }
