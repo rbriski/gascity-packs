@@ -913,3 +913,21 @@ def test_bind_city_qualified(tmp_path: pathlib.Path, capsys):
             "--agent", "ollie", "--session", "teams__pm", "--city", bad,
         ]) != 0
         capsys.readouterr()
+
+
+def test_bind_same_session_name_different_city_allowed(tmp_path: pathlib.Path, capsys):
+    """The one-session-one-agent-per-room guard compares (session, city):
+    the same session NAME in different cities is a different session."""
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    capsys.readouterr()
+    mod.main(["bind-company-agent", "--room", "orchestrator-team",
+              "--agent", "ollie", "--session", "teams.pm", "--city", "orchestration"])
+    capsys.readouterr()
+    # Same name, different city: allowed.
+    assert mod.main(["bind-company-agent", "--room", "orchestrator-team",
+                     "--agent", "riley", "--session", "teams.pm", "--city", "substrate"]) == 0
+    capsys.readouterr()
+    # Same name, SAME city, different agent: rejected.
+    assert mod.main(["bind-company-agent", "--room", "orchestrator-team",
+                     "--agent", "riley", "--session", "teams.pm", "--city", "orchestration"]) != 0

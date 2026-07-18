@@ -586,12 +586,15 @@ def cmd_bind(args: argparse.Namespace) -> int:
         if (
             entry.get("room") == room
             and entry.get("session") == session
+            and (entry.get("city") or "") == city
             and entry.get("agent") != agent
         ):
+            # Same (session, city) pair only — an identical session NAME in a
+            # different city is a different session (city-qualified bindings).
             raise DirectoryError(
-                f"session {session!r} is already bound to agent "
-                f"{entry.get('agent')!r} in room {room!r}; a session may bind "
-                "only one agent per room")
+                f"session {session!r} (city {city or 'own'!r}) is already "
+                f"bound to agent {entry.get('agent')!r} in room {room!r}; a "
+                "session may bind only one agent per room")
 
     action = "created"
     for entry in entries:
