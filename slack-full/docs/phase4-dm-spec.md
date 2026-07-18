@@ -240,7 +240,13 @@ with the Python side).
   durable-intent machinery (create intent → CAS attempts →
   Retry-After → receipt-scan reconciliation, which works because
   self-echoes are admitted). Root derivation unchanged (`thread_ts`
-  else `ts`).
+  else `ts`), but DM POSTING is flat: a reply whose root equals the
+  turn's own `ts` (a top-level DM message) posts in-channel with no
+  `thread_ts`; threading applies only when the human themselves
+  replied inside a thread. (Rooms thread to protect channel
+  timelines; a 1:1 DM has none, and a threaded reply hides behind a
+  thread indicator the human easily misses — observed live on the
+  first pilot DM.)
 - Spoof guard: extended, not reused — the room guard is keyed against
   `company_bindings.json`; kind-`dm` replies validate through
   `dm_bindings` (the session must be the one the DM pointer's owner

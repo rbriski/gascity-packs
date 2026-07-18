@@ -1031,11 +1031,25 @@ def test_dm_reply_posts_with_owner_token(env, tmp_path) -> None:
     p = captured[0]["payload"]
     assert captured[0]["token"] == "xoxb-test-token"  # ollie's own token
     assert p["channel"] == "D0HUMANOLLIE"
-    assert p["thread_ts"] == "1700000000.000900"
+    # Top-level DM message (root == ts): the reply posts flat, in-channel.
+    assert "thread_ts" not in p
     assert p["text"] == "hi human"  # escaped, no live mention
     assert "<@" not in p["text"]
     assert p["metadata"]["event_type"] == "gc_dm_reply"
     assert p["metadata"]["event_payload"]["nonce"] == result["nonce"]
+
+
+def test_dm_reply_threads_only_when_human_threaded(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    # The human replied INSIDE a thread: the turn's own ts differs from its
+    # root, so the agent reply stays in that thread.
+    _write_dm_turn(env, "ollie-dm", ts="1700000000.000950",
+                   thread_root_ts="1700000000.000900")
+    captured: list = []
+    env._slack_web_post = _mock_ok(captured, ["1700000000.001000"])
+    result = env.post_company_dm_reply(body="in thread", origin_ts="", session_name="ollie-dm")
+    assert result["status"] == "posted"
+    assert captured[0]["payload"]["thread_ts"] == "1700000000.000900"
 
 
 def test_dm_reply_escapes_body(env, tmp_path) -> None:

@@ -2183,6 +2183,11 @@ def post_company_dm_reply(*, body: str, origin_ts: str, session_name: str) -> di
 
     token = load_bot_token(acting)
     text = compose_synthesis_text(body)  # escaped, no live mention
+    # DMs are flat conversations: a reply to a top-level DM message posts
+    # in-channel. Threading applies only when the human themselves replied
+    # inside a thread (the turn's root differs from its own ts). The intent
+    # tuple still keys on thread_root_ts either way.
+    dm_thread_ts = "" if turn["thread_root_ts"] == turn["ts"] else turn["thread_root_ts"]
     intent, outcome = _durable_company_post(
         op="dm",
         source_agent=acting, source_app_id=src["app_id"],
@@ -2191,7 +2196,7 @@ def post_company_dm_reply(*, body: str, origin_ts: str, session_name: str) -> di
         target_agent=acting, target_bot_user_id=src["bot_user_id"],
         team=turn["team_id"], channel=turn["channel_id"], room="",
         human_root_ts=turn["thread_root_ts"], requester_session=session_name,
-        body=body, text=text, thread_ts=turn["thread_root_ts"], token=token,
+        body=body, text=text, thread_ts=dm_thread_ts, token=token,
         metadata_nonce="",
         make_metadata=dm_metadata,
     )
