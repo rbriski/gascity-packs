@@ -546,8 +546,15 @@ def cmd_bind(args: argparse.Namespace) -> int:
     room = args.room.strip()
     agent = args.agent.strip()
     session = args.session.strip()
+    city = (getattr(args, "city", "") or "").strip()
     if not session:
         raise DirectoryError("--session must be non-empty")
+    # City is optional; when present it is interpolated into
+    # /v0/city/{city}/... URLs by the adapter, so URL-significant or
+    # whitespace bytes fail closed (mirrors the Go loader's rule).
+    if any(ch in city for ch in "/?#% \t"):
+        raise DirectoryError(
+            f"--city {city!r} contains URL-significant or whitespace characters")
 
     directory = load_directory()
     room_names = {r.get("name") for r in directory.get("rooms", [])}
@@ -590,14 +597,23 @@ def cmd_bind(args: argparse.Namespace) -> int:
     for entry in entries:
         if entry.get("room") == room and entry.get("agent") == agent:
             # The (room, agent) binding already exists: "replaced" when the
-            # session differs, "unchanged" when identical — never "created",
-            # so an operator scripting on the action can't misfire
-            # first-time side effects on an idempotent re-run.
-            action = "replaced" if entry.get("session") != session else "unchanged"
+            # session or city differs, "unchanged" when identical — never
+            # "created", so an operator scripting on the action can't
+            # misfire first-time side effects on an idempotent re-run.
+            unchanged = (entry.get("session") == session
+                         and (entry.get("city") or "") == city)
+            action = "unchanged" if unchanged else "replaced"
             entry["session"] = session
+            if city:
+                entry["city"] = city
+            else:
+                entry.pop("city", None)
             break
     else:
-        entries.append({"room": room, "agent": agent, "session": session})
+        new_entry = {"room": room, "agent": agent, "session": session}
+        if city:
+            new_entry["city"] = city
+        entries.append(new_entry)
     entries.sort(key=lambda e: (e.get("room", ""), e.get("agent", "")))
 
     dest = company_bindings_path()
@@ -608,6 +624,7 @@ def cmd_bind(args: argparse.Namespace) -> int:
         "room": room,
         "agent": agent,
         "session": session,
+        **({"city": city} if city else {}),
         "action": action,
         "total_bindings": len(entries),
     }, indent=2))
@@ -693,6 +710,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_bind.add_argument("--room", required=True, help="Directory room name (slug)")
     p_bind.add_argument("--agent", required=True, help="Directory agent name (slug)")
     p_bind.add_argument("--session", required=True, help="gc session name to bind")
+    p_bind.add_argument(
+        "--city", default="",
+        help="gc city hosting the session when it differs from the adapter's "
+             "own city (city-qualified binding; the adapter needs a matching "
+             "SLACK_COMPANY_CITY_APIS entry)")
     p_bind.set_defaults(func=cmd_bind)
 
     p_peers = sub.add_parser(

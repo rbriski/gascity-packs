@@ -864,3 +864,52 @@ members = ["ollie"]
     # The surviving room reports no bindings.
     other = next(r for r in report["rooms"] if r["name"] == "other-room")
     assert other["bindings"] == []
+
+
+def test_bind_city_qualified(tmp_path: pathlib.Path, capsys):
+    """City-qualified bindings: --city persists, changes count as replaced,
+    and URL-significant city values are rejected (mirrors the Go loader)."""
+    mod = _mod()
+    _import_valid(mod, tmp_path)
+    capsys.readouterr()
+
+    mod.main([
+        "bind-company-agent", "--room", "orchestrator-team",
+        "--agent", "ollie", "--session", "teams__pm", "--city", "platform",
+    ])
+    out = json.loads(capsys.readouterr().out)
+    assert out["action"] == "created"
+    assert out["city"] == "platform"
+    stored = json.loads(mod.company_bindings_path().read_text())
+    assert stored["bindings"][0]["city"] == "platform"
+
+    # Identical re-run (same session AND city) is unchanged.
+    mod.main([
+        "bind-company-agent", "--room", "orchestrator-team",
+        "--agent", "ollie", "--session", "teams__pm", "--city", "platform",
+    ])
+    assert json.loads(capsys.readouterr().out)["action"] == "unchanged"
+
+    # Same session, different city -> replaced.
+    mod.main([
+        "bind-company-agent", "--room", "orchestrator-team",
+        "--agent", "ollie", "--session", "teams__pm", "--city", "trust",
+    ])
+    assert json.loads(capsys.readouterr().out)["action"] == "replaced"
+
+    # Dropping --city clears the qualifier (replaced; key absent on disk).
+    mod.main([
+        "bind-company-agent", "--room", "orchestrator-team",
+        "--agent", "ollie", "--session", "teams__pm",
+    ])
+    assert json.loads(capsys.readouterr().out)["action"] == "replaced"
+    stored = json.loads(mod.company_bindings_path().read_text())
+    assert "city" not in stored["bindings"][0]
+
+    # URL-significant / whitespace city values fail closed.
+    for bad in ("a/b", "a?b", "a#b", "a%b", "a b"):
+        assert mod.main([
+            "bind-company-agent", "--room", "orchestrator-team",
+            "--agent", "ollie", "--session", "teams__pm", "--city", bad,
+        ]) != 0
+        capsys.readouterr()

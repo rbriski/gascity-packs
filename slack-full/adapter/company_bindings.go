@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 )
 
@@ -16,6 +17,11 @@ type CompanyBinding struct {
 	Room    string `json:"room"`
 	Agent   string `json:"agent"`
 	Session string `json:"session"`
+	// City optionally targets a session in a DIFFERENT gc city than the
+	// adapter's own (the live org runs one team per city; the switchboard
+	// stays the single admission owner and delivers wakes cross-city).
+	// Empty means the adapter's configured city.
+	City string `json:"city,omitempty"`
 }
 
 // companyBindingsFile is the on-disk JSON envelope for
@@ -29,7 +35,7 @@ type companyBindingsFile struct {
 // index. Like CompanyDirectory it is immutable after parse and safe for
 // concurrent reads; the snapshot holder swaps whole values.
 type CompanyBindings struct {
-	byPair map[string]string // companyBindingKey(room, agent) -> session
+	byPair map[string]*CompanyBinding // companyBindingKey(room, agent) -> binding
 }
 
 // companyBindingsSchemaVersion is the only bindings schema this build
@@ -59,12 +65,18 @@ func ParseCompanyBindings(data []byte, dir *CompanyDirectory) (b *CompanyBinding
 		return nil, nil, fmt.Errorf("company bindings: unsupported schema_version %d (want %d)", file.SchemaVersion, companyBindingsSchemaVersion)
 	}
 
-	out := &CompanyBindings{byPair: make(map[string]string, len(file.Bindings))}
+	out := &CompanyBindings{byPair: make(map[string]*CompanyBinding, len(file.Bindings))}
 	seen := make(map[string]bool, len(file.Bindings))
 	for i := range file.Bindings {
 		bd := file.Bindings[i]
 		if bd.Room == "" || bd.Agent == "" || bd.Session == "" {
 			return nil, nil, fmt.Errorf("company bindings: binding[%d] missing room/agent/session (room=%q agent=%q session=%q)", i, bd.Room, bd.Agent, bd.Session)
+		}
+		// City is optional; when present it is interpolated into
+		// /v0/city/{city}/... URLs, so URL-significant bytes fail closed
+		// exactly like GC_CITY_NAME validation at startup.
+		if strings.ContainsAny(bd.City, "/?#% \t") {
+			return nil, nil, fmt.Errorf("company bindings: binding[%d] city %q contains URL-significant or whitespace characters", i, bd.City)
 		}
 		key := companyBindingKey(bd.Room, bd.Agent)
 		// Singleton invariant: at most one binding per (room, agent). A
@@ -82,18 +94,29 @@ func ParseCompanyBindings(data []byte, dir *CompanyDirectory) (b *CompanyBinding
 			warnings = append(warnings, fmt.Sprintf("binding (room=%q, agent=%q) references unknown agent; dropped", bd.Room, bd.Agent))
 			continue
 		}
-		out.byPair[key] = bd.Session
+		bound := bd
+		out.byPair[key] = &bound
 	}
 	return out, warnings, nil
 }
 
 // SessionFor returns the singleton session bound to (room, agent).
 func (b *CompanyBindings) SessionFor(room, agent string) (string, bool) {
-	if b == nil {
+	bd, ok := b.BindingFor(room, agent)
+	if !ok {
 		return "", false
 	}
-	s, ok := b.byPair[companyBindingKey(room, agent)]
-	return s, ok
+	return bd.Session, true
+}
+
+// BindingFor returns the full singleton binding for (room, agent),
+// including its optional target city.
+func (b *CompanyBindings) BindingFor(room, agent string) (*CompanyBinding, bool) {
+	if b == nil {
+		return nil, false
+	}
+	bd, ok := b.byPair[companyBindingKey(room, agent)]
+	return bd, ok
 }
 
 // companyBindingsStore is the in-memory snapshot holder for the company

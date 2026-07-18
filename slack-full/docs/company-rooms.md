@@ -136,9 +136,14 @@ means all members are mention-eligible; wildcards are forbidden in
 
 Delivery additionally requires a **singleton company binding**: the
 company-bindings registry maps each (room, agent) pair to exactly one named
-session, written by `gc slack bind-company-agent`. A woken agent with no
-binding is a recorded delivery failure for that target, never a legacy
-fallback. The directory cannot launch arbitrary sessions.
+session, written by `gc slack bind-company-agent`. A binding may be
+**city-qualified** (`--city`): the target session lives in a different gc
+city on the same host — the switchboard remains the single admission
+owner and delivers wakes to that city's supervisor API (configured via
+`SLACK_COMPANY_CITY_APIS`), matching the live org's one-team-per-city
+topology. A woken agent with no binding is a recorded delivery failure
+for that target, never a legacy fallback. The directory cannot launch
+arbitrary sessions.
 
 The adapter keeps normalized in-memory snapshots of both registries. They
 are staged and committed **outside** the existing six-registry atomic

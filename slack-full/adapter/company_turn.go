@@ -28,7 +28,10 @@ type companyCurrentTurn struct {
 	ThreadRootTS  string `json:"thread_root_ts"`
 	Agent         string `json:"agent"`
 	DelegationKey string `json:"delegation_key,omitempty"`
-	DeliveredAt   string `json:"delivered_at"`
+	// City is the target session's gc city when a city-qualified binding
+	// delivered this turn cross-city; empty = the adapter's own city.
+	City        string `json:"city,omitempty"`
+	DeliveredAt string `json:"delivered_at"`
 }
 
 // writeCurrentTurnPointer atomically writes the pointer for one wake into
@@ -72,6 +75,7 @@ func companyPointerFromTarget(r *IngressReceipt, room *CompanyRoom, td TargetDel
 	return companyCurrentTurn{
 		SchemaVersion: companyCurrentTurnSchemaV,
 		Session:       td.Session,
+		City:          td.City,
 		ReceiptID:     r.ID,
 		TeamID:        r.Origin.TeamID,
 		ChannelID:     r.Origin.ChannelID,

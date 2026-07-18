@@ -110,6 +110,9 @@ type ReceiptOrigin struct {
 // TargetDelivery records the per-session delivery state of a receipt.
 type TargetDelivery struct {
 	Session string `json:"session"`
+	// City optionally targets a session in a different gc city than the
+	// adapter's own (city-qualified binding); empty = the adapter's city.
+	City string `json:"city,omitempty"`
 	// Kind is the frozen wake kind: "ambient" | "targeted" (human legs) or
 	// "peer_delegation" | "peer_result" | "peer_input" (company-bot legs,
 	// Phase 2c). Only peer_delegation / peer_result carry a DelegationKey.

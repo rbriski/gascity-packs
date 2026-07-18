@@ -799,7 +799,11 @@ func (g *companyGateway) ensureTargets(r *IngressReceipt, room *CompanyRoom, wak
 		r.Targets = make(map[string]TargetDelivery, len(wakes))
 	}
 	for _, wt := range wakes {
-		session, bound := bindings.SessionFor(room.Name, wt.Agent.Name)
+		var session, targetCity string
+		binding, bound := bindings.BindingFor(room.Name, wt.Agent.Name)
+		if bound {
+			session, targetCity = binding.Session, binding.City
+		}
 		if !bound {
 			key := companyUnboundTargetKeyPrefix + wt.Agent.Name
 			if _, exists := r.Targets[key]; exists {
@@ -821,6 +825,7 @@ func (g *companyGateway) ensureTargets(r *IngressReceipt, room *CompanyRoom, wak
 		}
 		r.Targets[key] = TargetDelivery{
 			Session:        session,
+			City:           targetCity,
 			Kind:           wt.Kind,
 			Status:         companyTargetPending,
 			IdempotencyKey: companyIdempotencyKey(r.ID, session),
@@ -902,8 +907,24 @@ func (g *companyGateway) postCompanyBody(td TargetDelivery, body string) (delive
 		// Deterministic construction failure: retrying cannot help.
 		return false, false, "marshal session-message body: " + err.Error()
 	}
+	// City-qualified bindings deliver to sessions in other gc cities; each
+	// city runs its own supervisor, so the target city selects both the URL
+	// path segment and the API base (SLACK_COMPANY_CITY_APIS). An empty
+	// City means the adapter's own city and base. A city with no configured
+	// base is a definitive configuration failure — retrying cannot help
+	// until the operator fixes the map and redrives.
+	targetCity, apiBase := td.City, g.cfg.gcAPIBase
+	if targetCity == "" {
+		targetCity = g.cfg.cityName
+	} else if targetCity != g.cfg.cityName {
+		mapped, ok := g.cfg.companyCityAPIs[targetCity]
+		if !ok {
+			return false, false, fmt.Sprintf("no SLACK_COMPANY_CITY_APIS entry for city %q", targetCity)
+		}
+		apiBase = mapped
+	}
 	target := fmt.Sprintf("%s/v0/city/%s/session/%s/messages",
-		g.cfg.gcAPIBase, url.PathEscape(g.cfg.cityName), url.PathEscape(td.Session))
+		apiBase, url.PathEscape(targetCity), url.PathEscape(td.Session))
 	req, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(payload))
 	if err != nil {
 		return false, false, "build request: " + err.Error()

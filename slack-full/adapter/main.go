@@ -471,6 +471,13 @@ type config struct {
 	companyDelegationsDir string
 	companyTurnsDir       string
 	companyLocksDir       string
+	// companyCityAPIs maps a city-qualified binding's city name to that
+	// city's supervisor API base URL (each city runs its own supervisor on
+	// this host). Parsed from SLACK_COMPANY_CITY_APIS as
+	// "city=http://127.0.0.1:8377,other=http://127.0.0.1:8374". The
+	// adapter's own city never needs an entry.
+	companyCityAPIs map[string]string
+
 	// companySelfBotUserID is the switchboard app's own bot user id,
 	// excluded from wake routing so the switchboard never wakes itself.
 	// Optional (empty OK in Phase 1). Sourced from
@@ -587,6 +594,22 @@ func loadConfigFromEnv(getenv func(string) string) (config, error) {
 	cfg.companyBindingsPath = envOrFn("SLACK_COMPANY_BINDINGS_PATH", defaultCompanyBindingsPath)
 	cfg.companyIngressDir = envOrFn("SLACK_COMPANY_INGRESS_DIR", defaultCompanyIngressDir)
 	cfg.companySelfBotUserID = getenv("SLACK_SWITCHBOARD_BOT_USER_ID")
+	if raw := getenv("SLACK_COMPANY_CITY_APIS"); raw != "" {
+		cfg.companyCityAPIs = make(map[string]string)
+		for _, pair := range strings.Split(raw, ",") {
+			pair = strings.TrimSpace(pair)
+			if pair == "" {
+				continue
+			}
+			name, base, ok := strings.Cut(pair, "=")
+			name, base = strings.TrimSpace(name), strings.TrimRight(strings.TrimSpace(base), "/")
+			if !ok || name == "" || base == "" || strings.ContainsAny(name, "/?#% \t") ||
+				(!strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://")) {
+				return cfg, fmt.Errorf("SLACK_COMPANY_CITY_APIS: invalid entry %q (want city=http(s)://host:port)", pair)
+			}
+			cfg.companyCityAPIs[name] = base
+		}
+	}
 	// Visible-ack gate: off unless the env var is a non-empty value other
 	// than "0" (the same truthiness the rest of the company config uses).
 	if v := strings.TrimSpace(getenv("SLACK_COMPANY_VISIBLE_ACKS")); v != "" && v != "0" {

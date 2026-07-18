@@ -274,7 +274,10 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 	unresolvable := []string{}
 	// plan maps a current target key to the session it will be reset under; a
 	// key present here is committed to pending.
-	plan := map[string]string{}
+	// redrivePlanEntry carries the target session plus, for a re-resolved
+	// unbound target, the binding's city qualifier.
+	type redrivePlanEntry struct{ Session, City string }
+	plan := map[string]redrivePlanEntry{}
 	for key, td := range r.Targets {
 		if td.Status != companyTargetFailed {
 			continue
@@ -283,7 +286,7 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 			if !redriveSelectsTarget(td, targetFilter, body.IncludeFailed) {
 				continue
 			}
-			plan[key] = td.Session
+			plan[key] = redrivePlanEntry{Session: td.Session, City: td.City}
 			resetSessions = append(resetSessions, td.Session)
 			continue
 		}
@@ -291,10 +294,10 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 		if td.Agent == "" {
 			continue // no agent recorded — cannot re-resolve (defensive)
 		}
-		session := ""
+		session, city := "", ""
 		if room != nil {
-			if s, ok := bindings.SessionFor(room.Name, td.Agent); ok {
-				session = s
+			if bd, ok := bindings.BindingFor(room.Name, td.Agent); ok {
+				session, city = bd.Session, bd.City
 			}
 		}
 		// Scope: default (no --target) selects every failed-unbound target; a
@@ -306,7 +309,7 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 			unresolvable = append(unresolvable, td.Agent)
 			continue
 		}
-		plan[key] = session
+		plan[key] = redrivePlanEntry{Session: session, City: city}
 		resetSessions = append(resetSessions, session)
 	}
 
@@ -324,19 +327,21 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 
 	if cerr := g.commitReceipt(r, func(cur *IngressReceipt) {
 		now := g.now().UTC()
-		for key, session := range plan {
+		for key, pt := range plan {
 			td, ok := cur.Targets[key]
 			if !ok {
 				continue
 			}
 			if td.Session == "" {
-				// Newly re-resolved unbound target: bind the session, derive the
-				// idempotency key per the standard formula, and relocate it from the
-				// unbound key namespace to the bound one.
-				td.Session = session
-				td.IdempotencyKey = companyIdempotencyKey(cur.ID, session)
+				// Newly re-resolved unbound target: bind the session (and its
+				// binding's city qualifier), derive the idempotency key per the
+				// standard formula, and relocate it from the unbound key
+				// namespace to the bound one.
+				td.Session = pt.Session
+				td.City = pt.City
+				td.IdempotencyKey = companyIdempotencyKey(cur.ID, pt.Session)
 				delete(cur.Targets, key)
-				key = companyBoundTargetKeyPrefix + session
+				key = companyBoundTargetKeyPrefix + pt.Session
 			}
 			// A bound target's IdempotencyKey is left untouched (never re-derived).
 			td.Status = companyTargetPending

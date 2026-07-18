@@ -87,10 +87,27 @@ construction:
 {
   "schema_version": 1,
   "bindings": [
-    {"room": "orchestrator-team", "agent": "ollie", "session": "ollie-main"}
+    {"room": "orchestrator-team", "agent": "ollie", "session": "ollie-main"},
+    {"room": "orchestrator-team", "agent": "riley", "session": "teams__it",
+     "city": "platform"}
   ]
 }
 ```
+
+`city` is optional (city-qualified binding): the live org runs one team
+per gc city, each with its own supervisor API, while the switchboard
+stays the single admission owner. A city-qualified target is delivered
+to that city's API base, resolved from the adapter env
+`SLACK_COMPANY_CITY_APIS`
+(`"platform=http://127.0.0.1:8377,orchestration=http://127.0.0.1:8374"`);
+an unmapped city is a definitive per-target configuration failure
+(operator fixes the map and redrives). City values are URL-interpolated
+and validated fail-closed against URL-significant/whitespace bytes on
+both sides. The frozen `TargetDelivery` and the current-turn pointer
+carry the city so redrives and verbs stay city-stable. Cross-city
+sessions additionally need the slack pack imported into their city and
+the `SLACK_COMPANY_*` state paths pointed at the adapter's dirs (shared
+filesystem) for the reply verbs to function.
 
 Validation (both sides, fail closed): lowercase slug names; unique names,
 `app_id`s, `bot_user_id`s, room names, `(team_id, channel_id)` pairs;
