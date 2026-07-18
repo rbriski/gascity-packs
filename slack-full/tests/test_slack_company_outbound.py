@@ -889,3 +889,13 @@ def test_result_timeout_then_reconcile_never_double_posts(env) -> None:
     assert second["posted_ts"] == "1700000000.000700"
     assert len(posts) == 1  # still exactly one provider POST
     assert env.list_intents()[0]["status"] == "published"
+
+
+def test_session_name_aliases_dot_dunder():
+    """gc sanitizes configured session names dot->dunder; both spellings
+    identify one session for pointer lookup and spoof-guard comparison."""
+    mod = _mod()
+    assert mod.session_name_aliases("teams__it") == ["teams__it", "teams.it"]
+    assert mod.session_name_aliases("teams.it") == ["teams.it", "teams__it"]
+    assert mod.session_name_aliases("plain") == ["plain"]
+    assert mod.session_name_aliases("") == []

@@ -1413,14 +1413,32 @@ def prune(retention_seconds: int = PRUNE_RETENTION_SECONDS) -> dict[str, int]:
 
 # --- current-turn pointer + directory context ------------------------------
 
+def session_name_aliases(session: str) -> list[str]:
+    """Deterministic name aliases for a gc session.
+
+    gc sanitizes configured named-session identifiers by replacing dots
+    with double underscores (config name ``teams.it`` runs with
+    ``GC_SESSION_NAME=teams__it``), while company bindings and delivery
+    address the configured dot form. Both spellings identify the same
+    session, so pointer lookups and anti-spoof comparisons accept either.
+    """
+    if not session:
+        return []
+    aliases = [session]
+    if "__" in session:
+        aliases.append(session.replace("__", "."))
+    elif "." in session:
+        aliases.append(session.replace(".", "__"))
+    return aliases
+
+
 def read_current_turn(session: str) -> dict[str, Any] | None:
     """Parse the company current-turn pointer for ``session`` (None if absent)."""
-    if not session:
-        return None
-    data = _read_json(turns_dir() / f"{session}.json")
-    if data is None:
-        return None
-    return parse_current_turn(data)
+    for name in session_name_aliases(session):
+        data = _read_json(turns_dir() / f"{name}.json")
+        if data is not None:
+            return parse_current_turn(data)
+    return None
 
 
 def _load_context():
@@ -1458,7 +1476,7 @@ def _verify_pointer(session_name: str, origin_ts: str) -> dict[str, Any]:
             f"--origin-ts {origin_ts!r} does not match the current turn ts "
             f"{turn['ts']!r}; a newer wake overwrote the pointer — pass "
             f"--origin-ts {turn['ts']} to act on that turn")
-    if turn["session"] != session_name:
+    if turn["session"] not in session_name_aliases(session_name):
         raise OutboundError(
             f"current-turn pointer session {turn['session']!r} does not match "
             f"GC_SESSION_NAME {session_name!r} (spoof guard)")
@@ -1469,7 +1487,7 @@ def _verify_binding(rooms, bindings, turn: dict[str, Any], session_name: str) ->
     room = turn["room"]
     agent = turn["agent"]
     bound = _session_for_binding(bindings, room, agent)
-    if bound != session_name:
+    if bound not in session_name_aliases(session_name):
         raise OutboundError(
             f"(room={room}, agent={agent}) is not bound to session "
             f"{session_name!r} (bound to {bound!r}); refusing to act (spoof guard)")
