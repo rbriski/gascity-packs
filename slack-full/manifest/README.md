@@ -295,7 +295,7 @@ N-plicated once per member app. So:
 1. **Capture the live mpim wire fixture** (one app, one test group) so the
    mention extractor is validated against real `message.mpim` rich_text
    synthesis before the fleet trusts it (the committed fixture is marked
-   SYNTHETIC until then).
+   replaced with a LIVE capture 2026-07-19 — rich_text mention synthesis confirmed in mpim).
 2. **Bulk manifest update via the config token**: add `mpim:history` +
    `message.mpim` to all 18 agent apps; each reinstall activates the
    scope. (No new `register-agent-app` or `dm_bindings` step — mpim reuses

@@ -20,7 +20,7 @@ import (
 // the mpim pointer namespace + per-target owner_app_id, the membership probe
 // (not_in_channel fails; network error proceeds), the allowlist deny +
 // provenance downgrade, replay/spoof (redelivery, cross-app 401, hydration token
-// fallback, ack degradation counters), and the SYNTHETIC wire fixture.
+// fallback, ack degradation counters), and the LIVE-captured wire fixture.
 
 const testMpimChannel = "G0GROUPDM01"
 
@@ -576,7 +576,7 @@ func TestMpimMissingOwnerTokenAckDegradesCounted(t *testing.T) {
 	}
 }
 
-// ---- item 10: SYNTHETIC wire fixture ---------------------------------------
+// ---- item 10: LIVE wire fixture (captured 2026-07-19, workspace T0ARJCFV8QL) --
 
 // TestMpimWireFixtureParse pins the shape of a captured message.mpim envelope.
 // NOTE: the committed fixture is SYNTHETIC (hand-built) pending a LIVE capture
