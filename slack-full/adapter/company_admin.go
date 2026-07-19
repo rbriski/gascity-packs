@@ -407,13 +407,17 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 
 	// Leg 1: frozen targets — reset the selected failed targets to pending.
 	//
-	// A bound failed target keeps its recorded IdempotencyKey byte-for-byte. A
-	// failed-UNBOUND target (frozen with Session=="" when its binding was stale
-	// at route time) is re-resolved here from its recorded Agent name against the
-	// CURRENT bindings snapshot: on success it is bound to the resolved session,
-	// given a freshly-derived idempotency key, and reset to pending; on failure
-	// it stays unbound and is surfaced as unresolvable. An empty reset that still
-	// has unresolvable unbound targets is a 422 (never a silent success).
+	// EVERY failed target re-resolves its session from the CURRENT bindings (P0
+	// item 3 / petra parity): a bound target frozen to a now-dead session name
+	// adopts the live binding value so the redrive drives the reachable session,
+	// not the stale frozen one; a re-resolution to the same session is a no-op
+	// rewrite that keeps the IdempotencyKey byte-for-byte (gc dedups a re-post);
+	// a bound target whose binding row has since vanished keeps its recorded
+	// session (nothing better to resolve to). A failed-UNBOUND target (frozen
+	// with Session=="" when its binding was stale at route time) resolves from
+	// its recorded Agent name and is bound on success or surfaced as unresolvable
+	// on failure. An empty reset that still has unresolvable unbound targets is a
+	// 422 (never a silent success).
 	leg := "targets"
 	targetFilter := map[string]bool{}
 	for _, s := range body.Targets {
@@ -421,10 +425,12 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 	}
 	room, _ := g.dirStore.Snapshot().RoomByChannel(r.Origin.TeamID, r.Origin.ChannelID)
 	bindings := g.bindStore.Snapshot()
-	// A failed-unbound target re-resolves from its recorded Agent name against
-	// the CURRENT bindings: a DM receipt resolves through dm_bindings (keyed by
-	// agent), a room receipt through the room bindings (keyed by room+agent).
-	resolveUnbound := func(agent string) (session, city string) {
+	// resolveBinding re-resolves a target from its recorded Agent name against the
+	// CURRENT bindings: a dm-family receipt resolves through dm_bindings (keyed by
+	// agent), a room receipt through the room bindings (keyed by room+agent). Used
+	// for both bound (session re-resolution) and unbound (session materialization)
+	// targets so the operator redrive and the retry path re-resolve identically.
+	resolveBinding := func(agent string) (session, city string) {
 		if isDMFamilyKind(r.Kind) {
 			// dm-family (dm + mpim): re-resolve via dm_bindings keyed by agent
 			// (spec §Kind-dispatch inventory). An mpim receipt's failed_dm_unbound
@@ -458,15 +464,24 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 			if !redriveSelectsTarget(td, targetFilter, body.IncludeFailed) {
 				continue
 			}
-			plan[key] = redrivePlanEntry{Session: td.Session, City: td.City}
-			resetSessions = append(resetSessions, td.Session)
+			// Re-resolve a bound failed target from the CURRENT bindings. A missing
+			// binding row (or an unrecorded agent) leaves the recorded session in
+			// place — never worse than the pre-P0 behavior.
+			planSession, planCity := td.Session, td.City
+			if td.Agent != "" {
+				if s, c := resolveBinding(td.Agent); s != "" {
+					planSession, planCity = s, c
+				}
+			}
+			plan[key] = redrivePlanEntry{Session: planSession, City: planCity}
+			resetSessions = append(resetSessions, planSession)
 			continue
 		}
 		// Failed-unbound target: re-resolve from the recorded Agent name.
 		if td.Agent == "" {
 			continue // no agent recorded — cannot re-resolve (defensive)
 		}
-		session, city := resolveUnbound(td.Agent)
+		session, city := resolveBinding(td.Agent)
 		// Scope: default (no --target) selects every failed-unbound target; a
 		// --target filter matches the recorded agent name or the resolved session.
 		if len(targetFilter) > 0 && !targetFilter[td.Agent] && (session == "" || !targetFilter[session]) {
@@ -499,18 +514,23 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 			if !ok {
 				continue
 			}
-			if td.Session == "" {
-				// Newly re-resolved unbound target: bind the session (and its
-				// binding's city qualifier), derive the idempotency key per the
-				// standard formula, and relocate it from the unbound key
-				// namespace to the bound one.
+			if td.Session != pt.Session {
+				// The session changed — a newly re-resolved unbound target (Session
+				// was ""), or a bound target whose live binding now names a different
+				// session (petra). Adopt the new session + city, re-derive the
+				// idempotency key (a new session is a genuinely new delivery), and
+				// relocate to the bound key namespace under the new session.
 				td.Session = pt.Session
 				td.City = pt.City
 				td.IdempotencyKey = companyIdempotencyKey(cur.ID, pt.Session)
 				delete(cur.Targets, key)
 				key = companyBoundTargetKeyPrefix + pt.Session
+			} else if td.City != pt.City {
+				// Same session, city qualifier moved: update the city but keep the
+				// key and IdempotencyKey (gc dedups a re-post to the same session).
+				td.City = pt.City
 			}
-			// A bound target's IdempotencyKey is left untouched (never re-derived).
+			// A same-session re-resolution leaves the IdempotencyKey untouched.
 			td.Status = companyTargetPending
 			td.Attempts = 0
 			td.Detail = "operator_redrive"

@@ -162,6 +162,19 @@ type companyGateway struct {
 	sessionCacheMu sync.Mutex
 	sessionCache   map[string]time.Time
 
+	// Self-heal counters (P0 delivery hardening), surfaced on /healthz.
+	// targetReresolved counts frozen targets whose stale session was rewritten
+	// to the current binding on a session-not-found retry (company_target_reresolved);
+	// materializeRequests counts session-materialization POSTs fired for cold
+	// bound sessions (company_materialize_requests).
+	targetReresolved    atomic.Uint64
+	materializeRequests atomic.Uint64
+	// materializeAttempts throttles auto-materialization to at most ONE POST per
+	// (city, session) per sweep interval, keyed by city+"\x00"+session → the last
+	// attempt time. The delivery worker and the sweep both fire through this gate.
+	materializeMu       sync.Mutex
+	materializeAttempts map[string]time.Time
+
 	// dmSigRejects counts app-bound signature rejections (a DM event whose
 	// api_app_id does not match the secret it was signed with) — /healthz
 	// company_dm_sig_reject. dmTokenMissing counts DM deliveries that fell back
@@ -193,6 +206,12 @@ const sessionCacheTTL = 10 * time.Minute
 const (
 	companyDetailSessionMissing   = "session_missing"
 	companyDetailSessionAmbiguous = "session_ambiguous"
+	// companyDetailMaterializing marks a bound target whose cold session a
+	// materialization POST has just been fired for (P0 self-heal). It is a
+	// recoverable, guard-held pending state exactly like session_missing — the
+	// sweep re-probes on the 60s cadence and the user-visible failure notice is
+	// suppressed while the attempts budget remains.
+	companyDetailMaterializing = "materializing"
 	// companyReasonFailedDMUnbound is the definitive detail on a DM target
 	// whose owner agent has no dm_bindings row — recoverable via company-redrive
 	// after a binding is imported (the rooms unbound rule, not a park).
@@ -270,28 +289,29 @@ var companyHealthStatus atomic.Pointer[companyGateway]
 func newCompanyGateway(cfg config, dir *companyDirectoryStore, bind *companyBindingsStore, receipts *IngressReceiptStore) *companyGateway {
 	slackClient := &http.Client{Timeout: companyDeliverTimeout}
 	g := &companyGateway{
-		cfg:            cfg,
-		dirStore:       dir,
-		bindStore:      bind,
-		ingressDir:     cfg.companyIngressDir,
-		deliverClient:  &http.Client{Timeout: companyDeliverTimeout},
-		slackToken:     cfg.slackBotToken,
-		slackClient:    slackClient,
-		authors:        newBotInfoResolver(cfg.slackBotToken),
-		intentsDir:     cfg.companyIntentsDir,
-		delegationsDir: cfg.companyDelegationsDir,
-		turnsDir:       cfg.companyTurnsDir,
-		locksDir:       cfg.companyLocksDir,
-		inflight:       make(map[string]bool),
-		chains:         newChainRegistry(),
-		visibleAcks:    cfg.companyVisibleAcks,
-		secretsDir:     cfg.companySecretsDir,
-		verifySessions: cfg.companyVerifySessions,
-		sessionCache:   make(map[string]time.Time),
-		retention:      companyReceiptRetention,
-		sweepInterval:  companySweepInterval,
-		staleWindow:    companyStaleReclaimWindow,
-		now:            time.Now,
+		cfg:                 cfg,
+		dirStore:            dir,
+		bindStore:           bind,
+		ingressDir:          cfg.companyIngressDir,
+		deliverClient:       &http.Client{Timeout: companyDeliverTimeout},
+		slackToken:          cfg.slackBotToken,
+		slackClient:         slackClient,
+		authors:             newBotInfoResolver(cfg.slackBotToken),
+		intentsDir:          cfg.companyIntentsDir,
+		delegationsDir:      cfg.companyDelegationsDir,
+		turnsDir:            cfg.companyTurnsDir,
+		locksDir:            cfg.companyLocksDir,
+		inflight:            make(map[string]bool),
+		chains:              newChainRegistry(),
+		visibleAcks:         cfg.companyVisibleAcks,
+		secretsDir:          cfg.companySecretsDir,
+		verifySessions:      cfg.companyVerifySessions,
+		sessionCache:        make(map[string]time.Time),
+		materializeAttempts: make(map[string]time.Time),
+		retention:           companyReceiptRetention,
+		sweepInterval:       companySweepInterval,
+		staleWindow:         companyStaleReclaimWindow,
+		now:                 time.Now,
 	}
 	// Phase 4 DM registries: loaded here (never-fatal) against the directory
 	// snapshot so a DM binding / agent-app join can be validated at load. An
@@ -810,9 +830,12 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 	threadRootTS := receiptRootTS(r, msg)
 
 	// Deliver each still-pending recorded target (frozen route). Results are
-	// collected in memory and applied in a single finalize commit.
+	// collected in memory and applied in a single finalize commit. removeKeys
+	// carries the stale keys of any targets re-resolved to a new session so the
+	// finalize commit drops them from the target map.
 	now := g.now().UTC()
 	results := make(map[string]TargetDelivery, len(r.Targets))
+	removeKeys := make(map[string]bool)
 	for key, td := range r.Targets {
 		if td.Status != companyTargetPending || td.Session == "" {
 			continue
@@ -838,6 +861,15 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 			td.UpdatedAt = now
 			td.Status = companyTargetPending
 			td.Detail = detail
+			if detail == companyDetailSessionMissing {
+				// Self-heal a session-not-found hold: re-resolve a stale binding or
+				// materialize the cold session. Never fails the target — the notice
+				// stays suppressed while the attempts budget remains.
+				heal := g.healSessionMissing(r, room, key, td)
+				recordHeal(results, removeKeys, key, heal)
+				log.Printf("company: session guard held+heal receipt=%s session=%s attempts=%d detail=%s", id, heal.td.Session, heal.td.Attempts, heal.td.Detail)
+				continue
+			}
 			results[key] = td
 			log.Printf("company: session guard held receipt=%s session=%s attempts=%d detail=%s", id, td.Session, td.Attempts, detail)
 			continue
@@ -858,34 +890,48 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 			continue
 		}
 		body := renderCompanyReminder(room, companyReminderAuthorClass(td.Kind), td.Kind, msg.Text, origin.TS, threadRootTS, hydration, r.Synthesis)
-		delivered, retryable, detail := g.postCompanyBody(td, body)
+		disp, detail := g.postCompanyBody(td, body)
 		td.Attempts++
 		td.UpdatedAt = now
-		switch {
-		case delivered:
+		switch disp {
+		case postDelivered:
 			td.Status = companyTargetDelivered
 			td.Detail = ""
-		case retryable:
+			results[key] = td
+		case postRetryable:
 			// Timeout / connection error / 5xx / 408 / 429: leave pending for
 			// the sweep to retry with the same key.
 			td.Status = companyTargetPending
 			td.Detail = detail
 			g.deliveryFailures.Add(1)
 			log.Printf("company: delivery pending receipt=%s session=%s attempts=%d: %s", id, td.Session, td.Attempts, detail)
+			results[key] = td
+		case postSessionMissing:
+			// 404: the bound session vanished between the guard check and the POST
+			// (or the guard is off). Keep it pending and self-heal — re-resolve a
+			// stale binding or materialize the cold session — never a failure.
+			td.Status = companyTargetPending
+			td.Detail = companyDetailSessionMissing
+			heal := g.healSessionMissing(r, room, key, td)
+			recordHeal(results, removeKeys, key, heal)
+			log.Printf("company: delivery session-missing+heal receipt=%s session=%s attempts=%d detail=%s", id, heal.td.Session, heal.td.Attempts, heal.td.Detail)
 		default:
-			// Definitive 4xx (not 408/429): gc rejected the submission on its
+			// Definitive 4xx (not 404/408/429): gc rejected the submission on its
 			// merits — mark the target failed rather than retry forever.
 			td.Status = companyTargetFailed
 			td.Detail = detail
 			g.deliveryFailures.Add(1)
 			log.Printf("company: delivery failed receipt=%s session=%s attempts=%d: %s", id, td.Session, td.Attempts, detail)
+			results[key] = td
 		}
-		results[key] = td
 	}
 
 	if err := g.commitReceipt(r, func(cur *IngressReceipt) {
 		if cur.Targets == nil {
 			cur.Targets = make(map[string]TargetDelivery, len(results))
+		}
+		for k := range removeKeys {
+			delete(cur.Targets, k)
 		}
 		for k, v := range results {
 			cur.Targets[k] = v
@@ -1090,21 +1136,36 @@ func computeReceiptStatus(targets map[string]TargetDelivery) (status, reason str
 	return ingressStatusDelivered, ""
 }
 
+// postDisposition classifies the outcome of a session-message POST so the
+// delivery loop can route a session-not-found 404 into the self-heal pipeline
+// instead of terminalizing it as a definitive failure.
+type postDisposition int
+
+const (
+	postDelivered      postDisposition = iota // gc acknowledged 2xx
+	postRetryable                             // timeout / connection error / 5xx / 408 / 429 — retry same key
+	postSessionMissing                        // 404 — the bound session does not exist (self-heal path)
+	postDefinitive                            // any other definitive 4xx / unrecoverable construction error
+)
+
 // postCompanyBody POSTs an already-rendered reminder body to the bound
 // session's gc messages endpoint with the target's Idempotency-Key. It
-// returns (delivered, retryable, detail):
-//   - delivered=true only on gc's acknowledged 2xx.
-//   - retryable=true (delivered=false) for outcomes whose success is
-//     unknown or transient — timeout, connection error, 5xx, 408, 429 —
-//     which stay pending for the sweep to retry with the same key.
-//   - retryable=false (delivered=false) for a definitive rejection: any
-//     other 4xx, or an unrecoverable request-construction error. The
-//     caller marks the target failed rather than retrying forever.
-func (g *companyGateway) postCompanyBody(td TargetDelivery, body string) (delivered, retryable bool, detail string) {
+// returns (disposition, detail):
+//   - postDelivered only on gc's acknowledged 2xx.
+//   - postRetryable for outcomes whose success is unknown or transient —
+//     timeout, connection error, 5xx, 408, 429 — which stay pending for the
+//     sweep to retry with the same key.
+//   - postSessionMissing for a 404: the bound session does not exist. The
+//     caller keeps the target pending and runs the self-heal pipeline
+//     (re-resolution / materialization) rather than failing it.
+//   - postDefinitive for any other definitive rejection: another 4xx, or an
+//     unrecoverable request-construction error. The caller marks the target
+//     failed rather than retrying forever.
+func (g *companyGateway) postCompanyBody(td TargetDelivery, body string) (postDisposition, string) {
 	payload, err := json.Marshal(gcSessionMessageRequest{Message: body})
 	if err != nil {
 		// Deterministic construction failure: retrying cannot help.
-		return false, false, "marshal session-message body: " + err.Error()
+		return postDefinitive, "marshal session-message body: " + err.Error()
 	}
 	// City-qualified bindings deliver to sessions in other gc cities; each
 	// city runs its own supervisor, so the target city selects both the URL
@@ -1118,7 +1179,7 @@ func (g *companyGateway) postCompanyBody(td TargetDelivery, body string) (delive
 	} else if targetCity != g.cfg.cityName {
 		mapped, ok := g.cfg.companyCityAPIs[targetCity]
 		if !ok {
-			return false, false, fmt.Sprintf("no SLACK_COMPANY_CITY_APIS entry for city %q", targetCity)
+			return postDefinitive, fmt.Sprintf("no SLACK_COMPANY_CITY_APIS entry for city %q", targetCity)
 		}
 		apiBase = mapped
 	}
@@ -1126,7 +1187,7 @@ func (g *companyGateway) postCompanyBody(td TargetDelivery, body string) (delive
 		apiBase, url.PathEscape(targetCity), url.PathEscape(td.Session))
 	req, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(payload))
 	if err != nil {
-		return false, false, "build request: " + err.Error()
+		return postDefinitive, "build request: " + err.Error()
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GC-Request", companyDeliverRequestTag)
@@ -1135,25 +1196,259 @@ func (g *companyGateway) postCompanyBody(td TargetDelivery, body string) (delive
 	resp, err := g.deliverClient.Do(req)
 	if err != nil {
 		// Timeout / connection error: outcome unknown, retry.
-		return false, true, "POST: " + err.Error()
+		return postRetryable, "POST: " + err.Error()
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return true, false, ""
+		return postDelivered, ""
 	}
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, companyMaxErrorBodyBytesRead))
-	detail = fmt.Sprintf("%s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	detail := fmt.Sprintf("%s: %s", resp.Status, strings.TrimSpace(string(respBody)))
 	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		// 404: the bound session does not exist. Recoverable — the caller keeps
+		// the target pending and runs the self-heal pipeline (re-resolve the
+		// stale binding, or materialize the cold session) rather than failing it.
+		return postSessionMissing, detail
 	case resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests:
 		// 408 / 429: transient, retry.
-		return false, true, detail
+		return postRetryable, detail
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
 		// Definitive 4xx: rejected on its merits, do not retry.
-		return false, false, detail
+		return postDefinitive, detail
 	default:
 		// 5xx and anything else non-2xx: retry.
-		return false, true, detail
+		return postRetryable, detail
 	}
+}
+
+// companySessionCreateRequest is the POST /v0/city/{city}/sessions body used to
+// materialize a cold named/pool session. name is the template/pool name; kind is
+// always "agent" (the only kind the adapter materializes).
+type companySessionCreateRequest struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+}
+
+// companySessionRecord is the subset of the supervisor's GET session record the
+// self-heal path reads: the template a non-template-named instance was minted
+// from, used to derive the materialization name when the bound session itself
+// does not look like a template/pool name.
+type companySessionRecord struct {
+	Template string `json:"template,omitempty"`
+}
+
+// looksLikeTemplateName reports whether a session name looks like a
+// template/pool name that gc can materialize directly: a config-form dotted
+// name (e.g. "teams.pm") or its dunder runtime alias (e.g. "teams__pm"). An
+// adhoc instance id (no dot, no dunder) is not materializable by name and must
+// fall back to the supervisor record's template field.
+func looksLikeTemplateName(session string) bool {
+	return strings.Contains(session, ".") || strings.Contains(session, "__")
+}
+
+// currentBindingSession resolves the CURRENT bound session (and its city
+// qualifier) for a target's (agent, room-or-dm) from the loaded registries. A
+// dm-family receipt resolves through dm_bindings (keyed by agent); a room
+// receipt through the room bindings (keyed by room+agent). bound=false means the
+// binding row is gone — the caller must NOT re-resolve or materialize (unbound
+// semantics stay intact). This mirrors applyRedrive's resolver so the retry path
+// and the operator redrive re-resolve identically.
+func (g *companyGateway) currentBindingSession(r *IngressReceipt, room *CompanyRoom, agent string) (session, city string, bound bool) {
+	if agent == "" {
+		return "", "", false
+	}
+	if isDMFamilyKind(r.Kind) {
+		if bd, ok := g.dmBindStore.Snapshot().BindingFor(agent); ok {
+			return bd.Session, bd.City, true
+		}
+		return "", "", false
+	}
+	if room != nil {
+		if bd, ok := g.bindStore.Snapshot().BindingFor(room.Name, agent); ok {
+			return bd.Session, bd.City, true
+		}
+	}
+	return "", "", false
+}
+
+// sessionMissingHealResult carries the outcome of one self-heal pass. td is the
+// (possibly re-resolved) target to record; when rekeyed is set the target moved
+// to a new bound-key namespace (newKey) and the stale oldKey must be dropped from
+// the receipt's target map in the finalize commit.
+type sessionMissingHealResult struct {
+	td      TargetDelivery
+	newKey  string
+	oldKey  string
+	rekeyed bool
+}
+
+// healSessionMissing runs the self-heal pipeline for a BOUND target whose current
+// delivery attempt hit a session-not-found condition — the advisory guard's 404
+// hold or a delivery POST 404. It never fails the target: the caller keeps it
+// pending so no user-visible failure notice fires while the attempts budget
+// remains (P0 §failure-notice suppression).
+//
+//   - Auto-re-resolution (P0 item 1): if the current binding for this target's
+//     (agent, room/dm) names a DIFFERENT session than the frozen one, the target
+//     adopts the current binding (session, city, freshly-derived idempotency key)
+//     and is re-keyed. The next sweep probes the live session. Attempts are NOT
+//     reset — the budget still bounds a binding that keeps churning.
+//   - Auto-materialization (P0 item 2): if the binding still names this exact
+//     (cold) session, fire at most ONE materialize POST per (city, session) per
+//     sweep interval.
+//   - Binding row gone: neither re-resolve nor materialize (unbound semantics).
+//
+// The caller has already set td.Status=pending, bumped Attempts, and stamped
+// UpdatedAt; healSessionMissing owns only the Session/City/IdempotencyKey rewrite
+// and the recoverable Detail.
+func (g *companyGateway) healSessionMissing(r *IngressReceipt, room *CompanyRoom, key string, td TargetDelivery) sessionMissingHealResult {
+	session, city, bound := g.currentBindingSession(r, room, td.Agent)
+	switch {
+	case bound && session != "" && session != td.Session:
+		old := td.Session
+		td.Session = session
+		td.City = city
+		td.IdempotencyKey = companyIdempotencyKey(r.ID, session)
+		td.Detail = companyDetailSessionMissing // stays guard-held → swept on the 60s cadence
+		g.targetReresolved.Add(1)
+		log.Printf("company: target re-resolved receipt=%s agent=%s session %s->%s (stale frozen binding)",
+			r.ID, td.Agent, old, session)
+		return sessionMissingHealResult{td: td, newKey: companyBoundTargetKeyPrefix + session, oldKey: key, rekeyed: true}
+	case bound && session == td.Session:
+		if g.tryMaterialize(r, td) {
+			td.Detail = companyDetailMaterializing
+		} else {
+			td.Detail = companyDetailSessionMissing
+		}
+		return sessionMissingHealResult{td: td}
+	default:
+		// Binding row gone: leave the target pending under session_missing. It is
+		// no longer re-resolvable and ages out under the attempts cap; we never
+		// fabricate a session for a vanished binding (unbound semantics).
+		td.Detail = companyDetailSessionMissing
+		return sessionMissingHealResult{td: td}
+	}
+}
+
+// recordHeal merges one self-heal pass into the delivery loop's in-memory
+// results, handling re-keying: a re-resolved target lands under its new bound
+// key and the stale key is queued for deletion in the finalize commit.
+func recordHeal(results map[string]TargetDelivery, removeKeys map[string]bool, key string, heal sessionMissingHealResult) {
+	if heal.rekeyed {
+		removeKeys[heal.oldKey] = true
+		results[heal.newKey] = heal.td
+		return
+	}
+	results[key] = heal.td
+}
+
+// tryMaterialize fires at most ONE session-materialization POST per (city,
+// session) per sweep interval for a cold bound target stuck in session_missing.
+// It POSTs /v0/city/{city}/sessions {"name": <n>, "kind": "agent"} with an
+// Idempotency-Key of materialize:<receipt>:<session>, where <n> is the binding
+// session when it looks like a template/pool name, else the supervisor record's
+// template. It reports whether a POST was fired this pass (false = throttled or
+// no derivable name). Best-effort: any transport/status outcome leaves the target
+// pending for the next sweep to re-probe — the attempts budget bounds everything.
+func (g *companyGateway) tryMaterialize(r *IngressReceipt, td TargetDelivery) bool {
+	targetCity := td.City
+	if targetCity == "" {
+		targetCity = g.cfg.cityName
+	}
+	// Throttle gate: record the attempt under the lock BEFORE any work so two
+	// receipts racing the same cold session can never double-fire within a sweep
+	// interval (the strongest at-most-once guarantee).
+	throttleKey := targetCity + "\x00" + td.Session
+	g.materializeMu.Lock()
+	if last, seen := g.materializeAttempts[throttleKey]; seen && g.now().Sub(last) < g.sweepInterval {
+		g.materializeMu.Unlock()
+		return false
+	}
+	g.materializeAttempts[throttleKey] = g.now()
+	g.materializeMu.Unlock()
+
+	apiBase := g.cfg.gcAPIBase
+	if td.City != "" && td.City != g.cfg.cityName {
+		mapped, ok := g.cfg.companyCityAPIs[td.City]
+		if !ok {
+			// No configured base for this city — the delivery POST already surfaces
+			// the misconfiguration definitively; nothing to materialize against.
+			return false
+		}
+		apiBase = mapped
+	}
+
+	name := g.materializeName(apiBase, targetCity, td.Session)
+	if name == "" {
+		log.Printf("company: materialize skip receipt=%s session=%s: no derivable template/pool name",
+			r.ID, td.Session)
+		return false
+	}
+
+	payload, err := json.Marshal(companySessionCreateRequest{Name: name, Kind: "agent"})
+	if err != nil {
+		return false
+	}
+	target := fmt.Sprintf("%s/v0/city/%s/sessions", apiBase, url.PathEscape(targetCity))
+	req, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(payload))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GC-Request", companyDeliverRequestTag)
+	req.Header.Set("Idempotency-Key", "materialize:"+r.ID+":"+td.Session)
+
+	g.materializeRequests.Add(1)
+	resp, err := g.deliverClient.Do(req)
+	if err != nil {
+		log.Printf("company: materialize POST receipt=%s city=%s session=%s name=%s: %v",
+			r.ID, targetCity, td.Session, name, err)
+		return true
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, companyMaxErrorBodyBytesRead))
+	log.Printf("company: materialize requested receipt=%s city=%s session=%s name=%s status=%d",
+		r.ID, targetCity, td.Session, name, resp.StatusCode)
+	return true
+}
+
+// materializeName derives the session-create "name" for a materialization POST:
+// the bound session itself when it looks like a template/pool name (config-form
+// dotted name or dunder runtime alias), else the "template" field of the
+// supervisor's session record when one exists. Empty when neither yields a name.
+func (g *companyGateway) materializeName(apiBase, city, session string) string {
+	if looksLikeTemplateName(session) {
+		return session
+	}
+	return g.fetchSessionTemplate(apiBase, city, session)
+}
+
+// fetchSessionTemplate best-effort GETs the supervisor session record and returns
+// its template field, or "" on any error / absent record / empty template. Used
+// only when the bound session name is not itself a materializable template/pool
+// name.
+func (g *companyGateway) fetchSessionTemplate(apiBase, city, session string) string {
+	target := fmt.Sprintf("%s/v0/city/%s/session/%s", apiBase, url.PathEscape(city), url.PathEscape(session))
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("X-GC-Request", companyDeliverRequestTag)
+	resp, err := g.deliverClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, companyMaxErrorBodyBytesRead))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	var rec companySessionRecord
+	if err := json.Unmarshal(body, &rec); err != nil {
+		return ""
+	}
+	return rec.Template
 }
 
 // decodeCompanyMessage reconstructs the router's CompanyMessage view from
@@ -1550,7 +1845,8 @@ func guardHeldPending(r *IngressReceipt) bool {
 		if td.Status != companyTargetPending {
 			continue
 		}
-		if td.Detail == companyDetailSessionMissing || td.Detail == companyDetailSessionAmbiguous {
+		if td.Detail == companyDetailSessionMissing || td.Detail == companyDetailSessionAmbiguous ||
+			td.Detail == companyDetailMaterializing {
 			return true
 		}
 	}
@@ -1618,12 +1914,14 @@ func (g *companyGateway) healthzDetail() string {
 	apps := g.agentApps.Snapshot()
 	joinWarnings := apps.JoinWarnings(g.dirStore.Snapshot())
 	return fmt.Sprintf(
-		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\ncompany_mpim_receipts_received=%d\ncompany_mpim_receipts_routing=%d\ncompany_mpim_receipts_delivered=%d\ncompany_mpim_receipts_no_delivery=%d\ncompany_mpim_receipts_failed=%d\ncompany_body_missing=%d\ncompany_bodies_redacted=%d\ncompany_body_digest_mismatch=%d\n",
+		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_target_reresolved=%d\ncompany_materialize_requests=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\ncompany_mpim_receipts_received=%d\ncompany_mpim_receipts_routing=%d\ncompany_mpim_receipts_delivered=%d\ncompany_mpim_receipts_no_delivery=%d\ncompany_mpim_receipts_failed=%d\ncompany_body_missing=%d\ncompany_bodies_redacted=%d\ncompany_body_digest_mismatch=%d\n",
 		g.barrier.Load(),
 		storeReady,
 		storeErr,
 		writeFailures,
 		g.deliveryFailures.Load(),
+		g.targetReresolved.Load(),
+		g.materializeRequests.Load(),
 		g.stalePostingIntents.Load(),
 		g.companyCorrelationParked.Load(),
 		g.dirStore.Snapshot() != nil,

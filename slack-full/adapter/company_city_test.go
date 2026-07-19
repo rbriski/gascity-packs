@@ -85,12 +85,12 @@ func TestDeliverCrossCityUsesMappedAPIBase(t *testing.T) {
 	}
 
 	// Cross-city target → the mapped base, city in the path.
-	delivered, retryable, detail := g.postCompanyBody(TargetDelivery{
+	disp, detail := g.postCompanyBody(TargetDelivery{
 		Session: "teams__pm", City: "platform",
 		IdempotencyKey: "ingress:x:target:teams__pm",
 	}, "body")
-	if !delivered {
-		t.Fatalf("cross-city delivery failed: retryable=%v detail=%s", retryable, detail)
+	if disp != postDelivered {
+		t.Fatalf("cross-city delivery failed: disp=%v detail=%s", disp, detail)
 	}
 	if otherHits != 1 || ownHits != 0 {
 		t.Fatalf("hits own=%d other=%d; want 0/1", ownHits, otherHits)
@@ -100,20 +100,20 @@ func TestDeliverCrossCityUsesMappedAPIBase(t *testing.T) {
 	}
 
 	// Own-city target (empty City) → the adapter's own base.
-	delivered, _, detail = g.postCompanyBody(TargetDelivery{
+	disp, detail = g.postCompanyBody(TargetDelivery{
 		Session: "s-local", IdempotencyKey: "ingress:x:target:s-local",
 	}, "body")
-	if !delivered || ownHits != 1 {
-		t.Fatalf("own-city delivery: delivered=%v ownHits=%d detail=%s", delivered, ownHits, detail)
+	if disp != postDelivered || ownHits != 1 {
+		t.Fatalf("own-city delivery: disp=%v ownHits=%d detail=%s", disp, ownHits, detail)
 	}
 
 	// Unmapped city → definitive failure, no HTTP call.
-	delivered, retryable, detail = g.postCompanyBody(TargetDelivery{
+	disp, detail = g.postCompanyBody(TargetDelivery{
 		Session: "s-x", City: "unmapped-city",
 		IdempotencyKey: "ingress:x:target:s-x",
 	}, "body")
-	if delivered || retryable {
-		t.Fatalf("unmapped city: delivered=%v retryable=%v; want definitive failure", delivered, retryable)
+	if disp != postDefinitive {
+		t.Fatalf("unmapped city: disp=%v; want postDefinitive", disp)
 	}
 	if detail == "" {
 		t.Fatal("unmapped city: empty detail")

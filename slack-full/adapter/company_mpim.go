@@ -297,6 +297,7 @@ func (g *companyGateway) deliverMpimTargets(r *IngressReceipt, origin ReceiptOri
 
 	now := g.now().UTC()
 	results := make(map[string]TargetDelivery, len(r.Targets))
+	removeKeys := make(map[string]bool)
 	for key, td := range r.Targets {
 		if td.Status != companyTargetPending || td.Session == "" {
 			continue
@@ -332,6 +333,14 @@ func (g *companyGateway) deliverMpimTargets(r *IngressReceipt, origin ReceiptOri
 			td.UpdatedAt = now
 			td.Status = companyTargetPending
 			td.Detail = detail
+			if detail == companyDetailSessionMissing {
+				// Self-heal: re-resolve a stale dm_binding or materialize the cold
+				// session. room=nil → currentBindingSession resolves via dm_bindings.
+				heal := g.healSessionMissing(r, nil, key, td)
+				recordHeal(results, removeKeys, key, heal)
+				log.Printf("company mpim: session guard held+heal receipt=%s session=%s attempts=%d detail=%s", id, heal.td.Session, heal.td.Attempts, heal.td.Detail)
+				continue
+			}
 			results[key] = td
 			log.Printf("company mpim: session guard held receipt=%s session=%s attempts=%d detail=%s", id, td.Session, td.Attempts, detail)
 			continue
@@ -370,30 +379,43 @@ func (g *companyGateway) deliverMpimTargets(r *IngressReceipt, origin ReceiptOri
 			continue
 		}
 		body := renderCompanyMpimReminder(td.Agent, msg.Text, origin.TS, threadRootTS, hydration)
-		delivered, retryable, detail := g.postCompanyBody(td, body)
+		disp, detail := g.postCompanyBody(td, body)
 		td.Attempts++
 		td.UpdatedAt = now
-		switch {
-		case delivered:
+		switch disp {
+		case postDelivered:
 			td.Status = companyTargetDelivered
 			td.Detail = ""
-		case retryable:
+			results[key] = td
+		case postRetryable:
 			td.Status = companyTargetPending
 			td.Detail = detail
 			g.deliveryFailures.Add(1)
 			log.Printf("company mpim: delivery pending receipt=%s session=%s attempts=%d: %s", id, td.Session, td.Attempts, detail)
+			results[key] = td
+		case postSessionMissing:
+			// 404: keep pending and self-heal (re-resolve stale dm_binding or
+			// materialize the cold session) rather than failing the target.
+			td.Status = companyTargetPending
+			td.Detail = companyDetailSessionMissing
+			heal := g.healSessionMissing(r, nil, key, td)
+			recordHeal(results, removeKeys, key, heal)
+			log.Printf("company mpim: delivery session-missing+heal receipt=%s session=%s attempts=%d detail=%s", id, heal.td.Session, heal.td.Attempts, heal.td.Detail)
 		default:
 			td.Status = companyTargetFailed
 			td.Detail = detail
 			g.deliveryFailures.Add(1)
 			log.Printf("company mpim: delivery failed receipt=%s session=%s attempts=%d: %s", id, td.Session, td.Attempts, detail)
+			results[key] = td
 		}
-		results[key] = td
 	}
 
 	if err := g.commitReceipt(r, func(cur *IngressReceipt) {
 		if cur.Targets == nil {
 			cur.Targets = make(map[string]TargetDelivery, len(results))
+		}
+		for k := range removeKeys {
+			delete(cur.Targets, k)
 		}
 		for k, v := range results {
 			cur.Targets[k] = v
