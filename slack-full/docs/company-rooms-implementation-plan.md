@@ -1531,10 +1531,16 @@ When the gascity durable-request-ledger lands: swap local admission for
 `POST /v0/city/{city}/extmsg/request-receipts` + receipt-lookup recovery,
 implement the projector-callback UDS contract and publish-intent outbox
 against the ledger API, adopt the cross-repo wire fixture. This is an
-explicit state-mapping exercise (`received → spooled`,
-`routing → admitting`, terminal states → `terminal`), and the ledger's
+explicit state-mapping exercise — the adapter journal adopts the Slack
+companion's six states (`spooled`, `admitting`, `core_bound`,
+`body_redacted`, `rejected`, `quarantined`; `core_bound` is the
+redaction fence — see phase5-ledger-readiness.md, which supersedes the
+earlier three-state note and records the 15-route surface, the
+no-If-Match header protocol, and the rule that DTOs are generated from
+the Slice 20 OpenAPI artifact, never hand-written) — and the ledger's
 receipts never carry raw bodies, so the inner-event payload moves to a
-spool-side body store at that point. The Phase 1 origin-key discipline and
+spool-side body store (shipped ahead of the ledger as the Phase 5
+readiness increment). The Phase 1 origin-key discipline and
 ordering are chosen so the swap does not change pack-observable routing
 semantics; true end-to-end exactly-once delivery arrives here.
 
