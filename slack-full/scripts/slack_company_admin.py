@@ -353,11 +353,60 @@ def cmd_company_redrive(argv: list[str]) -> int:
         return 1
 
 
+# --- company-redact --------------------------------------------------------
+
+def cmd_company_redact(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="slack company-redact")
+    selector = parser.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--receipt", default="", help="Receipt id whose body to redact")
+    selector.add_argument("--origin", default="", help="<team>:<channel>:<ts>")
+    args = parser.parse_args(argv)
+
+    body: dict[str, Any] = {}
+    if args.receipt:
+        body["receipt"] = args.receipt
+    else:
+        team, channel, ts = _parse_triple(args.origin, what="origin")
+        body["origin"] = {"team_id": team, "channel_id": channel, "ts": ts}
+
+    attempt = 0
+    while True:
+        status, data = _internal_request("POST", "/internal/company/redact", body)
+        if status == 200:
+            print(json.dumps(data if data is not None else {}, indent=2, sort_keys=True))
+            return 0
+        if status == 404:
+            target = args.receipt or args.origin
+            print(
+                f"company-redact: receipt {target!r} is gone — terminal and "
+                "swept past the 7-day retention horizon; nothing to redact",
+                file=sys.stderr)
+            return 1
+        if status == 409:
+            # Either a held single-flight or a legacy embedded receipt (no
+            # separable body). The endpoint's reason distinguishes them; retry
+            # only makes sense for a held claim, so surface and stop.
+            reason = _redrive_reason(data, "")
+            if "single-flight" in reason:
+                attempt += 1
+                if attempt <= _REDRIVE_MAX_RETRIES:
+                    _sleep(_REDRIVE_RETRY_DELAY)
+                    continue
+            suffix = f": {reason}" if reason else ""
+            print(f"company-redact: HTTP 409{suffix}", file=sys.stderr)
+            return 1
+        reason = _redrive_reason(data, "")
+        suffix = f": {reason}" if reason else ""
+        print(f"company-redact: unexpected HTTP {status}{suffix}", file=sys.stderr)
+        return 1
+
+
 # --- CLI entry point -------------------------------------------------------
 
 def main(argv: list[str]) -> int:
     if not argv:
-        print("error: expected a subcommand (company-status | company-redrive)",
+        print("error: expected a subcommand "
+              "(company-status | company-redrive | company-redact)",
               file=sys.stderr)
         return 2
     sub, rest = argv[0], argv[1:]
@@ -366,6 +415,8 @@ def main(argv: list[str]) -> int:
             return cmd_company_status(rest)
         if sub == "company-redrive":
             return cmd_company_redrive(rest)
+        if sub == "company-redact":
+            return cmd_company_redact(rest)
         print(f"error: unknown subcommand {sub!r}", file=sys.stderr)
         return 2
     except AdminError as exc:

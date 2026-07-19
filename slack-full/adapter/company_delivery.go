@@ -165,6 +165,10 @@ type companyGateway struct {
 	// surfaced on /healthz (company_dm_receipts). Stored as an immutable
 	// pointer swapped each sweep pass.
 	dmStatusCounts atomic.Pointer[dmReceiptStatusCounts]
+	// bodyIntegrity is the sweep-computed body gauge surfaced on /healthz
+	// (company_body_missing + company_bodies_redacted). Swapped each sweep pass
+	// from the single SweepAndPending scan (Phase 5 body-store split).
+	bodyIntegrity atomic.Pointer[bodyIntegrityCounts]
 
 	retention     time.Duration
 	sweepInterval time.Duration
@@ -206,6 +210,13 @@ const (
 	companyStaleReclaimWindow    = 5 * time.Minute
 	companyRecoveryRetryInterval = 5 * time.Second
 	companyReasonParked          = "parked_no_directory_room"
+	// companyReasonBodyIntegrity parks a live receipt whose body sidecar is missing
+	// or digest-mismatched (C5/m8): routing an empty message from a null body would
+	// terminalize it under an unrelated reason (no_delivery / dm_author_not_allowed)
+	// and destroy the wake. Parking keeps recovery open — a later orphan-adoption
+	// repair or operator action can restore the body and the sweep redelivers.
+	// Plain every-sweep cadence (not an S7 recovery reason, never budget-consuming).
+	companyReasonBodyIntegrity   = "parked_body_integrity"
 	companyDeliverRequestTag     = "gc-slack-adapter-company"
 	companyMaxErrorBodyBytesRead = 4096
 	companyTargetPending         = "pending"
@@ -475,7 +486,10 @@ func (g *companyGateway) tryHandleEvent(w http.ResponseWriter, r *http.Request, 
 		RetryNum:    retryNum,
 		RetryReason: retryReason,
 		Status:      ingressStatusReceived,
-		Event:       append(json.RawMessage(nil), env.Event...),
+		// Freeze the human root at admission (thread_ts, else origin ts) so every
+		// root-keyed derivation survives a later body redaction/loss (C7).
+		ThreadRootTS: deriveHumanRootTS(decodeCompanyMessage(origin, env.Event)),
+		Event:        append(json.RawMessage(nil), env.Event...),
 	}
 	created, _, err := store.Admit(receipt)
 	if err != nil {
@@ -576,7 +590,21 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 		return deliverTerminal // already settled — safe to advance the chain
 	}
 
-	msg := decodeCompanyMessage(origin, r.Event)
+	// Body-integrity gate (C5/m8): resolve the body through loadBody (which
+	// classifies) rather than the degrade-to-null accessor. A live receipt whose
+	// sidecar is missing or digest-mismatched is a recoverable INTEGRITY error, not
+	// a routing outcome — routing an empty message from null would terminalize it
+	// under an unrelated reason and destroy the wake. Park it (non-terminal,
+	// sweep-retried, counted); a later orphan-adoption repair or operator restore
+	// reopens delivery. A redacted body is deliberate and keeps the degrade path
+	// (redaction is guarded to terminal receipts, so a non-terminal receipt never
+	// reaches delivery redacted); an embedded/ok body proceeds.
+	body, bodyStat := store.loadBody(r)
+	if bodyStat == bodyMissing || bodyStat == bodyMismatch {
+		g.parkWithReason(r, companyReasonBodyIntegrity)
+		return deliverParkedPreclaim
+	}
+	msg := decodeCompanyMessage(origin, body)
 
 	// DM branch (Phase 4): a per-agent DM has its own routing (owner-app join,
 	// self-echo, allowed-human policy) and its own owner-token custody. It
@@ -592,7 +620,7 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 	// the only messages that can claim); dgser is the highest-rank lock, so it
 	// is always acquired before dgroup/dtuple (deadlock freedom).
 	if isResultBearing(msg) {
-		lock, lerr := acquireCompanyLock(g.locksDir, rootSerialLockName(origin.TeamID, origin.ChannelID, deriveHumanRootTS(msg)))
+		lock, lerr := acquireCompanyLock(g.locksDir, rootSerialLockName(origin.TeamID, origin.ChannelID, receiptRootTS(r, msg)))
 		if lerr != nil {
 			log.Printf("company: dgser acquire receipt=%s: %v", id, lerr)
 			return deliverError
@@ -742,7 +770,7 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 	if len(r.Hydration) > 0 {
 		_ = json.Unmarshal(r.Hydration, &hydration)
 	}
-	threadRootTS := deriveHumanRootTS(msg)
+	threadRootTS := receiptRootTS(r, msg)
 
 	// Deliver each still-pending recorded target (frozen route). Results are
 	// collected in memory and applied in a single finalize commit.
@@ -1384,7 +1412,7 @@ func (g *companyGateway) sweepOnce() {
 	if store == nil {
 		return
 	}
-	pending, healNeeded, _, dmCounts, err := store.SweepAndPending(g.retention)
+	pending, healNeeded, _, dmCounts, bodyCounts, err := store.SweepAndPending(g.retention)
 	if err != nil {
 		log.Printf("company: sweep: %v", err)
 		return
@@ -1432,6 +1460,9 @@ func (g *companyGateway) sweepOnce() {
 	// single SweepAndPending scan above (no second full-store pass under the
 	// store mutex — m8).
 	g.dmStatusCounts.Store(&dmCounts)
+	// Phase 5 body-integrity gauge (missing / redacted) for /healthz, computed
+	// inside the same SweepAndPending scan — no second directory pass (m8).
+	g.bodyIntegrity.Store(&bodyCounts)
 }
 
 // sweepEligible reports whether the sweep should redrive a non-terminal
@@ -1527,8 +1558,10 @@ func (g *companyGateway) healthzDetail() string {
 	store := g.store()
 	storeReady := store != nil
 	var writeFailures uint64
+	var bodyDigestMismatch uint64
 	if store != nil {
 		writeFailures = store.WriteFailures()
+		bodyDigestMismatch = store.BodyDigestMismatches()
 	}
 	storeErr := ""
 	if p := g.storeErr.Load(); p != nil {
@@ -1538,13 +1571,17 @@ func (g *companyGateway) healthzDetail() string {
 	if p := g.dmStatusCounts.Load(); p != nil {
 		dm = *p
 	}
+	var body bodyIntegrityCounts
+	if p := g.bodyIntegrity.Load(); p != nil {
+		body = *p
+	}
 	// registered_agent_apps count + directory-join warnings (Phase 4). Warnings
 	// are recomputed against the live directory snapshot each call so an
 	// operator sees them clear once the directory is fixed (no restart needed).
 	apps := g.agentApps.Snapshot()
 	joinWarnings := apps.JoinWarnings(g.dirStore.Snapshot())
 	return fmt.Sprintf(
-		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\n",
+		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\ncompany_body_missing=%d\ncompany_bodies_redacted=%d\ncompany_body_digest_mismatch=%d\n",
 		g.barrier.Load(),
 		storeReady,
 		storeErr,
@@ -1564,5 +1601,8 @@ func (g *companyGateway) healthzDetail() string {
 		dm.Delivered,
 		dm.NoDelivery,
 		dm.Failed,
+		body.Missing,
+		body.Redacted,
+		bodyDigestMismatch,
 	)
 }

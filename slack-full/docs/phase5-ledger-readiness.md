@@ -72,9 +72,24 @@ cheaper scans, a single redaction point for retention.
 - New `bodies/` sidecar under the ingress store: one file per receipt
   (`<receipt_id>.body.json`, 0600), holding the raw inner event
   exactly as previously embedded. Created atomically BEFORE the
-  receipt in the admission sequence (a body without a receipt is
-  garbage collected by the janitor; a receipt without a body is a
-  hard integrity error surfaced on /healthz).
+  receipt in the admission sequence. A body without a receipt is
+  garbage collected by the janitor — but ONLY on affirmative receipt
+  absence (the receipt path and any quarantine sibling are lstat'd
+  before removal), never for a receipt merely unreadable this pass,
+  and never within a grace window (an in-flight cross-process
+  admission must be able to finish linking its receipt). Orphan
+  adoption is digest-checked: a divergent crash-orphan body (no
+  receipt claims it yet) is replaced with the admitted bytes rather
+  than birthing a permanent digest mismatch; first-writer-wins holds
+  whenever a valid receipt already owns the body. A receipt whose
+  body is missing or digest-mismatched is a recoverable integrity
+  error: delivery PARKS it (non-terminal, sweep-retried, counted on
+  /healthz) so an orphan-adoption repair or operator action can
+  restore it — it is never terminalized under a routing reason. A
+  corrupt receipt quarantined during a scan takes its intact body
+  aside with it (`<id>.body-<token>.corrupt`), preserving the payload
+  for forensics (the split-store analogue of the pre-split embedded
+  copy).
 - Receipt `event` field becomes a reference: `body_ref` (receipt id)
   + the immutable `event_digest` (sha256 of the stored bytes) for
   integrity. A `schema_version` bump on receipts; the reader accepts
@@ -84,12 +99,31 @@ cheaper scans, a single redaction point for retention.
   `receiptBody(rec)`, Python `receipt_body(rec)`): routing snapshot
   building, hydration reminder rendering, reconciliation
   (`_scan_receipt_for_nonce` — reads text/metadata through the
-  accessor), admin/redrive display.
+  accessor), admin/redrive display. The accessor is the ONLY place the
+  body digest is verified; the periodic sweep classifies bodies by
+  existence and a bounded tombstone probe only (no per-body SHA under
+  the store mutex the admission hot path contends for), and a
+  read-path counter (`company_body_digest_mismatch`) keeps digest
+  integrity observable.
+- Every root-keyed derivation (the dgser serialization lock name, the
+  replay-chain root, the rendered `thread_root_ts`, the failure-reply
+  root) reads a `thread_root_ts` frozen onto the receipt at admission,
+  so a redacted or lost body can no longer collapse a threaded
+  receipt's root to its origin ts and diverge a redrive's lock name or
+  rendered root from the pre-redaction value. Legacy receipts fall
+  back to body-derivation.
 - Redaction hook: `redactReceiptBody(receiptID)` truncates the body
   file to a fixed tombstone `{"redacted": true, "event_digest": ...}`
   — NOT wired to any trigger in this phase (the trigger is the
   future `core_bound` fence); exposed as an operator admin verb for
-  manual use only.
+  manual use only. It refuses (409) a non-terminal receipt and a
+  receipt younger than the outbound reconciliation horizon
+  (`INTENT_TTL_SECONDS`, so a stuck posting intent can still reconcile
+  against the body nonce), re-verifies the receipt still exists under
+  the store mutex (a swept receipt → 404, never a resurrected
+  tombstone), and redacted receipts stay visible in root-filtered
+  admin listings with a `body_state` marker rather than silently
+  dropping out.
 - Retention: body files delete with their receipt (janitor pairs
   them); the digest survives in the receipt for late-redelivery
   dedup semantics exactly as today.

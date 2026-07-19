@@ -84,7 +84,7 @@ func TestIngressReceiptAdmitRoundTrip(t *testing.T) {
 		t.Fatalf("Get lost outer identifiers: %+v", got)
 	}
 	var ev map[string]any
-	if err := json.Unmarshal(got.Event, &ev); err != nil {
+	if err := json.Unmarshal(s.receiptBody(got), &ev); err != nil {
 		t.Fatalf("inner event not valid JSON: %v", err)
 	}
 	if ev["text"] != "hi" || ev["ts"] != "1700000000.000100" {
@@ -732,5 +732,498 @@ func TestIngressReceiptReadRejectsSymlinkedFile(t *testing.T) {
 	// The victim file outside the store was never touched.
 	if b, _ := os.ReadFile(victim); string(b) != `{"id":"evil","status":"delivered"}` {
 		t.Errorf("victim file mutated through the store: %q", b)
+	}
+}
+
+// --- Phase 5 body-store split ---------------------------------------------
+
+// TestAdmitWritesBodyThenReceipt pins the admission sequence: the body sidecar
+// exists holding the raw inner event, the receipt references it (body_ref +
+// event_digest + schema_version) and no longer embeds the event, and the digest
+// matches the stored bytes.
+func TestAdmitWritesBodyThenReceipt(t *testing.T) {
+	s, dir := newTestReceiptStore(t)
+	r := sampleReceipt("T1", "C1", "1700000000.000100")
+	origEvent := append([]byte(nil), r.Event...)
+
+	created, _, err := s.Admit(r)
+	if err != nil || !created {
+		t.Fatalf("Admit: created=%v err=%v", created, err)
+	}
+	if r.BodyRef != r.ID || r.EventDigest == "" || r.SchemaVersion != ingressReceiptSchemaBodyRef {
+		t.Fatalf("receipt not body-split: body_ref=%q digest=%q schema=%d", r.BodyRef, r.EventDigest, r.SchemaVersion)
+	}
+	if len(r.Event) != 0 {
+		t.Fatalf("receipt still embeds event: %s", r.Event)
+	}
+	rawReceipt, err := os.ReadFile(filepath.Join(dir, r.ID+".json"))
+	if err != nil {
+		t.Fatalf("read receipt file: %v", err)
+	}
+	if strings.Contains(string(rawReceipt), `"event"`) {
+		t.Errorf("body-split receipt still serializes an event field: %s", rawReceipt)
+	}
+	bodyBytes, err := os.ReadFile(s.bodyPathForID(r.ID))
+	if err != nil {
+		t.Fatalf("read body file: %v", err)
+	}
+	if string(bodyBytes) != string(origEvent) {
+		t.Errorf("body bytes = %q; want original event %q", bodyBytes, origEvent)
+	}
+	if eventDigest(bodyBytes) != r.EventDigest {
+		t.Errorf("digest mismatch: stored=%s computed=%s", r.EventDigest, eventDigest(bodyBytes))
+	}
+	info, err := os.Stat(s.bodyPathForID(r.ID))
+	if err != nil {
+		t.Fatalf("stat body: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("body perms = %o; want 600", info.Mode().Perm())
+	}
+}
+
+// TestReceiptBodyRoundTripsThroughAccessor pins that a body-split receipt read
+// back resolves its event only through receiptBody — the receipt itself no
+// longer carries it — and that decode sees the same fields.
+func TestReceiptBodyRoundTripsThroughAccessor(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	r := sampleReceipt("T1", "C1", "1700000000.000200")
+	if _, _, err := s.Admit(r); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	got, err := s.GetByID(r.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetByID: got=%v err=%v", got, err)
+	}
+	if len(got.Event) != 0 {
+		t.Fatalf("read-back receipt embeds event: %s", got.Event)
+	}
+	body, st := s.loadBody(got)
+	if st != bodyOK {
+		t.Fatalf("loadBody status = %v; want bodyOK", st)
+	}
+	var ev map[string]any
+	if err := json.Unmarshal(body, &ev); err != nil {
+		t.Fatalf("body not valid JSON: %v", err)
+	}
+	if ev["text"] != "hi" {
+		t.Errorf("body text = %v; want hi", ev["text"])
+	}
+}
+
+// TestReceiptBodyLegacyEmbedded pins the both-shapes-forever rule: a legacy
+// receipt with an inline event (no body_ref) resolves through the same accessor
+// without touching the bodies dir.
+func TestReceiptBodyLegacyEmbedded(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	legacy := &IngressReceipt{
+		Origin: ReceiptOrigin{TeamID: "T1", ChannelID: "C1", TS: "1700000000.000300"},
+		Event:  json.RawMessage(`{"type":"message","text":"legacy"}`),
+	}
+	body, st := s.loadBody(legacy)
+	if st != bodyEmbedded {
+		t.Fatalf("legacy loadBody status = %v; want bodyEmbedded", st)
+	}
+	if !strings.Contains(string(body), "legacy") {
+		t.Errorf("legacy body = %q; want the embedded event", body)
+	}
+}
+
+// TestSweepOrphanBodyGC pins that a body with no receipt (a crash orphan) is
+// garbage-collected by the janitor's single sweep pass.
+func TestSweepOrphanBodyGC(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	orphanID := "in-orphan-" + strings.Repeat("a", 12)
+	if err := s.writeBodyOnce(orphanID, []byte(`{"type":"message"}`)); err != nil {
+		t.Fatalf("write orphan body: %v", err)
+	}
+	if _, err := os.Stat(s.bodyPathForID(orphanID)); err != nil {
+		t.Fatalf("orphan body not written: %v", err)
+	}
+	// Age the orphan past the GC grace window (m1): a body younger than the window
+	// is deliberately spared so a cross-process admission can finish linking its
+	// receipt. A true crash orphan older than the window is collected.
+	old := time.Now().Add(-2 * bodyGCGraceWindow)
+	if err := os.Chtimes(s.bodyPathForID(orphanID), old, old); err != nil {
+		t.Fatalf("age orphan body: %v", err)
+	}
+	if _, _, _, _, _, err := s.SweepAndPending(7 * 24 * time.Hour); err != nil {
+		t.Fatalf("SweepAndPending: %v", err)
+	}
+	if _, err := os.Stat(s.bodyPathForID(orphanID)); !os.IsNotExist(err) {
+		t.Errorf("orphan body survived sweep: err=%v", err)
+	}
+}
+
+// TestSweepPairDeletesBodyAtRetention pins that a terminal receipt swept past
+// retention takes its body sidecar with it.
+func TestSweepPairDeletesBodyAtRetention(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	r := sampleReceipt("T1", "C1", "1700000000.000400")
+	r.ReceivedAt = time.Now().Add(-8 * 24 * time.Hour)
+	if _, _, err := s.Admit(r); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	r.Status = ingressStatusDelivered
+	if err := s.Update(r); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	bodyPath := s.bodyPathForID(r.ID)
+	if _, err := os.Stat(bodyPath); err != nil {
+		t.Fatalf("body missing before sweep: %v", err)
+	}
+	_, _, removed, _, _, err := s.SweepAndPending(7 * 24 * time.Hour)
+	if err != nil || removed != 1 {
+		t.Fatalf("SweepAndPending removed=%d err=%v", removed, err)
+	}
+	if _, err := os.Stat(bodyPath); !os.IsNotExist(err) {
+		t.Errorf("body survived retention pair-delete: err=%v", err)
+	}
+}
+
+// TestRedactReceiptBody pins the operator redaction hook: the body truncates to
+// the tombstone (preserving the digest), the accessor degrades to a JSON null,
+// loadBody reports bodyRedacted, and a second redaction is idempotent.
+func TestRedactReceiptBody(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	r := sampleReceipt("T1", "C1", "1700000000.000500")
+	if _, _, err := s.Admit(r); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	origDigest := r.EventDigest
+	if err := s.redactReceiptBody(r); err != nil {
+		t.Fatalf("redactReceiptBody: %v", err)
+	}
+	got, _ := s.GetByID(r.ID)
+	body, st := s.loadBody(got)
+	if st != bodyRedacted {
+		t.Fatalf("loadBody after redact = %v; want bodyRedacted", st)
+	}
+	if string(body) != "null" {
+		t.Errorf("redacted receiptBody = %q; want null", body)
+	}
+	raw, err := os.ReadFile(s.bodyPathForID(r.ID))
+	if err != nil {
+		t.Fatalf("read tombstone: %v", err)
+	}
+	var marker map[string]any
+	if err := json.Unmarshal(raw, &marker); err != nil {
+		t.Fatalf("tombstone not JSON: %v", err)
+	}
+	if marker["redacted"] != true || marker["event_digest"] != origDigest {
+		t.Errorf("tombstone = %v; want redacted true + digest %s", marker, origDigest)
+	}
+	if err := s.redactReceiptBody(got); err != nil {
+		t.Fatalf("second (idempotent) redact: %v", err)
+	}
+}
+
+// TestRedactRejectsLegacyEmbedded pins that a legacy embedded receipt has no
+// separable body and redaction refuses it.
+func TestRedactRejectsLegacyEmbedded(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	legacy := &IngressReceipt{
+		Origin: ReceiptOrigin{TeamID: "T1", ChannelID: "C1", TS: "x"},
+		Event:  json.RawMessage(`{"type":"message"}`),
+	}
+	if err := s.redactReceiptBody(legacy); err == nil {
+		t.Fatal("redactReceiptBody on a legacy embedded receipt should error")
+	}
+}
+
+// TestBodyDigestMismatchIsIntegrityError pins that a body whose bytes no longer
+// hash to event_digest is a mismatch (integrity error): the accessor degrades to
+// a JSON null and the mismatch is detected + counted on the READ path (m6 — the
+// sweep no longer hashes bodies, so its existence-only gauge does NOT fold the
+// present-but-mismatched body into company_body_missing).
+func TestBodyDigestMismatchIsIntegrityError(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	r := sampleReceipt("T1", "C1", "1700000000.000600")
+	if _, _, err := s.Admit(r); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := os.WriteFile(s.bodyPathForID(r.ID), []byte(`{"type":"message","text":"tampered"}`), 0o600); err != nil {
+		t.Fatalf("tamper body: %v", err)
+	}
+	before := s.BodyDigestMismatches()
+	got, _ := s.GetByID(r.ID)
+	if _, st := s.loadBody(got); st != bodyMismatch {
+		t.Fatalf("loadBody = %v; want bodyMismatch", st)
+	}
+	if string(s.receiptBody(got)) != "null" {
+		t.Errorf("mismatched receiptBody = %q; want null", s.receiptBody(got))
+	}
+	// The read path incremented the monotonic mismatch counter.
+	if got := s.BodyDigestMismatches(); got <= before {
+		t.Errorf("BodyDigestMismatches = %d; want > %d (read-path increment)", got, before)
+	}
+	// The existence-only sweep gauge does NOT hash, so a present-but-tampered body
+	// is not counted as Missing (that would require the per-body SHA m6 removed).
+	_, _, _, _, bodyCounts, err := s.SweepAndPending(7 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("SweepAndPending: %v", err)
+	}
+	if bodyCounts.Missing != 0 {
+		t.Errorf("bodyCounts.Missing = %d; want 0 (sweep does not hash — m6)", bodyCounts.Missing)
+	}
+}
+
+// TestBodyMissingIsIntegrityError pins that a body-split receipt whose sidecar is
+// absent is a hard integrity error counted on company_body_missing.
+func TestBodyMissingIsIntegrityError(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	r := sampleReceipt("T1", "C1", "1700000000.000700")
+	if _, _, err := s.Admit(r); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := os.Remove(s.bodyPathForID(r.ID)); err != nil {
+		t.Fatalf("remove body: %v", err)
+	}
+	got, _ := s.GetByID(r.ID)
+	if _, st := s.loadBody(got); st != bodyMissing {
+		t.Fatalf("loadBody = %v; want bodyMissing", st)
+	}
+	_, _, _, _, bodyCounts, err := s.SweepAndPending(7 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("SweepAndPending: %v", err)
+	}
+	if bodyCounts.Missing != 1 {
+		t.Errorf("bodyCounts.Missing = %d; want 1", bodyCounts.Missing)
+	}
+}
+
+// TestRedactedBodyCountedOnSweep pins the company_bodies_redacted gauge.
+func TestRedactedBodyCountedOnSweep(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	r := sampleReceipt("T1", "C1", "1700000000.000800")
+	if _, _, err := s.Admit(r); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := s.redactReceiptBody(r); err != nil {
+		t.Fatalf("redact: %v", err)
+	}
+	_, _, _, _, bodyCounts, err := s.SweepAndPending(7 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("SweepAndPending: %v", err)
+	}
+	if bodyCounts.Redacted != 1 || bodyCounts.Missing != 0 {
+		t.Errorf("bodyCounts = %+v; want Redacted 1 Missing 0", bodyCounts)
+	}
+}
+
+// TestCrashWindowBodyThenRedeliveryAdmitsClean pins crash-window recovery: a body
+// written without its receipt (a crash between the two links) is adopted by a
+// later Slack redelivery — the redelivery's body write hits the orphan (EEXIST),
+// the receipt links over it, and the digest verifies.
+func TestCrashWindowBodyThenRedeliveryAdmitsClean(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	origin := ReceiptOrigin{TeamID: "T1", ChannelID: "C1", TS: "1700000000.000900"}
+	id := receiptID(origin)
+	event := []byte(`{"type":"message","text":"survivor"}`)
+	if err := s.writeBodyOnce(id, event); err != nil {
+		t.Fatalf("seed crash-orphan body: %v", err)
+	}
+	if r, _ := s.GetByID(id); r != nil {
+		t.Fatal("receipt exists before redelivery; test premise broken")
+	}
+	r := sampleReceipt("T1", "C1", "1700000000.000900")
+	r.Event = append(json.RawMessage(nil), event...)
+	created, _, err := s.Admit(r)
+	if err != nil || !created {
+		t.Fatalf("redelivery Admit: created=%v err=%v", created, err)
+	}
+	got, _ := s.GetByID(id)
+	body, st := s.loadBody(got)
+	if st != bodyOK {
+		t.Fatalf("post-recovery loadBody = %v; want bodyOK", st)
+	}
+	if !strings.Contains(string(body), "survivor") {
+		t.Errorf("recovered body = %q; want the survivor event", body)
+	}
+}
+
+// TestCrashWindowDivergentRedeliveryReplacesOrphan is the divergent-bytes case
+// the suite previously missed (C1/C3/m7): a crash-orphan body holds the ORIGINAL
+// delivery's bytes; the redelivery re-serializes DIFFERENT bytes; the new
+// receipt's digest is over the new bytes. Blind adoption would birth a permanent
+// bodyMismatch — instead the unclaimed orphan is replaced so the admitted receipt
+// resolves bodyOK.
+func TestCrashWindowDivergentRedeliveryReplacesOrphan(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	origin := ReceiptOrigin{TeamID: "T1", ChannelID: "C1", TS: "1700000000.001200"}
+	id := receiptID(origin)
+	// Seed the crash orphan with the ORIGINAL bytes (no receipt ever linked).
+	if err := s.writeBodyOnce(id, []byte(`{"type":"message","text":"original"}`)); err != nil {
+		t.Fatalf("seed crash-orphan body: %v", err)
+	}
+	// Redelivery with DIVERGENT bytes.
+	r := sampleReceipt("T1", "C1", "1700000000.001200")
+	r.Event = json.RawMessage(`{"type":"message","text":"redelivered-divergent"}`)
+	created, _, err := s.Admit(r)
+	if err != nil || !created {
+		t.Fatalf("divergent redelivery Admit: created=%v err=%v", created, err)
+	}
+	got, _ := s.GetByID(id)
+	body, st := s.loadBody(got)
+	if st != bodyOK {
+		t.Fatalf("post-divergent loadBody = %v; want bodyOK (orphan replaced)", st)
+	}
+	if !strings.Contains(string(body), "redelivered-divergent") {
+		t.Errorf("adopted body = %q; want the redelivery bytes", body)
+	}
+}
+
+// TestDivergentBodyUnderLiveReceiptKeepsFirstWriter pins first-writer-wins for the
+// non-crash case: when a VALID receipt already claims the id, a same-origin
+// re-admission with divergent bytes must NOT replace the stored body (the incoming
+// digest is discarded, so the winner's body-to-digest invariant must hold).
+func TestDivergentBodyUnderLiveReceiptKeepsFirstWriter(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	first := sampleReceipt("T1", "C1", "1700000000.001300")
+	first.Event = json.RawMessage(`{"type":"message","text":"first-writer"}`)
+	if _, _, err := s.Admit(first); err != nil {
+		t.Fatalf("first Admit: %v", err)
+	}
+	// A redelivery with divergent bytes must be a no-op adoption (created=false),
+	// leaving the first writer's body and digest intact.
+	dup := sampleReceipt("T1", "C1", "1700000000.001300")
+	dup.Event = json.RawMessage(`{"type":"message","text":"divergent-loser"}`)
+	created, existing, err := s.Admit(dup)
+	if err != nil {
+		t.Fatalf("divergent duplicate Admit: %v", err)
+	}
+	if created || existing == nil {
+		t.Fatalf("divergent duplicate: created=%v existing=%v; want false, first-writer", created, existing)
+	}
+	got, _ := s.GetByID(first.ID)
+	body, st := s.loadBody(got)
+	if st != bodyOK || !strings.Contains(string(body), "first-writer") {
+		t.Fatalf("first-writer body clobbered: status=%v body=%q", st, body)
+	}
+}
+
+// TestSweepCorruptReceiptPreservesBody pins C2/C8: when a receipt fails to read
+// during a sweep it is quarantined AND its intact body is preserved alongside
+// (bodies/<id>.body-<token>.corrupt) rather than destroyed by the orphan GC — the
+// split-store analogue of the pre-split embedded forensic copy.
+func TestSweepCorruptReceiptPreservesBody(t *testing.T) {
+	s, dir := newTestReceiptStore(t)
+	r := sampleReceipt("T1", "C1", "1700000000.001400")
+	if _, _, err := s.Admit(r); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	bodyPath := s.bodyPathForID(r.ID)
+	// Corrupt the receipt in place; leave the body intact.
+	if err := os.WriteFile(s.pathForID(r.ID), []byte("}{ truncated not json"), 0o600); err != nil {
+		t.Fatalf("corrupt receipt: %v", err)
+	}
+	if _, _, _, _, _, err := s.SweepAndPending(7 * 24 * time.Hour); err != nil {
+		t.Fatalf("SweepAndPending: %v", err)
+	}
+	// The canonical body was NOT deleted by the orphan GC.
+	if _, err := os.Stat(bodyPath); !os.IsNotExist(err) {
+		// It may have been renamed aside; either way it must not be gone-without-trace.
+	}
+	// A forensic copy of the payload survives (either at the canonical name — if the
+	// body rename lagged — or as the .corrupt sibling).
+	bodySurvives := false
+	if _, err := os.Stat(bodyPath); err == nil {
+		bodySurvives = true
+	}
+	matches, _ := filepath.Glob(bodyPath + "-*.corrupt")
+	if len(matches) > 0 {
+		bodySurvives = true
+	}
+	if !bodySurvives {
+		t.Fatalf("corrupt-receipt sweep destroyed the intact body (no canonical, no forensic copy)")
+	}
+	if n := countCorruptFiles(t, dir); n != 1 {
+		t.Errorf("quarantined receipt files = %d; want 1", n)
+	}
+}
+
+// TestSweepFreshOrphanBodyWithinGraceSurvives pins m1: an orphan body younger than
+// the GC grace window is spared (a cross-process admission may not have linked its
+// receipt yet), and collected only once it ages past the window.
+func TestSweepFreshOrphanBodyWithinGraceSurvives(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	orphanID := "in-fresh-" + strings.Repeat("b", 12)
+	if err := s.writeBodyOnce(orphanID, []byte(`{"type":"message"}`)); err != nil {
+		t.Fatalf("write fresh orphan body: %v", err)
+	}
+	// Fresh (mtime = now): within the grace window → survives.
+	if _, _, _, _, _, err := s.SweepAndPending(7 * 24 * time.Hour); err != nil {
+		t.Fatalf("SweepAndPending: %v", err)
+	}
+	if _, err := os.Stat(s.bodyPathForID(orphanID)); err != nil {
+		t.Fatalf("fresh orphan body wrongly GC'd within grace window: %v", err)
+	}
+	// Age it past the window → collected.
+	old := time.Now().Add(-2 * bodyGCGraceWindow)
+	if err := os.Chtimes(s.bodyPathForID(orphanID), old, old); err != nil {
+		t.Fatalf("age orphan: %v", err)
+	}
+	if _, _, _, _, _, err := s.SweepAndPending(7 * 24 * time.Hour); err != nil {
+		t.Fatalf("SweepAndPending 2: %v", err)
+	}
+	if _, err := os.Stat(s.bodyPathForID(orphanID)); !os.IsNotExist(err) {
+		t.Errorf("aged orphan body survived sweep: err=%v", err)
+	}
+}
+
+// TestRedeliveryAgainstLegacyReceiptLinksNoStrayBody pins m3/m5: admitting a
+// duplicate over a seeded LEGACY embedded receipt (no BodyRef) must not link a
+// stray, unreferenced body sidecar (an unredactable raw-payload copy). The
+// existing-receipt pre-check returns the legacy receipt before any body write.
+func TestRedeliveryAgainstLegacyReceiptLinksNoStrayBody(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	origin := ReceiptOrigin{TeamID: "T1", ChannelID: "C1", TS: "1700000000.001500"}
+	legacy := &IngressReceipt{
+		ID: receiptID(origin), Generation: 1, Origin: origin,
+		Status:     ingressStatusDelivered,
+		ReceivedAt: time.Now().UTC(),
+		Event:      json.RawMessage(`{"type":"message","text":"legacy-embedded"}`),
+	}
+	data, _ := json.MarshalIndent(legacy, "", "  ")
+	if err := os.WriteFile(s.pathForID(legacy.ID), data, 0o600); err != nil {
+		t.Fatalf("seed legacy receipt: %v", err)
+	}
+	// Slack redelivers the same origin.
+	dup := sampleReceipt("T1", "C1", "1700000000.001500")
+	created, existing, err := s.Admit(dup)
+	if err != nil {
+		t.Fatalf("redelivery Admit over legacy: %v", err)
+	}
+	if created || existing == nil || existing.BodyRef != "" {
+		t.Fatalf("redelivery over legacy: created=%v existing=%v; want false + legacy (no body_ref)", created, existing)
+	}
+	if _, err := os.Stat(s.bodyPathForID(legacy.ID)); !os.IsNotExist(err) {
+		t.Errorf("stray body sidecar linked for a legacy embedded receipt: err=%v", err)
+	}
+}
+
+// TestRedactReceiptBodySweptReturnsError pins m2 at the store layer: if the receipt
+// is pair-deleted between the caller's read and the mutex-guarded redact, the store
+// refuses (ErrReceiptSwept) rather than resurrecting a receipt-less tombstone.
+func TestRedactReceiptBodySweptReturnsError(t *testing.T) {
+	s, _ := newTestReceiptStore(t)
+	r := sampleReceipt("T1", "C1", "1700000000.001600")
+	if _, _, err := s.Admit(r); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	// Simulate the retention sweep having pair-deleted the receipt (and body) after
+	// the caller resolved r but before redact takes the mutex.
+	if err := os.Remove(s.pathForID(r.ID)); err != nil {
+		t.Fatalf("remove receipt: %v", err)
+	}
+	if err := os.Remove(s.bodyPathForID(r.ID)); err != nil {
+		t.Fatalf("remove body: %v", err)
+	}
+	if err := s.redactReceiptBody(r); !errors.Is(err, ErrReceiptSwept) {
+		t.Fatalf("redactReceiptBody after sweep = %v; want ErrReceiptSwept", err)
+	}
+	// No tombstone was resurrected in the just-cleaned bodies dir.
+	if _, err := os.Stat(s.bodyPathForID(r.ID)); !os.IsNotExist(err) {
+		t.Errorf("redact resurrected a receipt-less tombstone: err=%v", err)
 	}
 }

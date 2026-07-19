@@ -125,6 +125,11 @@ def ingress_dir() -> pathlib.Path:
     return _state_dir("SLACK_COMPANY_INGRESS_DIR", "chat-ingress")
 
 
+def bodies_dir() -> pathlib.Path:
+    """The body sidecar subdirectory under the ingress store (Phase 5 split)."""
+    return ingress_dir() / "bodies"
+
+
 # --- filename / lock / nonce sanitizer (byte-for-byte cross-language) ------
 
 def component_safe(component: str) -> bool:
@@ -1259,6 +1264,59 @@ def _iter_receipts() -> list[dict[str, Any]]:
     return out
 
 
+_RECEIPT_ID_RE = re.compile(r"^in-[A-Za-z0-9._-]+$")
+
+
+def _read_body_bytes(body_ref: str) -> bytes | None:
+    """Raw bytes of a body sidecar, refusing symlinks. None if absent/oversized."""
+    path = bodies_dir() / (body_ref + ".body.json")
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as fh:
+            return fh.read(4 << 20)  # bounded like the Go reader
+    except OSError:
+        return None
+
+
+def receipt_body(receipt: dict[str, Any]) -> dict[str, Any] | None:
+    """The receipt's raw inner Slack event, resolving the body sidecar.
+
+    Every Python reader goes through here. A legacy embedded receipt (no
+    ``body_ref``) returns its inline ``event``; a body-split receipt reads its
+    ``bodies/<body_ref>.body.json`` sidecar and verifies the bytes against the
+    receipt's immutable ``event_digest``. A redacted tombstone, a missing sidecar,
+    a digest mismatch, or a non-object body all return ``None`` — so a reader
+    degrades to a no-match exactly as an unparseable embedded event always has.
+    Both shapes stay valid forever; there is no migration rewrite.
+    """
+    body_ref = receipt.get("body_ref")
+    if not body_ref:
+        event = receipt.get("event")
+        return event if isinstance(event, dict) else None
+    if not isinstance(body_ref, str) or not _RECEIPT_ID_RE.match(body_ref):
+        return None
+    raw = _read_body_bytes(body_ref)
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if parsed.get("redacted") is True:
+        return None  # explicit redacted tombstone → no-match
+    if hashlib.sha256(raw).hexdigest() != receipt.get("event_digest"):
+        return None  # integrity mismatch → handled as body-missing (no-match)
+    return parsed
+
+
 def _receipt_bot_authored(event: dict[str, Any]) -> bool:
     return bool(
         event.get("bot_id")
@@ -1293,7 +1351,8 @@ def _scan_receipt_for_nonce(intent: dict[str, Any]) -> str | None:
     """Origin ts of the intent's own bot-authored receipt carrying its nonce.
 
     Read-only: the post, arriving back through the switchboard, is admitted as a
-    bot-message receipt whose stored raw event embeds the posted metadata.
+    bot-message receipt whose raw event (embedded, or in the body sidecar —
+    resolved through :func:`receipt_body`) carries the posted metadata.
     Reconciliation adopts it only when the receipt is in (team, channel), was
     authored by the intent's own identity, carries the op's ``event_type``, and
     embeds the intent's metadata nonce. Reconciliation never calls the Slack API.
@@ -1306,8 +1365,8 @@ def _scan_receipt_for_nonce(intent: dict[str, Any]) -> str | None:
             continue
         if origin.get("channel_id") != intent["channel_id"]:
             continue
-        event = receipt.get("event")
-        if not isinstance(event, dict):
+        event = receipt_body(receipt)
+        if event is None:
             continue
         if not _receipt_bot_authored(event):
             continue

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -460,4 +462,289 @@ func receiptList(out map[string]any) []map[string]any {
 		}
 	}
 	return list
+}
+
+// --- Phase 5 body redaction verb -------------------------------------------
+
+func doRedact(t *testing.T, h *companyHarness, body map[string]any) (int, map[string]any) {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/internal/company/redact", bytes.NewReader(raw))
+	w := httptest.NewRecorder()
+	h.gw.handleCompanyRedact(w, req)
+	var out map[string]any
+	if w.Body.Len() > 0 {
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+	}
+	return w.Code, out
+}
+
+// TestRedactVerbTruncatesBodyAndDegradesReads — the operator redact verb
+// truncates a body-split receipt's sidecar to the tombstone; a later read
+// through the accessor degrades to a JSON null (context_unavailable / no-match).
+func TestRedactVerbTruncatesBodyAndDegradesReads(t *testing.T) {
+	gc := newFakeGC(t)
+	df := baseDirectoryFile()
+	bf := baseBindingsFile()
+	h := newCompanyHarness(t, gc.server.URL, &df, &bf, 4)
+
+	r := admitTargetsReceipt(t, h, "1700000000.002000", map[string]TargetDelivery{
+		companyBoundTargetKeyPrefix + "ollie-main": {
+			Session: "ollie-main", Kind: "ambient", Status: companyTargetDelivered, IdempotencyKey: "k", Agent: "ollie",
+		},
+	})
+	// Redaction is guarded to terminal receipts past the reconciliation horizon
+	// (C4/C6): drive this one terminal (delivered) and backdate ReceivedAt beyond
+	// the horizon so the verb is allowed to redact.
+	r.Status = ingressStatusDelivered
+	r.ReceivedAt = time.Now().Add(-48 * time.Hour).UTC()
+	if err := h.receipts.Update(r); err != nil {
+		t.Fatalf("make receipt terminal+aged: %v", err)
+	}
+	code, out := doRedact(t, h, map[string]any{"receipt": r.ID})
+	if code != http.StatusOK {
+		t.Fatalf("redact HTTP %d, want 200 (body=%+v)", code, out)
+	}
+	if out["redacted"] != true {
+		t.Errorf("redact response = %+v; want redacted true", out)
+	}
+	got, _ := h.receipts.GetByID(r.ID)
+	if _, st := h.receipts.loadBody(got); st != bodyRedacted {
+		t.Fatalf("post-redact loadBody = %v; want bodyRedacted", st)
+	}
+	if string(h.receipts.receiptBody(got)) != "null" {
+		t.Errorf("post-redact receiptBody = %q; want null", h.receipts.receiptBody(got))
+	}
+}
+
+// TestRedact404PastRetention — redacting an absent receipt is a 404.
+func TestRedact404PastRetention(t *testing.T) {
+	gc := newFakeGC(t)
+	df := baseDirectoryFile()
+	bf := baseBindingsFile()
+	h := newCompanyHarness(t, gc.server.URL, &df, &bf, 4)
+	code, _ := doRedact(t, h, map[string]any{
+		"origin": map[string]string{"team_id": testTeamID, "channel_id": testChannelID, "ts": "1700000000.008888"},
+	})
+	if code != http.StatusNotFound {
+		t.Fatalf("redact of absent receipt HTTP %d, want 404", code)
+	}
+}
+
+// TestRedactLegacyEmbedded409 — a legacy embedded receipt has no separable body,
+// so the verb refuses it with 409 (it ages out at retention instead).
+func TestRedactLegacyEmbedded409(t *testing.T) {
+	gc := newFakeGC(t)
+	df := baseDirectoryFile()
+	bf := baseBindingsFile()
+	h := newCompanyHarness(t, gc.server.URL, &df, &bf, 4)
+
+	origin := ReceiptOrigin{TeamID: testTeamID, ChannelID: testChannelID, TS: "1700000000.007777"}
+	legacy := &IngressReceipt{
+		ID: receiptID(origin), Generation: 1, Origin: origin,
+		Status: ingressStatusRouting,
+		Event:  json.RawMessage(`{"type":"message","text":"legacy"}`),
+	}
+	data, _ := json.MarshalIndent(legacy, "", "  ")
+	if err := os.WriteFile(h.receipts.pathForID(legacy.ID), data, 0o600); err != nil {
+		t.Fatalf("seed legacy receipt: %v", err)
+	}
+	code, out := doRedact(t, h, map[string]any{"receipt": legacy.ID})
+	if code != http.StatusConflict {
+		t.Fatalf("redact of legacy embedded receipt HTTP %d, want 409 (body=%+v)", code, out)
+	}
+}
+
+// TestHealthzSurfacesBodyGauges — after a sweep, /healthz reports the body
+// integrity gauges folded into the single SweepAndPending scan: a redacted
+// receipt on company_bodies_redacted and a body-missing receipt on
+// company_body_missing.
+func TestHealthzSurfacesBodyGauges(t *testing.T) {
+	gc := newFakeGC(t)
+	df := baseDirectoryFile()
+	bf := baseBindingsFile()
+	h := newCompanyHarness(t, gc.server.URL, &df, &bf, 4)
+
+	redacted := admitTargetsReceipt(t, h, "1700000000.003000", map[string]TargetDelivery{})
+	if err := h.receipts.redactReceiptBody(redacted); err != nil {
+		t.Fatalf("redact: %v", err)
+	}
+	missing := admitTargetsReceipt(t, h, "1700000000.003001", map[string]TargetDelivery{})
+	if err := os.Remove(h.receipts.bodyPathForID(missing.ID)); err != nil {
+		t.Fatalf("remove body: %v", err)
+	}
+
+	h.gw.sweepOnce()
+
+	detail := h.gw.healthzDetail()
+	if !strings.Contains(detail, "company_bodies_redacted=1") {
+		t.Errorf("healthz missing company_bodies_redacted=1: %q", detail)
+	}
+	if !strings.Contains(detail, "company_body_missing=1") {
+		t.Errorf("healthz missing company_body_missing=1: %q", detail)
+	}
+}
+
+// adminErrorText pulls the machine-readable error string from a verb response.
+func adminErrorText(out map[string]any) string {
+	if s, ok := out["error"].(string); ok {
+		return s
+	}
+	return ""
+}
+
+// TestRedactRefusesNonTerminalReceipt pins C4/C6: redaction of a non-terminal
+// (routing) receipt is refused with 409 (the core_bound fence), and the body is
+// left intact — truncating it would recompute routing / re-render a redrive from a
+// null body.
+func TestRedactRefusesNonTerminalReceipt(t *testing.T) {
+	gc := newFakeGC(t)
+	df := baseDirectoryFile()
+	bf := baseBindingsFile()
+	h := newCompanyHarness(t, gc.server.URL, &df, &bf, 4)
+
+	r := admitTargetsReceipt(t, h, "1700000000.007000", map[string]TargetDelivery{
+		companyBoundTargetKeyPrefix + "ollie-main": {
+			Session: "ollie-main", Kind: "ambient", Status: companyTargetPending, IdempotencyKey: "k", Agent: "ollie",
+		},
+	}) // admitTargetsReceipt sets Status routing (non-terminal)
+
+	code, out := doRedact(t, h, map[string]any{"receipt": r.ID})
+	if code != http.StatusConflict {
+		t.Fatalf("redact of routing receipt HTTP %d, want 409 (body=%+v)", code, out)
+	}
+	if !strings.Contains(adminErrorText(out), "not terminal") {
+		t.Errorf("409 reason = %q; want a not-terminal explanation", adminErrorText(out))
+	}
+	got, _ := h.receipts.GetByID(r.ID)
+	if _, st := h.receipts.loadBody(got); st == bodyRedacted {
+		t.Errorf("non-terminal receipt was redacted despite the 409")
+	}
+}
+
+// TestRedactRefusesWithinReconciliationHorizon pins C6: a terminal receipt younger
+// than the reconciliation horizon is refused (409) so a stuck posting intent can
+// still reconcile against its body's nonce — the self-echo wedge class.
+func TestRedactRefusesWithinReconciliationHorizon(t *testing.T) {
+	gc := newFakeGC(t)
+	df := baseDirectoryFile()
+	bf := baseBindingsFile()
+	h := newCompanyHarness(t, gc.server.URL, &df, &bf, 4)
+
+	r := admitTargetsReceipt(t, h, "1700000000.007100", map[string]TargetDelivery{})
+	// Terminal but FRESH (ReceivedAt ~ now, well inside the 24h horizon).
+	r.Status = ingressStatusNoDelivery
+	r.Reason = wakeReasonDMSelfEcho
+	if err := h.receipts.Update(r); err != nil {
+		t.Fatalf("make terminal: %v", err)
+	}
+	code, out := doRedact(t, h, map[string]any{"receipt": r.ID})
+	if code != http.StatusConflict {
+		t.Fatalf("redact within horizon HTTP %d, want 409 (body=%+v)", code, out)
+	}
+	if !strings.Contains(adminErrorText(out), "horizon") {
+		t.Errorf("409 reason = %q; want a reconciliation-horizon explanation", adminErrorText(out))
+	}
+	got, _ := h.receipts.GetByID(r.ID)
+	if _, st := h.receipts.loadBody(got); st == bodyRedacted {
+		t.Errorf("within-horizon receipt was redacted despite the 409")
+	}
+}
+
+// TestRedactThenRedriveUsesFrozenRoot pins C7: a redrive of a redacted receipt
+// re-renders under the FROZEN thread_root_ts (derived once at admission), not the
+// origin ts a null body would collapse to — and keeps the recorded Idempotency-Key
+// byte-for-byte.
+func TestRedactThenRedriveUsesFrozenRoot(t *testing.T) {
+	gc := newFakeGC(t)
+	df := baseDirectoryFile()
+	bf := baseBindingsFile()
+	h := newCompanyHarness(t, gc.server.URL, &df, &bf, 4)
+	h.openBarrier()
+
+	ts := "1700000000.005000"
+	rootTS := "1700000000.004000" // thread_ts != origin ts
+	origin := ReceiptOrigin{TeamID: testTeamID, ChannelID: testChannelID, TS: ts}
+	ev := slackMessageEvent{Type: "message", User: "Uhuman", Channel: testChannelID, TS: ts, ThreadTS: rootTS, Text: "threaded hi"}
+	raw, _ := json.Marshal(ev)
+	const frozenKey = "ingress:frozen:c7-key"
+	r := &IngressReceipt{
+		Origin:       origin,
+		Event:        raw,
+		Status:       ingressStatusFailed,
+		Reason:       "1 target(s) failed delivery",
+		ReceivedAt:   time.Now().Add(-48 * time.Hour).UTC(),
+		ThreadRootTS: deriveHumanRootTS(decodeCompanyMessage(origin, raw)),
+		Targets: map[string]TargetDelivery{
+			companyBoundTargetKeyPrefix + "ollie-main": {
+				Session: "ollie-main", Kind: "ambient", Status: companyTargetFailed,
+				Detail: "gc 500", Attempts: 1, IdempotencyKey: frozenKey, Agent: "ollie",
+			},
+		},
+	}
+	if created, _, err := h.receipts.Admit(r); err != nil || !created {
+		t.Fatalf("admit: created=%v err=%v", created, err)
+	}
+	// Redact (terminal + aged): allowed.
+	if code, out := doRedact(t, h, map[string]any{"receipt": r.ID}); code != http.StatusOK {
+		t.Fatalf("redact HTTP %d, want 200 (body=%+v)", code, out)
+	}
+	// Redrive the failed target: re-renders from the frozen route.
+	if code, out := doRedrive(t, h, map[string]any{"receipt": r.ID, "targets": []string{}, "include_failed": true}); code != http.StatusOK {
+		t.Fatalf("redrive HTTP %d, want 200 (body=%+v)", code, out)
+	}
+	h.wait()
+
+	calls := gc.sessionCalls()
+	if len(calls) != 1 {
+		t.Fatalf("deliveries = %d, want 1", len(calls))
+	}
+	if !strings.Contains(calls[0].body, "thread_root_ts: "+rootTS) {
+		t.Errorf("redrive lost the frozen root; body=%q", calls[0].body)
+	}
+	if strings.Contains(calls[0].body, "thread_root_ts: "+ts) {
+		t.Errorf("redrive collapsed root to origin ts (C7 regression); body=%q", calls[0].body)
+	}
+	if calls[0].idemKey != frozenKey {
+		t.Errorf("Idempotency-Key = %q, want preserved %q", calls[0].idemKey, frozenKey)
+	}
+}
+
+// TestReceiptsListingShowsRedactedMarkerAndMatchesRoot pins m9: a redacted thread
+// reply stays in the root-filtered admin listing (matched by its frozen root, not
+// the null body) with a visible body_state marker — never silently dropped.
+func TestReceiptsListingShowsRedactedMarkerAndMatchesRoot(t *testing.T) {
+	gc := newFakeGC(t)
+	df := baseDirectoryFile()
+	bf := baseBindingsFile()
+	h := newCompanyHarness(t, gc.server.URL, &df, &bf, 4)
+
+	ts := "1700000000.006000"
+	rootTS := "1700000000.005500"
+	origin := ReceiptOrigin{TeamID: testTeamID, ChannelID: testChannelID, TS: ts}
+	ev := slackMessageEvent{Type: "message", User: "Uhuman", Channel: testChannelID, TS: ts, ThreadTS: rootTS, Text: "x"}
+	raw, _ := json.Marshal(ev)
+	r := &IngressReceipt{
+		Origin: origin, Event: raw, Status: ingressStatusDelivered,
+		ReceivedAt:   time.Now().Add(-48 * time.Hour).UTC(),
+		ThreadRootTS: deriveHumanRootTS(decodeCompanyMessage(origin, raw)),
+	}
+	if created, _, err := h.receipts.Admit(r); err != nil || !created {
+		t.Fatalf("admit: created=%v err=%v", created, err)
+	}
+	if err := h.receipts.redactReceiptBody(r); err != nil {
+		t.Fatalf("redact: %v", err)
+	}
+
+	_, out := doReceipts(t, h, "?root="+testTeamID+":"+testChannelID+":"+rootTS)
+	list := receiptList(out)
+	if len(list) != 1 {
+		t.Fatalf("root-filtered listing = %d, want 1 (a redacted reply must not vanish)", len(list))
+	}
+	if list[0]["id"] != r.ID {
+		t.Errorf("listing id = %v, want %s", list[0]["id"], r.ID)
+	}
+	if list[0]["body_state"] != "redacted" {
+		t.Errorf("body_state = %v, want redacted marker", list[0]["body_state"])
+	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 //
 //   - GET  /internal/company/receipts?origin=…|root=…|status=…  bounded listing
 //   - POST /internal/company/redrive                            two-leg redrive
+//   - POST /internal/company/redact                             body redaction hook
 //
 // Both operate under the receipt's in-process single-flight and the store's
 // generation-checked commit, exactly like the delivery worker.
@@ -36,20 +38,43 @@ type adminTargetView struct {
 // adminReceiptView is one receipt's operator-facing shape: id/origin/status/
 // reason, the S7 recovery fields, the ack cursor, and the per-target state.
 type adminReceiptView struct {
-	ID               string            `json:"id"`
-	Origin           ReceiptOrigin     `json:"origin"`
-	Status           string            `json:"status"`
-	Reason           string            `json:"reason,omitempty"`
-	RecoveryAttempts int               `json:"recovery_attempts,omitempty"`
-	RecoveryNextAt   string            `json:"recovery_next_at,omitempty"`
-	RecoveryReason   string            `json:"recovery_reason,omitempty"`
-	AckState         string            `json:"ack_state,omitempty"`
-	ReceivedAt       string            `json:"received_at,omitempty"`
-	UpdatedAt        string            `json:"updated_at,omitempty"`
-	Targets          []adminTargetView `json:"targets"`
+	ID               string        `json:"id"`
+	Origin           ReceiptOrigin `json:"origin"`
+	Status           string        `json:"status"`
+	Reason           string        `json:"reason,omitempty"`
+	RecoveryAttempts int           `json:"recovery_attempts,omitempty"`
+	RecoveryNextAt   string        `json:"recovery_next_at,omitempty"`
+	RecoveryReason   string        `json:"recovery_reason,omitempty"`
+	AckState         string        `json:"ack_state,omitempty"`
+	ReceivedAt       string        `json:"received_at,omitempty"`
+	UpdatedAt        string        `json:"updated_at,omitempty"`
+	// BodyState is the receipt's body resolution (embedded/ok/redacted/missing/
+	// mismatch), so an operator listing distinguishes a redacted receipt from an
+	// intact one and from a hard integrity error (m9) — a redacted receipt stays in
+	// the listing with a visible marker rather than silently vanishing.
+	BodyState string            `json:"body_state,omitempty"`
+	Targets   []adminTargetView `json:"targets"`
 }
 
-func newAdminReceiptView(r *IngressReceipt) adminReceiptView {
+// bodyStateLabel renders a bodyStatus for the operator listing.
+func bodyStateLabel(st bodyStatus) string {
+	switch st {
+	case bodyEmbedded:
+		return "embedded"
+	case bodyOK:
+		return "ok"
+	case bodyRedacted:
+		return "redacted"
+	case bodyMissing:
+		return "missing"
+	case bodyMismatch:
+		return "mismatch"
+	default:
+		return ""
+	}
+}
+
+func newAdminReceiptView(r *IngressReceipt, bodyState string) adminReceiptView {
 	v := adminReceiptView{
 		ID:               r.ID,
 		Origin:           r.Origin,
@@ -58,6 +83,7 @@ func newAdminReceiptView(r *IngressReceipt) adminReceiptView {
 		RecoveryAttempts: r.RecoveryAttempts,
 		RecoveryReason:   r.RecoveryReason,
 		AckState:         r.AckState,
+		BodyState:        bodyState,
 		Targets:          []adminTargetView{},
 	}
 	if !r.RecoveryNextAt.IsZero() {
@@ -119,15 +145,22 @@ func (g *companyGateway) handleCompanyReceipts(w http.ResponseWriter, req *http.
 		if statusFilter != "" && r.Status != statusFilter {
 			continue
 		}
+		// Resolve the body once: its classification drives the operator marker AND
+		// the root filter derives the thread root from the FROZEN ThreadRootTS
+		// (receiptRootTS), not the decoded body — so a redacted or missing-body
+		// thread reply still matches its true root instead of dropping out of the
+		// exact listing an operator uses to audit the thread they just redacted (m9).
+		body, bodyStat := store.loadBody(r)
 		if rootFilter != nil {
-			root, ok := rootOfMsg(r.Origin, decodeCompanyMessage(r.Origin, r.Event))
-			if !ok || root.TeamID != rootFilter.TeamID ||
-				root.ChannelID != rootFilter.ChannelID ||
-				root.ThreadRootTS != rootFilter.TS {
+			msg := decodeCompanyMessage(r.Origin, body)
+			root := receiptRootTS(r, msg)
+			if root == "" || r.Origin.TeamID != rootFilter.TeamID ||
+				r.Origin.ChannelID != rootFilter.ChannelID ||
+				root != rootFilter.TS {
 				continue
 			}
 		}
-		views = append(views, newAdminReceiptView(r))
+		views = append(views, newAdminReceiptView(r, bodyStateLabel(bodyStat)))
 	}
 	writeAdminJSON(w, http.StatusOK, map[string]any{"receipts": views})
 }
@@ -218,6 +251,125 @@ func (g *companyGateway) handleCompanyRedrive(w http.ResponseWriter, req *http.R
 		"unresolvable":  res.unresolvable,
 		"status":        r.Status,
 	})
+}
+
+// companyRedactRequest is the POST /internal/company/redact body: the receipt id
+// OR an origin triple whose body sidecar to redact. Exactly one, mirroring
+// redrive's selector.
+type companyRedactRequest struct {
+	Receipt string         `json:"receipt"`
+	Origin  *ReceiptOrigin `json:"origin"`
+}
+
+// handleCompanyRedact serves POST /internal/company/redact. It resolves the
+// receipt, holds its single-flight (409 when held elsewhere), and truncates the
+// receipt's body sidecar to the redacted tombstone — the operator-only redaction
+// hook (NOT wired to any automatic trigger this phase). A terminal receipt swept
+// past retention is 404; a legacy embedded receipt (no separable body) is 409.
+func (g *companyGateway) handleCompanyRedact(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	store := g.storeOrNil()
+	if store == nil {
+		writeAdminError(w, http.StatusServiceUnavailable, "receipt store unavailable")
+		return
+	}
+	var body companyRedactRequest
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "decode: "+err.Error())
+		return
+	}
+	id, selector, err := redactReceiptID(body)
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Single-flight: a concurrent delivery or redrive holding the claim gets a
+	// 409 (the verb retries). Released before returning.
+	if !g.acquireSingleFlight(id) {
+		writeAdminError(w, http.StatusConflict, "receipt single-flight held elsewhere")
+		return
+	}
+	defer g.releaseSingleFlight(id)
+
+	r, gerr := store.GetByID(id)
+	if gerr != nil {
+		writeAdminError(w, http.StatusInternalServerError, "read receipt: "+gerr.Error())
+		return
+	}
+	if r == nil {
+		writeAdminError(w, http.StatusNotFound, "receipt "+selector+" not found (terminal and swept, or never admitted)")
+		return
+	}
+	if r.BodyRef == "" {
+		// Legacy embedded receipt: the event is inline, there is no separable body
+		// file to truncate. It ages out at retention.
+		writeAdminError(w, http.StatusConflict, "receipt "+r.ID+" is a legacy embedded receipt with no separable body to redact")
+		return
+	}
+	// Terminal-status guard (C4/C6/C7): redaction is the core_bound fence — the raw
+	// payload is retained until delivery is durable, then redacted. Truncating the
+	// body of a non-terminal (received/routing) receipt would recompute routing (or
+	// re-render a redrive) from a null body: an empty wake set terminalizes it under
+	// a misleading reason, a redrive re-POSTs empty bytes under the same
+	// Idempotency-Key. Refuse until the receipt is terminal.
+	if !isTerminalStatus(r.Status) {
+		writeAdminError(w, http.StatusConflict, "receipt "+r.ID+" is not terminal (status "+r.Status+"); redaction is refused until delivery is durable (the core_bound fence)")
+		return
+	}
+	// Reconciliation-horizon guard (C6): a self-echo receipt goes terminal within
+	// seconds, but a stuck Python "posting" intent may still reconcile against this
+	// receipt's body (its metadata nonce) for up to the intent TTL. Truncating the
+	// body inside that window erases the only copy of the nonce and wedges the
+	// intent forever. Refuse until the receipt is older than the reconciliation
+	// horizon (mirrors the outbound INTENT_TTL_SECONDS).
+	if age := g.now().UTC().Sub(r.ReceivedAt); age < redactReconciliationHorizon {
+		writeAdminError(w, http.StatusConflict,
+			fmt.Sprintf("receipt %s is younger than the %s reconciliation horizon (age %s); redaction is refused so a stuck posting intent can still reconcile against its body",
+				r.ID, redactReconciliationHorizon, age.Round(time.Second)))
+		return
+	}
+	if rerr := store.redactReceiptBody(r); rerr != nil {
+		if errors.Is(rerr, ErrReceiptSwept) {
+			// The receipt was pair-deleted by the retention sweep between our read
+			// and the mutex-guarded redact (m2): report the truth, not a false 200.
+			writeAdminError(w, http.StatusNotFound, "receipt "+r.ID+" not found (terminal and swept during redact)")
+			return
+		}
+		writeAdminError(w, http.StatusInternalServerError, "redact body: "+rerr.Error())
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{
+		"receipt":      r.ID,
+		"redacted":     true,
+		"event_digest": r.EventDigest,
+	})
+}
+
+// redactReceiptID resolves the receipt id and a human-readable selector from a
+// redact request: an explicit receipt id, or the derived id of an origin triple.
+// Exactly one must be present (redrive's selector rules).
+func redactReceiptID(body companyRedactRequest) (id, selector string, err error) {
+	if body.Receipt != "" {
+		if body.Origin != nil {
+			return "", "", errBadRequest("provide exactly one of receipt or origin")
+		}
+		if !isReceiptID(body.Receipt) {
+			return "", "", errBadRequest("receipt must match the receipt-id shape in-<...>")
+		}
+		return body.Receipt, body.Receipt, nil
+	}
+	if body.Origin == nil {
+		return "", "", errBadRequest("one of receipt or origin is required")
+	}
+	o := *body.Origin
+	if o.TeamID == "" || o.ChannelID == "" || o.TS == "" {
+		return "", "", errBadRequest("origin requires team_id, channel_id, and ts")
+	}
+	return receiptID(o), o.TeamID + ":" + o.ChannelID + ":" + o.TS, nil
 }
 
 // redriveOutcome is the result of applyRedrive: the sessions reset to pending,

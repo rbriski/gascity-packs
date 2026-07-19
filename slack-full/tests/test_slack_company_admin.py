@@ -321,3 +321,66 @@ def test_redrive_200_warns_on_unresolvable_targets(monkeypatch, capsys) -> None:
     assert out["reset_targets"] == ["ollie-main"]
     assert "riley" in cap.err
     assert "unresolvable" in cap.err.lower()
+
+
+# --------------------------------------------------------------------------
+# 4. company-redact — client behavior.
+# --------------------------------------------------------------------------
+
+def test_redact_by_receipt_id(monkeypatch, capsys) -> None:
+    mod = _mod()
+    calls = _mock_conn(mod, monkeypatch, [(200, {"receipt": "in-abc", "redacted": True})])
+    rc = mod.cmd_company_redact(["--receipt", "in-abc"])
+    assert rc == 0
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["url"] == "/internal/company/redact"
+    assert calls[0]["body"] == {"receipt": "in-abc"}
+    out = json.loads(capsys.readouterr().out)
+    assert out["redacted"] is True
+
+
+def test_redact_by_origin(monkeypatch, capsys) -> None:
+    mod = _mod()
+    calls = _mock_conn(mod, monkeypatch, [(200, {"redacted": True})])
+    rc = mod.cmd_company_redact(["--origin", "T0AAAAAAA:C0AAAAAAA:1700000000.000500"])
+    assert rc == 0
+    assert calls[0]["body"]["origin"] == {
+        "team_id": "T0AAAAAAA", "channel_id": "C0AAAAAAA", "ts": "1700000000.000500"}
+
+
+def test_redact_requires_a_selector(monkeypatch) -> None:
+    mod = _mod()
+    _mock_conn(mod, monkeypatch, [])
+    with pytest.raises(SystemExit):  # argparse mutually-exclusive required group
+        mod.cmd_company_redact([])
+
+
+def test_redact_404_surfaced(monkeypatch, capsys) -> None:
+    mod = _mod()
+    _mock_conn(mod, monkeypatch, [(404, {"error": "gone"})])
+    rc = mod.cmd_company_redact(["--receipt", "in-old"])
+    assert rc == 1
+    assert "swept" in capsys.readouterr().err
+
+
+def test_redact_409_single_flight_retries_then_succeeds(monkeypatch, capsys) -> None:
+    mod = _mod()
+    monkeypatch.setattr(mod, "_sleep", lambda *_a, **_k: None)
+    calls = _mock_conn(mod, monkeypatch, [
+        (409, {"error": "receipt single-flight held elsewhere"}),
+        (200, {"redacted": True})])
+    rc = mod.cmd_company_redact(["--receipt", "in-abc"])
+    assert rc == 0
+    assert len(calls) == 2  # one held 409 then the successful retry
+
+
+def test_redact_409_legacy_embedded_no_retry(monkeypatch, capsys) -> None:
+    """A legacy embedded receipt (no separable body) is a non-retryable 409."""
+    mod = _mod()
+    monkeypatch.setattr(mod, "_sleep", lambda *_a, **_k: None)
+    calls = _mock_conn(mod, monkeypatch, [
+        (409, {"error": "receipt in-abc is a legacy embedded receipt with no separable body to redact"})])
+    rc = mod.cmd_company_redact(["--receipt", "in-abc"])
+    assert rc == 1
+    assert len(calls) == 1  # no retry on the legacy case
+    assert "legacy" in capsys.readouterr().err

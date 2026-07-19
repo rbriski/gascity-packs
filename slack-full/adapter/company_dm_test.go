@@ -378,8 +378,9 @@ func TestDMSelfEchoTerminalNoDelivery(t *testing.T) {
 	if got := len(gc.sessionCalls()); got != 0 {
 		t.Errorf("self-echo woke %d sessions, want 0", got)
 	}
-	// The stored event keeps its metadata (the reconciler scans receipts).
-	if !strings.Contains(string(r.Event), "gc_dm_reply") {
+	// The stored event keeps its metadata (the reconciler scans receipts). It
+	// now lives in the body sidecar; read it through the accessor.
+	if !strings.Contains(string(h.gw.store().receiptBody(r)), "gc_dm_reply") {
 		t.Error("self-echo receipt dropped its metadata")
 	}
 }
@@ -547,6 +548,62 @@ func TestDMAllowedHumanPolicy(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestDMBodyMissingPendingReceiptParks pins C5/m8 for the DM path: a live DM
+// receipt whose body sidecar is missing PARKS (parked_body_integrity) instead of
+// terminalizing dm_author_not_allowed off an empty (null-body) message, and
+// delivers once the body is restored.
+func TestDMBodyMissingPendingReceiptParks(t *testing.T) {
+	h, gc, _ := setupDM(t)
+	ts := "1700000000.004100"
+	ev := dmMessage("U0HUMAN01", ts, "hey ollie")
+	ev.Type = "message"
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	origin := dmOrigin(ts)
+	receipt := &IngressReceipt{
+		Origin: origin, EventID: "Ev-" + ts, APIAppID: ollieAppID,
+		Kind: receiptKindDM, OwnerAppID: ollieAppID,
+		Status: ingressStatusReceived, Event: raw,
+		ThreadRootTS: deriveHumanRootTS(decodeCompanyMessage(origin, raw)),
+	}
+	if created, _, aerr := h.gw.store().Admit(receipt); aerr != nil || !created {
+		t.Fatalf("admit: created=%v err=%v", created, aerr)
+	}
+	if err := os.Remove(h.gw.store().bodyPathForID(receiptID(origin))); err != nil {
+		t.Fatalf("remove body: %v", err)
+	}
+
+	if out := h.gw.deliverReceipt(origin); out != deliverParkedPreclaim {
+		t.Fatalf("deliverReceipt outcome = %v, want parked", out)
+	}
+	r := getReceipt(t, h, ts)
+	if r == nil || isTerminalStatus(r.Status) {
+		t.Fatalf("body-missing DM receipt terminalized: status=%q reason=%q", statusOf(r), reasonOf(r))
+	}
+	if r.Status != ingressStatusReceived || r.Reason != companyReasonBodyIntegrity {
+		t.Fatalf("status/reason = %q/%q, want received/parked_body_integrity", statusOf(r), reasonOf(r))
+	}
+	if len(gc.sessionCalls()) != 0 {
+		t.Fatalf("parked DM receipt woke %d sessions, want 0", len(gc.sessionCalls()))
+	}
+
+	// Restore body → redrive delivers once.
+	if err := h.gw.store().writeBodyOnce(receiptID(origin), raw); err != nil {
+		t.Fatalf("restore body: %v", err)
+	}
+	h.gw.triggerDelivery(origin)
+	h.wait()
+	r = getReceipt(t, h, ts)
+	if r.Status != ingressStatusDelivered {
+		t.Fatalf("post-restore status = %q, want delivered", r.Status)
+	}
+	if len(gc.sessionCalls()) != 1 {
+		t.Errorf("post-restore deliveries = %d, want 1", len(gc.sessionCalls()))
 	}
 }
 

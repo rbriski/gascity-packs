@@ -62,6 +62,13 @@ type IngressReceiptStore struct {
 	// read without the lock by the gateway status payload and /healthz, so
 	// it is an atomic counter rather than a mutex-guarded field.
 	writeFailures atomic.Uint64
+
+	// bodyDigestMismatches counts body sidecars whose bytes failed to hash to
+	// their receipt's immutable event_digest, observed on the READ path (loadBody
+	// verifies the digest; the sweep no longer hashes — m6). Monotonic, read
+	// lock-free by /healthz, so a digest-integrity error stays observable even
+	// though the existence-only sweep gauge cannot detect it.
+	bodyDigestMismatches atomic.Uint64
 }
 
 // Receipt status values. Non-terminal receipts (received, routing) are
@@ -100,10 +107,73 @@ const maxIngressReceiptBytes = 4 << 20 // 4 MiB
 // produce an unbounded filename.
 const maxSafeComponentLen = 64
 
+// ingressReceiptSchemaBodyRef marks a body-split receipt: its raw inner event
+// lives in the bodies/ sidecar (body_ref + event_digest) rather than embedded.
+// A receipt with no schema_version is a legacy embedded receipt and stays valid
+// forever — readers accept both shapes.
+const ingressReceiptSchemaBodyRef = 1
+
+// bodiesDirName is the sidecar subdirectory under the store dir; bodyFileSuffix
+// names one body file (<receipt_id>.body.json). Bodies are 0600 inside the 0700
+// bodies dir, written atomically BEFORE their receipt in the admission sequence.
+const (
+	bodiesDirName  = "bodies"
+	bodyFileSuffix = ".body.json"
+)
+
+// bodyGCGraceWindow age-gates orphan-body GC (m1): a body younger than this is
+// never collected, so an in-flight cross-process admission (deploy overlap, or a
+// second tool) always has time to link its receipt after its body appears in the
+// bodies-dir scan. Comfortably larger than the 60s delivery sweep interval; one
+// lstat per rare orphan candidate is the standard janitor-vs-writer mitigation.
+const bodyGCGraceWindow = 5 * time.Minute
+
+// redactReconciliationHorizon is the minimum receipt age below which redaction is
+// refused. It mirrors the Python outbound INTENT_TTL_SECONDS (24h) — the window
+// during which a stuck "posting" intent could still reconcile against this
+// receipt's body via _scan_receipt_for_nonce. Truncating the body inside that
+// window would erase the only copy of the reconciliation nonce and wedge the
+// intent forever (a self-echo goes terminal in seconds but must not be redactable
+// until its reconciliation window has closed).
+const redactReconciliationHorizon = 24 * time.Hour
+
+// bodyStatus classifies a receipt's body resolution (see loadBody).
+type bodyStatus int
+
+const (
+	bodyEmbedded bodyStatus = iota // legacy receipt: event is inline in Event
+	bodyOK                         // body-split: sidecar present, digest verified
+	bodyMissing                    // body-split: sidecar absent (hard integrity error)
+	bodyRedacted                   // body-split: sidecar is the redacted tombstone
+	bodyMismatch                   // body-split: sidecar bytes hash != event_digest
+)
+
+// bodyIntegrityCounts is the sweep-computed body gauge for /healthz:
+// company_body_missing folds body-absent and digest-mismatch (both integrity
+// errors), company_bodies_redacted counts explicit tombstones.
+type bodyIntegrityCounts struct {
+	Missing  int
+	Redacted int
+}
+
+// redactedBodyMarker is the fixed tombstone a redacted body file is truncated
+// to. The original event_digest survives so the receipt still proves what the
+// body once held (late-redelivery dedup semantics are unchanged).
+type redactedBodyMarker struct {
+	Redacted    bool   `json:"redacted"`
+	EventDigest string `json:"event_digest"`
+}
+
 // ErrStale is returned by Update when the on-disk generation differs from
 // the caller's receipt generation. The caller re-reads, merges, and
 // retries — a lost race is never silently overwritten.
 var ErrStale = errors.New("ingress receipts: stale generation")
+
+// ErrReceiptSwept is returned by redactReceiptBody when the receipt (or its body)
+// vanished between the caller's read and the mutex-guarded redact — a retention
+// pair-delete raced the verb. The admin handler maps it to 404 so the operator is
+// told the truth ("terminal and swept") rather than a false 200 (m2).
+var ErrReceiptSwept = errors.New("ingress receipts: receipt swept during redact")
 
 // ReceiptOrigin is the canonical dedup key for a company-room event:
 // (team_id, channel_id, ts). ts is unique per channel; the observing app
@@ -143,11 +213,18 @@ type TargetDelivery struct {
 // inner Slack event so async routing and post-crash replay never depend
 // on re-fetching from Slack.
 type IngressReceipt struct {
-	ID         string        `json:"id"` // "in-" + sanitized origin
-	Generation int64         `json:"generation"`
-	Origin     ReceiptOrigin `json:"origin"`
-	EventID    string        `json:"event_id"`
-	APIAppID   string        `json:"api_app_id"`
+	ID         string `json:"id"` // "in-" + sanitized origin
+	Generation int64  `json:"generation"`
+	// SchemaVersion marks the receipt format. Absent/0 is a legacy embedded
+	// receipt (the inner event is inline in Event); ingressReceiptSchemaBodyRef
+	// is a body-split receipt (the event lives in the bodies/ sidecar, named by
+	// BodyRef, with EventDigest pinning its bytes). The reader accepts both
+	// shapes forever — a legacy receipt is never rewritten, it ages out at
+	// retention.
+	SchemaVersion int           `json:"schema_version,omitempty"`
+	Origin        ReceiptOrigin `json:"origin"`
+	EventID       string        `json:"event_id"`
+	APIAppID      string        `json:"api_app_id"`
 	// Kind is the receipt-level conversation kind: "" (room / legacy,
 	// Phases 1-3) or "dm" (per-agent DM, Phase 4). Distinct from
 	// TargetDelivery.Kind (the wake kind). Empty on every pre-Phase-4
@@ -167,11 +244,31 @@ type IngressReceipt struct {
 	// claim and skipped; a stale one is reclaimed.
 	UpdatedAt time.Time `json:"updated_at"`
 	Status    string    `json:"status"` // "received" | "routing" | "delivered" | "no_delivery" | "failed"
-	// Event is the COMPLETE inner Slack event object as received —
-	// routing (text/blocks/thread_ts) and crash replay depend on it.
-	Event   json.RawMessage           `json:"event"`
-	Targets map[string]TargetDelivery `json:"targets,omitempty"`
-	Reason  string                    `json:"reason,omitempty"` // parked/no_delivery/failed detail
+	// Event is the COMPLETE inner Slack event object as received. On a legacy
+	// (pre-split) receipt it is embedded here and routing/crash-replay read it
+	// directly. On a body-split receipt (SchemaVersion == ingressReceiptSchemaBodyRef)
+	// it is empty — the event lives in the bodies/ sidecar and every reader goes
+	// through receiptBody instead. omitempty keeps a body-split receipt from
+	// carrying a redundant "event": null.
+	Event json.RawMessage `json:"event,omitempty"`
+	// BodyRef names the bodies/ sidecar holding this receipt's raw inner event
+	// (always the receipt's own id). EventDigest is the sha256 hex of the stored
+	// body bytes, immutable for the receipt's life so a late redelivery dedups on
+	// the same digest and a redacted body still proves what it once held. Both are
+	// empty on a legacy embedded receipt.
+	BodyRef     string `json:"body_ref,omitempty"`
+	EventDigest string `json:"event_digest,omitempty"`
+	// ThreadRootTS is the human root ts derived ONCE at admission (thread_ts when
+	// present, else the origin ts). Every root-keyed derivation — the dgser
+	// serialization lock, the replay-chain root, the reminder's thread_root_ts,
+	// the threaded failure-reply root — reads it through receiptRootTS so a redacted
+	// or missing body can no longer collapse a threaded receipt's root to origin.TS
+	// and diverge its lock name / rendered root from the pre-redaction value. Empty
+	// on a legacy receipt admitted before this field existed; receiptRootTS falls
+	// back to body-derivation there (both shapes forever).
+	ThreadRootTS string                    `json:"thread_root_ts,omitempty"`
+	Targets      map[string]TargetDelivery `json:"targets,omitempty"`
+	Reason       string                    `json:"reason,omitempty"` // parked/no_delivery/failed detail
 	// Hydration is the frozen context bundle (verified human root +
 	// bounded untrusted excerpt) fetched ONCE at first delivery so redrives
 	// re-render byte-identical reminders under the same Idempotency-Key
@@ -228,6 +325,23 @@ func NewIngressReceiptStore(dir string) (*IngressReceiptStore, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("ingress receipts: chmod %q: %w", dir, err)
 	}
+	// The bodies/ sidecar holds one raw-event file per receipt. Create it under
+	// the same 0700 + no-symlink confinement so a squatter cannot redirect body
+	// writes any more than receipt writes.
+	bodies := filepath.Join(dir, bodiesDirName)
+	if err := os.MkdirAll(bodies, 0o700); err != nil {
+		return nil, fmt.Errorf("ingress receipts: mkdir bodies %q: %w", bodies, err)
+	}
+	binfo, err := os.Lstat(bodies)
+	if err != nil {
+		return nil, fmt.Errorf("ingress receipts: lstat bodies %q: %w", bodies, err)
+	}
+	if binfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("ingress receipts: bodies dir %q is a symlink; refusing to open", bodies)
+	}
+	if err := os.Chmod(bodies, 0o700); err != nil {
+		return nil, fmt.Errorf("ingress receipts: chmod bodies %q: %w", bodies, err)
+	}
 	return &IngressReceiptStore{dir: dir}, nil
 }
 
@@ -262,6 +376,11 @@ func (s *IngressReceiptStore) Admit(r *IngressReceipt) (created bool, existing *
 	}
 	normalizeEvent(r)
 
+	// Split the raw inner event out of the receipt: it moves to the bodies/
+	// sidecar (referenced by body_ref + event_digest) so the receipt itself
+	// stays small and the payload is independently redactable.
+	bodyBytes := splitReceiptBody(r)
+
 	data, err := marshalReceipt(r)
 	if err != nil {
 		return false, nil, err
@@ -270,6 +389,32 @@ func (s *IngressReceiptStore) Admit(r *IngressReceipt) (created bool, existing *
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Fast path + legacy safety (m3/m5): if a VALID receipt already claims this
+	// origin, return it without writing any body. A redelivery against a legacy
+	// embedded receipt (BodyRef=="", event inline) would otherwise link a stray
+	// sidecar the legacy receipt never references — an unredactable raw-payload
+	// copy that lingers to retention — and every routine redelivery would pay a
+	// needless body temp-write+fsync+link. A missing name (first admission) or a
+	// corrupt file (quarantined+reclaimed by the loop below) falls through to the
+	// normal body-then-receipt sequence. The os.Link claim below is still the
+	// linearization point, so a concurrent create is caught there, not here.
+	if existingR, rerr := s.readReceiptFile(finalPath); rerr == nil {
+		return false, existingR, nil
+	} else if !errors.Is(rerr, os.ErrNotExist) {
+		log.Printf("company: admit found unreadable receipt %q, will quarantine+reclaim: %v", finalPath, rerr)
+	}
+
+	// The body is written and durable BEFORE the receipt link: a body without a
+	// receipt is a harmless orphan the janitor GCs, whereas a receipt without a
+	// body is an integrity error. First-writer-wins via O_EXCL link; writeBodyOnce
+	// digest-checks any pre-existing body (a same-origin redelivery or recovered
+	// crash orphan) so a divergent orphan is replaced rather than clobbering the
+	// admitted receipt's digest.
+	if werr := s.writeBodyOnce(r.ID, bodyBytes); werr != nil {
+		s.writeFailures.Add(1)
+		return false, nil, werr
+	}
 
 	quarantined := false
 	for {
@@ -490,7 +635,8 @@ func (s *IngressReceiptStore) Sweep(retention time.Duration) (removed int, err e
 	if retention < ingressRetentionFloor {
 		return 0, fmt.Errorf("ingress receipts: retention %s below %s floor", retention, ingressRetentionFloor)
 	}
-	cutoff := time.Now().Add(-retention)
+	now := time.Now()
+	cutoff := now.Add(-retention)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -499,6 +645,8 @@ func (s *IngressReceiptStore) Sweep(retention time.Duration) (removed int, err e
 	if err != nil {
 		return 0, err
 	}
+	live := make(map[string]bool, len(paths))
+	readErr := map[string]bool{}
 	removedAny := false
 	for _, p := range paths {
 		r, rerr := s.readReceiptFile(p)
@@ -506,22 +654,29 @@ func (s *IngressReceiptStore) Sweep(retention time.Duration) (removed int, err e
 			if errors.Is(rerr, os.ErrNotExist) {
 				continue
 			}
+			if id, ok := receiptIDFromPath(p); ok {
+				readErr[id] = true // exclude from orphan GC: may still be live/repairable
+			}
 			s.quarantineNonFatal(p, rerr)
 			continue
 		}
 		if !isTerminalStatus(r.Status) {
+			live[r.ID] = true
 			continue // never sweep in-flight work
 		}
 		if !r.ReceivedAt.Before(cutoff) {
+			live[r.ID] = true
 			continue // still within retention
 		}
 		if derr := os.Remove(p); derr != nil {
 			if errors.Is(derr, os.ErrNotExist) {
 				continue
 			}
+			live[r.ID] = true
 			log.Printf("WARN: ingress receipts: sweep remove %q: %v", p, derr)
 			continue
 		}
+		s.deleteBody(r) // retention pair-delete
 		removed++
 		removedAny = true
 	}
@@ -531,6 +686,7 @@ func (s *IngressReceiptStore) Sweep(retention time.Duration) (removed int, err e
 			log.Printf("WARN: ingress receipts: fsync dir after sweep: %v", serr)
 		}
 	}
+	s.gcOrphanBodies(live, readErr, now)
 	return removed, nil
 }
 
@@ -549,19 +705,26 @@ func (s *IngressReceiptStore) Sweep(retention time.Duration) (removed int, err e
 // posted and only the ⚠️ reaction remains, so healing re-applies the reaction
 // WITHOUT re-posting the reply. healNeeded is always collected (cheap on the
 // already-decoded receipt); the caller applies it only when acks are enabled.
-func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending, healNeeded []*IngressReceipt, removed int, dmCounts dmReceiptStatusCounts, err error) {
+func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending, healNeeded []*IngressReceipt, removed int, dmCounts dmReceiptStatusCounts, bodyCounts bodyIntegrityCounts, err error) {
 	if retention < ingressRetentionFloor {
-		return nil, nil, 0, dmCounts, fmt.Errorf("ingress receipts: retention %s below %s floor", retention, ingressRetentionFloor)
+		return nil, nil, 0, dmCounts, bodyCounts, fmt.Errorf("ingress receipts: retention %s below %s floor", retention, ingressRetentionFloor)
 	}
-	cutoff := time.Now().Add(-retention)
+	now := time.Now()
+	cutoff := now.Add(-retention)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	paths, err := s.receiptFiles()
 	if err != nil {
-		return nil, nil, 0, dmCounts, err
+		return nil, nil, 0, dmCounts, bodyCounts, err
 	}
+	// live tracks receipt ids that survive this sweep, so orphan-body GC below
+	// can pair a body with an existing receipt without a second receipt scan.
+	// readErr tracks ids whose receipt errored on read this pass — excluded from
+	// orphan GC so a transient read fault never destroys a still-live payload.
+	live := make(map[string]bool, len(paths))
+	readErr := map[string]bool{}
 	removedAny := false
 	for _, p := range paths {
 		r, rerr := s.readReceiptFile(p)
@@ -569,31 +732,41 @@ func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending,
 			if errors.Is(rerr, os.ErrNotExist) {
 				continue // raced removal
 			}
+			if id, ok := receiptIDFromPath(p); ok {
+				readErr[id] = true
+			}
 			s.quarantineNonFatal(p, rerr)
 			continue
 		}
 		if !isTerminalStatus(r.Status) {
+			live[r.ID] = true
 			pending = append(pending, r)
-			dmCounts.tally(r) // Phase 4 /healthz DM gauge, folded into this scan
-			continue          // never sweep in-flight work
+			dmCounts.tally(r)      // Phase 4 /healthz DM gauge, folded into this scan
+			bodyCounts.tally(s, r) // Phase 5 body integrity, folded into the same scan
+			continue               // never sweep in-flight work
 		}
 		if !r.ReceivedAt.Before(cutoff) {
 			// Terminal but within retention: not swept. Collect a stranded
 			// visible-ack cursor for in-pass healing (fold of the former
 			// TerminalAcksNeedingHeal second scan).
+			live[r.ID] = true
 			if r.AckState == ackStateEyes || r.AckState == ackStateWarned {
 				healNeeded = append(healNeeded, r)
 			}
-			dmCounts.tally(r) // survives the sweep → counted on the gauge
+			dmCounts.tally(r)      // survives the sweep → counted on the gauge
+			bodyCounts.tally(s, r) // still has a body until retention → integrity-checked
 			continue
 		}
 		if derr := os.Remove(p); derr != nil {
 			if errors.Is(derr, os.ErrNotExist) {
 				continue
 			}
+			live[r.ID] = true // remove failed → receipt still present, keep its body
 			log.Printf("WARN: ingress receipts: sweep remove %q: %v", p, derr)
 			continue
 		}
+		// Retention pair-delete: the receipt is gone, so its body goes with it.
+		s.deleteBody(r)
 		removed++
 		removedAny = true
 	}
@@ -602,13 +775,17 @@ func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending,
 			log.Printf("WARN: ingress receipts: fsync dir after sweep: %v", serr)
 		}
 	}
+	// Orphan-body GC: a body with no surviving receipt (crash orphan, or a body
+	// whose pair-delete missed) is collected here in one bodies-dir pass, honoring
+	// the affirmative-absence, read-error, and grace-window guards.
+	s.gcOrphanBodies(live, readErr, now)
 	sort.SliceStable(pending, func(i, j int) bool {
 		if !pending[i].ReceivedAt.Equal(pending[j].ReceivedAt) {
 			return pending[i].ReceivedAt.Before(pending[j].ReceivedAt)
 		}
 		return pending[i].Origin.TS < pending[j].Origin.TS
 	})
-	return pending, healNeeded, removed, dmCounts, nil
+	return pending, healNeeded, removed, dmCounts, bodyCounts, nil
 }
 
 // WriteFailures returns the monotonic count of failed Admit/Update
@@ -640,6 +817,33 @@ func (c *dmReceiptStatusCounts) tally(r *IngressReceipt) {
 	case ingressStatusFailed:
 		c.Failed++
 	}
+}
+
+// tally folds one receipt's body integrity into the /healthz body gauge. Legacy
+// embedded receipts have no sidecar and are skipped. It rides the single
+// SweepAndPending scan via classifyBodyShallow — existence + a bounded tombstone
+// probe, NO SHA over the up-to-4-MiB body under the store mutex (m6). An absent
+// sidecar is an integrity error (Missing); a tombstone is Redacted. A digest
+// mismatch is NOT detectable without hashing and is instead counted on the read
+// path (bodyDigestMismatches), so the sweep never pays the per-body hash cost the
+// HTTP admission hot path would then queue behind.
+func (c *bodyIntegrityCounts) tally(s *IngressReceiptStore, r *IngressReceipt) {
+	if r == nil || r.BodyRef == "" {
+		return
+	}
+	switch s.classifyBodyShallow(r) {
+	case bodyMissing:
+		c.Missing++
+	case bodyRedacted:
+		c.Redacted++
+	}
+}
+
+// BodyDigestMismatches returns the monotonic count of read-path body digest
+// mismatches, surfaced on /healthz as the integrity paging hook the existence-only
+// sweep gauge cannot compute.
+func (s *IngressReceiptStore) BodyDigestMismatches() uint64 {
+	return s.bodyDigestMismatches.Load()
 }
 
 // pathForID returns the on-disk receipt path for a receipt id.
@@ -677,9 +881,17 @@ func (s *IngressReceiptStore) receiptFiles() ([]string, error) {
 // links it (Admit) or renames it (Update); on any failure the temp is
 // removed before returning.
 func (s *IngressReceiptStore) writeTempReceipt(data []byte) (string, error) {
-	f, err := os.CreateTemp(s.dir, "ingress-*.tmp")
+	return s.writeTempIn(s.dir, "ingress-*.tmp", data)
+}
+
+// writeTempIn writes data to a fresh 0600 temp file matching pattern in dir,
+// fsyncs it, and returns the temp path. It backs both the receipt and body temp
+// writers; the caller links or renames the result and removes the temp on
+// failure.
+func (s *IngressReceiptStore) writeTempIn(dir, pattern string, data []byte) (string, error) {
+	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
-		return "", fmt.Errorf("ingress receipts: create temp in %q: %w", s.dir, err)
+		return "", fmt.Errorf("ingress receipts: create temp in %q: %w", dir, err)
 	}
 	tmp := f.Name()
 	cleanup := func() { _ = os.Remove(tmp) }
@@ -754,11 +966,379 @@ func (s *IngressReceiptStore) readReceiptFile(path string) (*IngressReceipt, err
 	return &r, nil
 }
 
-// quarantine renames a corrupt receipt file aside to a unique *.corrupt
-// name and fsyncs the directory. The random token keeps repeated
-// quarantines of the same origin from clobbering earlier forensic copies.
+// bodiesDir is the sidecar subdirectory holding one raw-event file per receipt.
+func (s *IngressReceiptStore) bodiesDir() string {
+	return filepath.Join(s.dir, bodiesDirName)
+}
+
+// bodyPathForID returns the on-disk body path for a receipt id.
+func (s *IngressReceiptStore) bodyPathForID(id string) string {
+	return filepath.Join(s.bodiesDir(), id+bodyFileSuffix)
+}
+
+// writeBodyOnce writes the body sidecar for id, first-writer-wins. The bytes are
+// fsynced to a temp file, then hard-linked to the final body name. On EEXIST a
+// body already occupies the name (a same-origin redelivery or a recovered crash
+// orphan); the existing bytes are digest-checked against the incoming body rather
+// than adopted blind (C1/C3/m7):
+//
+//   - byte-identical (or an explicit redacted tombstone) → adopt, unchanged.
+//   - divergent AND no VALID receipt yet claims the id (the canonical name is
+//     free, or holds only a corrupt file the caller will quarantine before it
+//     links the NEW receipt whose event_digest is over THESE bytes) → replace the
+//     orphan atomically, so the receipt-to-body digest invariant holds at
+//     admission instead of birthing a permanent bodyMismatch.
+//   - divergent WITH a valid receipt already claiming the id → keep
+//     first-writer-wins: Admit's link will EEXIST and return that receipt, so the
+//     incoming digest is discarded and the stored body must stay as its owner
+//     left it.
+//
+// The receipt existence check is done under the store mutex the caller holds. The
+// bodies dir is fsynced so the new entry survives a crash.
+func (s *IngressReceiptStore) writeBodyOnce(id string, body []byte) error {
+	bodyPath := s.bodyPathForID(id)
+	tmp, err := s.writeTempIn(s.bodiesDir(), "body-*.tmp", body)
+	if err != nil {
+		return err
+	}
+	linkErr := os.Link(tmp, bodyPath)
+	if linkErr == nil {
+		if serr := fsyncDir(s.bodiesDir()); serr != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("ingress receipts: fsync bodies dir after link: %w", serr)
+		}
+		_ = os.Remove(tmp)
+		return nil
+	}
+	_ = os.Remove(tmp)
+	if !errors.Is(linkErr, os.ErrExist) {
+		return fmt.Errorf("ingress receipts: link body %q: %w", bodyPath, linkErr)
+	}
+
+	// EEXIST: a body already occupies the final name. Decide adopt vs replace.
+	existing, rerr := s.readBodyFile(id)
+	if rerr != nil {
+		// Cannot read the existing body (transient, or a concurrent redact/remove
+		// race): leave it in place, first-writer-wins as before.
+		return nil
+	}
+	if isRedactedBody(existing) || eventDigest(existing) == eventDigest(body) {
+		// A deliberate redacted tombstone, or byte-identical bytes: adopt.
+		return nil
+	}
+	// Divergent bytes. A VALID receipt claiming the id means first-writer-wins
+	// (the incoming digest never persists), so adopt the existing bytes. A missing
+	// or corrupt receipt means the incoming receipt WILL persist its digest over
+	// these bytes, so replace the orphan to keep event_digest == sha256(body).
+	if _, recErr := s.readReceiptFile(s.pathForID(id)); recErr == nil {
+		return nil
+	}
+	if aerr := s.writeBodyAtomic(id, body); aerr != nil {
+		return aerr
+	}
+	return nil
+}
+
+// writeBodyAtomic rewrites a body sidecar via temp + rename with an fsync of the
+// file and the bodies dir. Used by redaction, which overwrites the existing body
+// with the tombstone.
+func (s *IngressReceiptStore) writeBodyAtomic(id string, data []byte) error {
+	bodyPath := s.bodyPathForID(id)
+	tmp, err := s.writeTempIn(s.bodiesDir(), "body-*.tmp", data)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, bodyPath); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("ingress receipts: rename body %q: %w", bodyPath, err)
+	}
+	if err := fsyncDir(s.bodiesDir()); err != nil {
+		return fmt.Errorf("ingress receipts: fsync bodies dir after body rename: %w", err)
+	}
+	return nil
+}
+
+// readBodyFile reads a body sidecar's raw bytes with the same O_NOFOLLOW,
+// size-bounded confinement as readReceiptFile. A missing file surfaces
+// os.ErrNotExist.
+func (s *IngressReceiptStore) readBodyFile(id string) ([]byte, error) {
+	path := s.bodyPathForID(id)
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, maxIngressReceiptBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %q: %w", path, err)
+	}
+	if int64(len(data)) > maxIngressReceiptBytes {
+		return nil, fmt.Errorf("body %q exceeds %d bytes", path, maxIngressReceiptBytes)
+	}
+	return data, nil
+}
+
+// loadBody resolves a receipt's raw inner event and classifies the resolution. A
+// legacy receipt returns its embedded Event (bodyEmbedded). A body-split receipt
+// reads its sidecar: bodyOK once the bytes verify against event_digest,
+// bodyRedacted for the tombstone, bodyMissing when absent (or the ref is
+// malformed), bodyMismatch on a digest mismatch. It never takes the store mutex,
+// so it is safe to call from a scan already holding it. The bytes for any
+// non-ok state are a JSON null so decoders degrade to an empty message.
+func (s *IngressReceiptStore) loadBody(r *IngressReceipt) (json.RawMessage, bodyStatus) {
+	if r == nil {
+		return json.RawMessage("null"), bodyMissing
+	}
+	if r.BodyRef == "" {
+		if len(r.Event) == 0 {
+			return json.RawMessage("null"), bodyEmbedded
+		}
+		return r.Event, bodyEmbedded
+	}
+	if !isReceiptID(r.BodyRef) {
+		return json.RawMessage("null"), bodyMissing
+	}
+	raw, err := s.readBodyFile(r.BodyRef)
+	if err != nil {
+		return json.RawMessage("null"), bodyMissing
+	}
+	if isRedactedBody(raw) {
+		return json.RawMessage("null"), bodyRedacted
+	}
+	if eventDigest(raw) != r.EventDigest {
+		// Read-path integrity verification (m6): the sweep no longer hashes bodies,
+		// so a digest mismatch is only ever detected here. Count it monotonically so
+		// the operator signal survives even when the receipt parks and ages out.
+		s.bodyDigestMismatches.Add(1)
+		return json.RawMessage("null"), bodyMismatch
+	}
+	return json.RawMessage(raw), bodyOK
+}
+
+// classifyBodyShallow classifies a receipt's body sidecar for the /healthz sweep
+// gauge WITHOUT hashing it (m6). It stats for existence and reads only a bounded
+// prefix to probe the redacted tombstone; a present, non-tombstone body is
+// reported bodyOK (existence-verified, integrity unverified — that is the read
+// path's job, loadBody). Legacy embedded receipts have no sidecar. It never takes
+// the store mutex, so a scan already holding it can call it, and it never reads
+// (or hashes) the up-to-4-MiB body under that mutex the HTTP admission path
+// contends for.
+func (s *IngressReceiptStore) classifyBodyShallow(r *IngressReceipt) bodyStatus {
+	if r == nil || r.BodyRef == "" {
+		return bodyEmbedded
+	}
+	if !isReceiptID(r.BodyRef) {
+		return bodyMissing
+	}
+	fd, err := syscall.Open(s.bodyPathForID(r.BodyRef), syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return bodyMissing
+	}
+	f := os.NewFile(uintptr(fd), s.bodyPathForID(r.BodyRef))
+	defer func() { _ = f.Close() }()
+	// The tombstone is a tiny fixed object; a real event's prefix truncated here
+	// is unparseable JSON, so isRedactedBody rejects it and we classify bodyOK.
+	const tombstoneProbeBytes = 4096
+	buf, rerr := io.ReadAll(io.LimitReader(f, tombstoneProbeBytes))
+	if rerr != nil {
+		return bodyMissing
+	}
+	if isRedactedBody(buf) {
+		return bodyRedacted
+	}
+	return bodyOK
+}
+
+// receiptBody is the single accessor every reader goes through to obtain a
+// receipt's raw inner Slack event, transparently resolving the body sidecar for
+// body-split receipts and returning the embedded event verbatim for legacy ones.
+// A redacted, missing, or digest-mismatched body yields a JSON null so callers
+// degrade uniformly (hydration → context_unavailable, reconciliation → no match)
+// without needing to know which shape the receipt is.
+func (s *IngressReceiptStore) receiptBody(r *IngressReceipt) json.RawMessage {
+	body, _ := s.loadBody(r)
+	return body
+}
+
+// isRedactedBody reports whether raw is the redacted tombstone.
+func isRedactedBody(raw []byte) bool {
+	var probe struct {
+		Redacted bool `json:"redacted"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	return probe.Redacted
+}
+
+// redactReceiptBody truncates a receipt's body sidecar to the fixed redacted
+// tombstone ({"redacted": true, "event_digest": ...}) atomically, preserving the
+// receipt's immutable digest. It is the operator-only redaction hook (exposed as
+// an admin verb) and is NOT wired to any automatic trigger in this phase. A
+// legacy embedded receipt has no separable body and is rejected.
+func (s *IngressReceiptStore) redactReceiptBody(r *IngressReceipt) error {
+	if r == nil || r.BodyRef == "" {
+		return errors.New("ingress receipts: receipt has no separable body to redact")
+	}
+	if !isReceiptID(r.BodyRef) {
+		return fmt.Errorf("ingress receipts: invalid body ref %q", r.BodyRef)
+	}
+	tomb, err := json.MarshalIndent(redactedBodyMarker{Redacted: true, EventDigest: r.EventDigest}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("ingress receipts: marshal tombstone: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Re-verify the receipt still exists under the store mutex (m2): the retention
+	// sweep does not take the admin single-flight, so between the handler's GetByID
+	// and here the receipt+body can be pair-deleted. writeBodyAtomic RENAMES the
+	// tombstone into place (create-or-replace), which would resurrect a receipt-less
+	// tombstone in the just-cleaned bodies dir and answer a false 200. Refuse with
+	// ErrReceiptSwept (the handler maps it to 404) so the verb response stays
+	// truthful and never leaves an orphan tombstone.
+	if _, rerr := s.readReceiptFile(s.pathForID(r.ID)); rerr != nil {
+		if errors.Is(rerr, os.ErrNotExist) {
+			return ErrReceiptSwept
+		}
+		return fmt.Errorf("ingress receipts: redact re-check receipt %q: %w", r.ID, rerr)
+	}
+	// Redaction truncates an EXISTING body, never creates one: if the sidecar is
+	// already gone (pair-deleted, or a mid-flight race), do not rename a tombstone
+	// into an empty bodies dir.
+	if _, berr := os.Lstat(s.bodyPathForID(r.BodyRef)); berr != nil {
+		if errors.Is(berr, os.ErrNotExist) {
+			return ErrReceiptSwept
+		}
+		return fmt.Errorf("ingress receipts: redact stat body %q: %w", r.BodyRef, berr)
+	}
+	if err := s.writeBodyAtomic(r.BodyRef, tomb); err != nil {
+		s.writeFailures.Add(1)
+		return err
+	}
+	return nil
+}
+
+// deleteBody removes a receipt's body sidecar (pair-delete at retention).
+// Best-effort: a missing body is fine, any other failure is logged, never fatal.
+func (s *IngressReceiptStore) deleteBody(r *IngressReceipt) {
+	if r == nil || r.BodyRef == "" {
+		return
+	}
+	path := s.bodyPathForID(r.BodyRef)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("WARN: ingress receipts: pair-delete body %q: %v", path, err)
+	}
+}
+
+// bodyFiles maps each body sidecar's receipt id to its path. A missing bodies
+// dir is treated as empty; temp (*.tmp) files are skipped.
+func (s *IngressReceiptStore) bodyFiles() (map[string]string, error) {
+	entries, err := os.ReadDir(s.bodiesDir())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("ingress receipts: scan bodies %q: %w", s.bodiesDir(), err)
+	}
+	out := make(map[string]string)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, bodyFileSuffix) {
+			continue
+		}
+		out[strings.TrimSuffix(name, bodyFileSuffix)] = filepath.Join(s.bodiesDir(), name)
+	}
+	return out, nil
+}
+
+// gcOrphanBodies removes body sidecars whose receipt no longer exists — a true
+// crash orphan (the body was written but the receipt link never landed) or a body
+// whose pair-delete missed. It is deliberately conservative: a body is removed
+// ONLY when the receipt is affirmatively absent, so a receipt merely unreadable
+// this pass (a transient EIO/EMFILE, or a quarantine whose rename failed) never
+// loses its intact payload (C2/C8). Guards, cheapest first:
+//
+//   - live[id] — the receipt survived this sweep (non-terminal, within retention,
+//     or a failed remove): keep its body.
+//   - readErr[id] — the receipt errored on read this pass (may still be live on
+//     disk, repairable against an intact body): never GC on an unread receipt.
+//   - the body is younger than the grace window (m1): a cross-process in-flight
+//     admission may not have linked its receipt yet — give it time.
+//   - a receipt file OR a quarantine sibling still exists at the canonical name:
+//     affirmative-absence, not "absent from the live map".
+//
+// Best-effort; the bodies dir is fsynced once if anything was removed. Called by
+// the janitor under the store mutex.
+func (s *IngressReceiptStore) gcOrphanBodies(live, readErr map[string]bool, now time.Time) {
+	bodies, err := s.bodyFiles()
+	if err != nil {
+		log.Printf("WARN: ingress receipts: orphan-body scan: %v", err)
+		return
+	}
+	removedAny := false
+	for id, path := range bodies {
+		if live[id] || readErr[id] {
+			continue
+		}
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			continue // vanished under us, or unreadable: never force-remove
+		}
+		if now.Sub(info.ModTime()) < bodyGCGraceWindow {
+			continue // grace window: an in-flight admission may still link its receipt
+		}
+		if s.receiptOrQuarantineExists(id) {
+			continue // affirmative-absence required before deleting a body
+		}
+		if derr := os.Remove(path); derr != nil {
+			if errors.Is(derr, os.ErrNotExist) {
+				continue
+			}
+			log.Printf("WARN: ingress receipts: gc orphan body %q: %v", path, derr)
+			continue
+		}
+		removedAny = true
+	}
+	if removedAny {
+		if serr := fsyncDir(s.bodiesDir()); serr != nil {
+			log.Printf("WARN: ingress receipts: fsync bodies dir after orphan gc: %v", serr)
+		}
+	}
+}
+
+// receiptOrQuarantineExists reports whether a receipt file, or a quarantined
+// sibling of one, still exists at the canonical name for id — the affirmative
+// presence check that gates orphan-body GC. Cheap: one lstat plus a glob for the
+// rare *.corrupt siblings.
+func (s *IngressReceiptStore) receiptOrQuarantineExists(id string) bool {
+	if _, err := os.Lstat(s.pathForID(id)); err == nil {
+		return true
+	}
+	matches, err := filepath.Glob(s.pathForID(id) + "-*.corrupt")
+	if err == nil && len(matches) > 0 {
+		return true
+	}
+	return false
+}
+
+// quarantine renames a corrupt receipt file aside to a unique *.corrupt name and
+// fsyncs the directory. The random token keeps repeated quarantines of the same
+// origin from clobbering earlier forensic copies. It renames the RECEIPT ONLY,
+// leaving the paired body untouched — Admit's corrupt-reclaim path quarantines a
+// stale receipt AFTER writing the fresh admission's body, so touching the body
+// here would strand the receipt being admitted. Scan callers that want forensic
+// body parity use quarantineNonFatal, which pairs the body aside explicitly.
 func (s *IngressReceiptStore) quarantine(path string) error {
-	target := path + "-" + randomHexToken() + ".corrupt"
+	return s.quarantineTo(path, randomHexToken())
+}
+
+// quarantineTo renames path aside to path+"-"+token+".corrupt" and fsyncs the dir.
+func (s *IngressReceiptStore) quarantineTo(path, token string) error {
+	target := path + "-" + token + ".corrupt"
 	if err := os.Rename(path, target); err != nil {
 		return fmt.Errorf("rename %q -> %q: %w", path, target, err)
 	}
@@ -770,11 +1350,51 @@ func (s *IngressReceiptStore) quarantine(path string) error {
 }
 
 // quarantineNonFatal quarantines a corrupt scan entry, logging rather than
-// propagating any failure — a single bad file must never fail a scan.
+// propagating any failure — a single bad file must never fail a scan. It also
+// renames the paired body sidecar aside under the SAME token
+// (bodies/<id>.body-<token>.corrupt), preserving the raw payload the split moved
+// out of the receipt so a receipt-corruption alone never destroys an intact body
+// (C2/C8). This is the split-store analogue of the pre-split forensic copy, which
+// carried the embedded event inside the quarantined receipt. Renaming the body
+// aside also removes it from the orphan-GC's view, so it is never collected in the
+// same pass that quarantined its receipt.
 func (s *IngressReceiptStore) quarantineNonFatal(path string, cause error) {
-	if qerr := s.quarantine(path); qerr != nil {
+	token := randomHexToken()
+	if qerr := s.quarantineTo(path, token); qerr != nil {
 		log.Printf("WARN: ingress receipts: quarantine %q (corrupt: %v) failed: %v", path, cause, qerr)
+		return
 	}
+	id, ok := receiptIDFromPath(path)
+	if !ok {
+		return
+	}
+	bodyPath := s.bodyPathForID(id)
+	corruptBody := bodyPath + "-" + token + ".corrupt"
+	if err := os.Rename(bodyPath, corruptBody); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("WARN: ingress receipts: preserve body %q for quarantine: %v", bodyPath, err)
+		}
+		return
+	}
+	if serr := fsyncDir(s.bodiesDir()); serr != nil {
+		log.Printf("WARN: ingress receipts: fsync bodies dir after body quarantine: %v", serr)
+	}
+	log.Printf("WARN: ingress receipts: preserved body %q -> %q for forensics", bodyPath, corruptBody)
+}
+
+// receiptIDFromPath extracts the receipt id from a store receipt path
+// (<dir>/<id>.json), validating the id shape. A path that is not a well-formed
+// receipt file reports ok=false.
+func receiptIDFromPath(path string) (string, bool) {
+	name := filepath.Base(path)
+	if !strings.HasSuffix(name, ".json") {
+		return "", false
+	}
+	id := strings.TrimSuffix(name, ".json")
+	if !isReceiptID(id) {
+		return "", false
+	}
+	return id, true
 }
 
 // validateOrigin rejects an origin missing any keyed component. Unkeyable
@@ -787,12 +1407,42 @@ func validateOrigin(o ReceiptOrigin) error {
 	return nil
 }
 
-// normalizeEvent guarantees the Event field is valid JSON so marshaling a
-// receipt with an absent inner event cannot error.
+// normalizeEvent guarantees a legacy receipt's Event is valid JSON so marshaling
+// a receipt with an absent inner event cannot error. A body-split receipt
+// (BodyRef set) carries no embedded event and is left untouched — the guard also
+// stops Update from re-embedding an "event": null on a split receipt read back
+// from disk.
 func normalizeEvent(r *IngressReceipt) {
+	if r.BodyRef != "" {
+		return
+	}
 	if len(r.Event) == 0 {
 		r.Event = json.RawMessage("null")
 	}
+}
+
+// splitReceiptBody moves a receipt's raw inner event into its bodies/ sidecar
+// form: it returns the exact body bytes to persist and rewrites the receipt to
+// carry only the reference — body_ref (its own id), event_digest (sha256 of the
+// body bytes), schema_version — with the embedded Event cleared. Called once, at
+// Admit, before the body and receipt are written.
+func splitReceiptBody(r *IngressReceipt) []byte {
+	body := append([]byte(nil), r.Event...)
+	if len(body) == 0 {
+		body = []byte("null")
+	}
+	r.BodyRef = r.ID
+	r.EventDigest = eventDigest(body)
+	r.SchemaVersion = ingressReceiptSchemaBodyRef
+	r.Event = nil
+	return body
+}
+
+// eventDigest is the sha256 hex over the stored body bytes — the receipt's
+// immutable integrity anchor.
+func eventDigest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
 }
 
 // marshalReceipt encodes a receipt to indented JSON.

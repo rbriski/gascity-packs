@@ -701,6 +701,20 @@ func deriveHumanRootTS(msg CompanyMessage) string {
 	return msg.TS
 }
 
+// receiptRootTS returns the receipt's frozen human root, derived ONCE at admission
+// (ThreadRootTS). Every root-keyed derivation goes through here so a redacted or
+// missing body — which loses thread_ts and collapses deriveHumanRootTS to origin.TS
+// — can no longer diverge the dgser lock name, replay-chain root, rendered
+// thread_root_ts, or failure-reply root from their pre-redaction values (C7). A
+// legacy receipt admitted before the field existed falls back to body-derivation
+// (both shapes forever).
+func receiptRootTS(r *IngressReceipt, msg CompanyMessage) string {
+	if r != nil && r.ThreadRootTS != "" {
+		return r.ThreadRootTS
+	}
+	return deriveHumanRootTS(msg)
+}
+
 // companyWriteFileAtomic writes data to path via temp + rename with an fsync
 // of the file and the parent directory, matching the receipt store's
 // durability discipline.

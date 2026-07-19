@@ -183,8 +183,12 @@ func (g *companyGateway) postFailureReply(r *IngressReceipt, token string) bool 
 	if g.replyHookTok == nil && g.replyHook == nil {
 		return true
 	}
-	msg := decodeCompanyMessage(r.Origin, r.Event)
-	return g.reply(token, r.Origin.ChannelID, deriveHumanRootTS(msg),
+	store := g.store()
+	if store == nil {
+		return false // degraded: cannot resolve the body to derive the reply root
+	}
+	msg := decodeCompanyMessage(r.Origin, store.receiptBody(r))
+	return g.reply(token, r.Origin.ChannelID, receiptRootTS(r, msg),
 		"delivery failed for receipt "+neutralizeMarkupBoundaries(r.ID))
 }
 

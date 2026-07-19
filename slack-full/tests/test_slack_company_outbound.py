@@ -12,6 +12,7 @@ policy, the ``delegate``/``--cancel`` verbs, and pruning.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import multiprocessing
 import os
@@ -1220,3 +1221,149 @@ def test_self_echo_fixture_reconciles_dm_intent(env) -> None:
         "source_bot_user_id": inner["user"],
     }
     assert env._scan_receipt_for_nonce(intent) == inner["ts"]
+
+
+# --------------------------------------------------------------------------
+# Phase 5 body-store split — the receipt_body accessor (both shapes forever).
+# --------------------------------------------------------------------------
+
+def _write_body_split_receipt(env, receipt_id, origin, inner) -> dict:
+    """Write a body-split receipt: the raw event in bodies/<id>.body.json and a
+    receipt carrying body_ref + event_digest (no embedded event), as Go's Admit
+    produces."""
+    rdir = env.ingress_dir()
+    bdir = env.bodies_dir()
+    rdir.mkdir(parents=True, exist_ok=True)
+    bdir.mkdir(parents=True, exist_ok=True)
+    body_bytes = json.dumps(inner).encode("utf-8")
+    digest = hashlib.sha256(body_bytes).hexdigest()
+    (bdir / f"{receipt_id}.body.json").write_bytes(body_bytes)
+    receipt = {
+        "id": receipt_id,
+        "schema_version": 1,
+        "origin": origin,
+        "body_ref": receipt_id,
+        "event_digest": digest,
+    }
+    (rdir / f"{receipt_id}.json").write_text(json.dumps(receipt))
+    return receipt
+
+
+def test_receipt_body_resolves_body_split(env) -> None:
+    inner = {"type": "message", "text": "hi", "bot_id": "B1"}
+    receipt = _write_body_split_receipt(
+        env, "in-bodysplit-aaaa",
+        {"team_id": "T1", "channel_id": "C1", "ts": "1.1"}, inner)
+    assert env.receipt_body(receipt) == inner
+
+
+def test_receipt_body_legacy_embedded(env) -> None:
+    inner = {"type": "message", "text": "legacy"}
+    receipt = {"id": "in-legacy", "origin": {"team_id": "T1", "channel_id": "C1", "ts": "1.2"},
+               "event": inner}
+    assert env.receipt_body(receipt) == inner
+
+
+def test_receipt_body_redacted_is_none(env) -> None:
+    receipt = _write_body_split_receipt(
+        env, "in-redact-bbbb",
+        {"team_id": "T1", "channel_id": "C1", "ts": "1.3"},
+        {"type": "message", "text": "secret"})
+    # Redact: truncate the body to the tombstone the Go verb writes.
+    bpath = env.bodies_dir() / "in-redact-bbbb.body.json"
+    bpath.write_text(json.dumps({"redacted": True, "event_digest": receipt["event_digest"]}))
+    assert env.receipt_body(receipt) is None
+
+
+def test_receipt_body_missing_is_none(env) -> None:
+    receipt = _write_body_split_receipt(
+        env, "in-missing-cccc",
+        {"team_id": "T1", "channel_id": "C1", "ts": "1.4"},
+        {"type": "message"})
+    (env.bodies_dir() / "in-missing-cccc.body.json").unlink()
+    assert env.receipt_body(receipt) is None
+
+
+def test_receipt_body_digest_mismatch_is_none(env) -> None:
+    receipt = _write_body_split_receipt(
+        env, "in-mismatch-dddd",
+        {"team_id": "T1", "channel_id": "C1", "ts": "1.5"},
+        {"type": "message", "text": "orig"})
+    # Tamper the body without updating the receipt's immutable digest.
+    (env.bodies_dir() / "in-mismatch-dddd.body.json").write_text(
+        json.dumps({"type": "message", "text": "tampered"}))
+    assert env.receipt_body(receipt) is None
+
+
+def test_body_split_receipt_reconciles_intent(env) -> None:
+    """A body-split self-echo receipt reconciles through _scan_receipt_for_nonce
+    exactly as the legacy embedded shape does — both shapes forever."""
+    nonce = "gcs-bodysplit-nonce"
+    inner = {
+        "type": "message", "bot_id": "B0OLLIE", "app_id": "A0OLLIE", "user": "U0OLLIE",
+        "metadata": {"event_type": "gc_dm_reply", "event_payload": {"nonce": nonce}},
+    }
+    origin = {"team_id": "T0AAAAAAA", "channel_id": "C0DM", "ts": "1700000000.123456"}
+    _write_body_split_receipt(env, "in-bodyecho-eeee", origin, inner)
+    intent = {
+        "op": "dm", "nonce": nonce,
+        "team_id": origin["team_id"], "channel_id": origin["channel_id"],
+        "source_app_id": inner["app_id"], "source_bot_user_id": inner["user"],
+    }
+    assert env._scan_receipt_for_nonce(intent) == origin["ts"]
+
+
+def test_redacted_body_split_receipt_does_not_reconcile(env) -> None:
+    """A redacted body reads as a no-match: reconciliation never adopts it."""
+    nonce = "gcs-redacted-nonce"
+    inner = {
+        "type": "message", "bot_id": "B0OLLIE", "app_id": "A0OLLIE", "user": "U0OLLIE",
+        "metadata": {"event_type": "gc_dm_reply", "event_payload": {"nonce": nonce}},
+    }
+    origin = {"team_id": "T0AAAAAAA", "channel_id": "C0DM", "ts": "1700000000.654321"}
+    receipt = _write_body_split_receipt(env, "in-redecho-ffff", origin, inner)
+    (env.bodies_dir() / "in-redecho-ffff.body.json").write_text(
+        json.dumps({"redacted": True, "event_digest": receipt["event_digest"]}))
+    intent = {
+        "op": "dm", "nonce": nonce,
+        "team_id": origin["team_id"], "channel_id": origin["channel_id"],
+        "source_app_id": inner["app_id"], "source_bot_user_id": inner["user"],
+    }
+    assert env._scan_receipt_for_nonce(intent) is None
+
+
+def test_interop_body_split_receipt_golden(env) -> None:
+    """m4: the body-split receipt + sidecar pair generated by the REAL Go Admit
+    writer (tests/fixtures/company/interop/receipt_body_split_go{,.body}.json) reads
+    byte-for-byte through the Python accessor and reconciles end to end. A Go-side
+    drift in the filename suffix, digest computation, or field spelling that passed
+    the Go suite AND the Python suite's own synthetic shape would break HERE."""
+    receipt = json.loads((INTEROP / "receipt_body_split_go.json").read_text())
+    body_bytes = (INTEROP / "receipt_body_split_go.body.json").read_bytes()
+
+    # Byte-parity: the sidecar bytes hash to the receipt's immutable event_digest
+    # exactly as the Go writer recorded it.
+    assert hashlib.sha256(body_bytes).hexdigest() == receipt["event_digest"]
+
+    # Lay the pair into the store exactly where Go wrote it, then resolve through
+    # the Python accessor: it returns the exact inner event the sidecar holds.
+    rdir = env.ingress_dir()
+    bdir = env.bodies_dir()
+    rdir.mkdir(parents=True, exist_ok=True)
+    bdir.mkdir(parents=True, exist_ok=True)
+    (rdir / f"{receipt['id']}.json").write_text(json.dumps(receipt))
+    (bdir / f"{receipt['body_ref']}.body.json").write_bytes(body_bytes)
+
+    inner = env.receipt_body(receipt)
+    assert inner is not None
+    assert inner == json.loads(body_bytes.decode("utf-8"))
+
+    # And it reconciles a stuck posting intent through _scan_receipt_for_nonce.
+    nonce = inner["metadata"]["event_payload"]["nonce"]
+    intent = {
+        "op": "dm", "nonce": nonce,
+        "team_id": receipt["origin"]["team_id"],
+        "channel_id": receipt["origin"]["channel_id"],
+        "source_app_id": inner["app_id"], "source_bot_user_id": inner["user"],
+    }
+    assert env._scan_receipt_for_nonce(intent) == receipt["origin"]["ts"]

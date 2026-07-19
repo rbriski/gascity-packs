@@ -315,6 +315,61 @@ func TestTransientAuthorResolutionParksThenDeliversOnce(t *testing.T) {
 	}
 }
 
+// TestBodyMissingPendingReceiptParks pins C5/m8: a live room receipt whose body
+// sidecar is missing does NOT route an empty message to a terminal no_delivery —
+// it PARKS (non-terminal, counted, sweep-retried), and delivers once the body is
+// restored (an orphan-adoption repair or operator action).
+func TestBodyMissingPendingReceiptParks(t *testing.T) {
+	gc := newFakeGC(t)
+	df := baseDirectoryFile()
+	bf := baseBindingsFile()
+	h := newCompanyHarness(t, gc.server.URL, &df, &bf, 4)
+	setFixedClock(h)
+	h.openBarrier()
+
+	origin := ReceiptOrigin{TeamID: testTeamID, ChannelID: testChannelID, TS: "1700000000.004000"}
+	ev := humanMessage(origin.TS, "hello team")
+	rawEv, _ := json.Marshal(ev)
+	created, _, err := h.receipts.Admit(&IngressReceipt{
+		Origin: origin, Event: rawEv, Status: ingressStatusReceived,
+		ThreadRootTS: deriveHumanRootTS(decodeCompanyMessage(origin, rawEv)),
+	})
+	if err != nil || !created {
+		t.Fatalf("admit: created=%v err=%v", created, err)
+	}
+	// Body sidecar goes missing before delivery (crash orphan, or a lost pair).
+	if err := os.Remove(h.receipts.bodyPathForID(receiptID(origin))); err != nil {
+		t.Fatalf("remove body: %v", err)
+	}
+
+	if out := h.gw.deliverReceipt(origin); out != deliverParkedPreclaim {
+		t.Fatalf("deliverReceipt outcome = %v, want parked", out)
+	}
+	r, _ := h.receipts.Get(origin)
+	if r == nil || isTerminalStatus(r.Status) {
+		t.Fatalf("body-missing receipt terminalized: status=%q reason=%q", statusOf(r), reasonOf(r))
+	}
+	if r.Status != ingressStatusReceived || r.Reason != companyReasonBodyIntegrity {
+		t.Fatalf("status/reason = %q/%q, want received/parked_body_integrity", statusOf(r), reasonOf(r))
+	}
+	if len(gc.sessionCalls()) != 0 {
+		t.Fatalf("body-missing receipt woke %d sessions, want 0", len(gc.sessionCalls()))
+	}
+
+	// Restore the body → redrive delivers exactly once.
+	if err := h.receipts.writeBodyOnce(receiptID(origin), rawEv); err != nil {
+		t.Fatalf("restore body: %v", err)
+	}
+	h.gw.deliverReceipt(origin)
+	h.wait()
+	if got := len(gc.sessionCalls()); got != 1 {
+		t.Errorf("post-restore deliveries = %d, want 1", got)
+	}
+	if final, _ := h.receipts.Get(origin); final == nil || final.Status != ingressStatusDelivered {
+		t.Errorf("post-restore status = %q, want delivered", statusOf(final))
+	}
+}
+
 // TestFrozenHydrationByteIdentityAcrossRedrives — two delivery attempts of the
 // same target render byte-identical bodies (5xx then 2xx), proving the frozen
 // hydration + deterministic envelope.

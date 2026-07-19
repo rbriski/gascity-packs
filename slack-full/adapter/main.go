@@ -1230,12 +1230,14 @@ func main() {
 	internalMux.HandleFunc("DELETE /identity", handleIdentityDelete(identityReg))
 	internalMux.HandleFunc("POST /handle-alias", handleHandleAlias(aliasReg))
 	internalMux.HandleFunc("DELETE /handle-alias", handleHandleAliasDelete(aliasReg))
-	// Company-rooms operator surface (Phase 3b): the receipt listing + redrive
-	// endpoints backing the `gc slack company-status` / `company-redrive` verbs.
+	// Company-rooms operator surface: the receipt listing + redrive endpoints
+	// (Phase 3b) backing the `gc slack company-status` / `company-redrive` verbs,
+	// plus the Phase 5 body-redaction hook (`gc slack company-redact`).
 	// Registered only when the company gateway is wired.
 	if cfg.companyGateway != nil {
 		internalMux.HandleFunc("/internal/company/receipts", cfg.companyGateway.handleCompanyReceipts)
 		internalMux.HandleFunc("/internal/company/redrive", cfg.companyGateway.handleCompanyRedrive)
+		internalMux.HandleFunc("/internal/company/redact", cfg.companyGateway.handleCompanyRedact)
 	}
 	internalMux.HandleFunc("/healthz", handleHealthz)
 

@@ -287,7 +287,11 @@ func (g *companyGateway) replayRoot(r *IngressReceipt) (rootTriple, bool) {
 	if r == nil {
 		return rootTriple{}, false
 	}
-	msg := decodeCompanyMessage(r.Origin, r.Event)
+	store := g.store()
+	if store == nil {
+		return rootTriple{}, false
+	}
+	msg := decodeCompanyMessage(r.Origin, store.receiptBody(r))
 	// A receipt joins its root chain when its recorded state marks it a chain
 	// member (a peer_result target, a frozen synthesis snapshot, or a correlation
 	// park) OR when its MESSAGE is result-bearing (S6). The message classification
@@ -300,11 +304,7 @@ func (g *companyGateway) replayRoot(r *IngressReceipt) (rootTriple, bool) {
 	if !isReplayChainReceipt(r) && !isResultBearing(msg) {
 		return rootTriple{}, false
 	}
-	root := deriveHumanRootTS(msg)
-	if r.Origin.TeamID == "" || r.Origin.ChannelID == "" || root == "" {
-		return rootTriple{}, false
-	}
-	return rootTriple{TeamID: r.Origin.TeamID, ChannelID: r.Origin.ChannelID, ThreadRootTS: root}, true
+	return receiptRootTriple(r, msg)
 }
 
 // isReplayChainReceipt reports whether a receipt is subject to per-root replay
@@ -416,16 +416,20 @@ func (g *companyGateway) chainRootOf(origin ReceiptOrigin) (rootTriple, bool) {
 	if err != nil || r == nil {
 		return rootTriple{}, false
 	}
-	return rootOfMsg(origin, decodeCompanyMessage(origin, r.Event))
+	return receiptRootTriple(r, decodeCompanyMessage(origin, store.receiptBody(r)))
 }
 
-// rootOfMsg derives the root triple from an origin and its decoded message.
-func rootOfMsg(origin ReceiptOrigin, msg CompanyMessage) (rootTriple, bool) {
-	root := deriveHumanRootTS(msg)
-	if origin.TeamID == "" || origin.ChannelID == "" || root == "" {
+// receiptRootTriple derives a receipt's chain root triple from its FROZEN
+// thread_root_ts (receiptRootTS), so every per-root chain derivation — replayRoot,
+// chainRootOf, enqueueForRoot — agrees even after the body is redacted or lost
+// (which would otherwise collapse the body-derived root to origin.TS and split one
+// thread into parallel chains). Legacy receipts fall back to body-derivation.
+func receiptRootTriple(r *IngressReceipt, msg CompanyMessage) (rootTriple, bool) {
+	root := receiptRootTS(r, msg)
+	if r.Origin.TeamID == "" || r.Origin.ChannelID == "" || root == "" {
 		return rootTriple{}, false
 	}
-	return rootTriple{TeamID: origin.TeamID, ChannelID: origin.ChannelID, ThreadRootTS: root}, true
+	return rootTriple{TeamID: r.Origin.TeamID, ChannelID: r.Origin.ChannelID, ThreadRootTS: root}, true
 }
 
 // isResultBearing classifies the S6 result-bearing message: bot-authored AND
@@ -485,11 +489,11 @@ func (g *companyGateway) enqueueForRoot(origin ReceiptOrigin) bool {
 	if err != nil || r == nil {
 		return false
 	}
-	msg := decodeCompanyMessage(origin, r.Event)
+	msg := decodeCompanyMessage(origin, store.receiptBody(r))
 	if !isResultBearing(msg) {
 		return false
 	}
-	root, ok := rootOfMsg(origin, msg)
+	root, ok := receiptRootTriple(r, msg)
 	if !ok {
 		return false
 	}

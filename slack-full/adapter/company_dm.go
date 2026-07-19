@@ -85,7 +85,10 @@ func (g *companyGateway) tryHandleDMEvent(w http.ResponseWriter, r *http.Request
 		RetryNum:    retryNum,
 		RetryReason: retryReason,
 		Status:      ingressStatusReceived,
-		Event:       append(json.RawMessage(nil), env.Event...),
+		// Freeze the human root at admission so a later body redaction/loss cannot
+		// diverge the DM reminder's thread_root_ts from its pre-redaction value (C7).
+		ThreadRootTS: deriveHumanRootTS(decodeCompanyMessage(origin, env.Event)),
+		Event:        append(json.RawMessage(nil), env.Event...),
 	}
 	created, _, err := store.Admit(receipt)
 	if err != nil {
@@ -303,7 +306,7 @@ func (g *companyGateway) deliverDMTargets(r *IngressReceipt, origin ReceiptOrigi
 	if len(r.Hydration) > 0 {
 		_ = json.Unmarshal(r.Hydration, &hydration)
 	}
-	threadRootTS := deriveHumanRootTS(msg)
+	threadRootTS := receiptRootTS(r, msg)
 
 	now := g.now().UTC()
 	results := make(map[string]TargetDelivery, len(r.Targets))
