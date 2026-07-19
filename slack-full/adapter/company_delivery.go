@@ -82,8 +82,16 @@ type companyGateway struct {
 	// hydrateDM fetches the frozen context bundle for a DM using the OWNER
 	// agent's bot token (im:history) — the switchboard token must never touch
 	// a DM channel. Swappable in tests; the production value calls Slack
-	// conversations.* with the passed owner token.
+	// conversations.* with the passed owner token. Reused for mpim hydration
+	// (mpim:history), where the token is selected by the admission-owner-first
+	// fallback (spec §Hydration).
 	hydrateDM func(token string, msg CompanyMessage) companyHydration
+	// mpimMemberProbe probes an mpim's membership with a WOKEN agent's own token
+	// (conversations.info) before that agent's first delivery, so a forged event
+	// for a group the agent is not in fails the target rather than waking it
+	// (spec §Admission membership probe). Swappable in tests; nil is treated as
+	// an advisory proceed (availability floor, like a probe network error).
+	mpimMemberProbe func(token, channel string) mpimProbeOutcome
 
 	// Phase 2 shared-state directories the ingress side reads/writes.
 	intentsDir     string
@@ -161,10 +169,10 @@ type companyGateway struct {
 	// missing — /healthz company_dm_token_missing.
 	dmSigRejects   atomic.Uint64
 	dmTokenMissing atomic.Uint64
-	// dmStatusCounts is the sweep-computed gauge of DM receipts by status,
-	// surfaced on /healthz (company_dm_receipts). Stored as an immutable
-	// pointer swapped each sweep pass.
-	dmStatusCounts atomic.Pointer[dmReceiptStatusCounts]
+	// dmStatusCounts is the sweep-computed gauge of dm-family receipts by kind
+	// and status, surfaced on /healthz (company_dm_receipts + company_mpim_receipts).
+	// Stored as an immutable pointer swapped each sweep pass.
+	dmStatusCounts atomic.Pointer[dmFamilyReceiptCounts]
 	// bodyIntegrity is the sweep-computed body gauge surfaced on /healthz
 	// (company_body_missing + company_bodies_redacted). Swapped each sweep pass
 	// from the single SweepAndPending scan (Phase 5 body-store split).
@@ -191,13 +199,23 @@ const (
 	companyReasonFailedDMUnbound = "failed_dm_unbound"
 )
 
-// dmReceiptStatusCounts is the per-status DM receipt gauge for /healthz.
+// dmReceiptStatusCounts is the per-status receipt gauge for one dm-family kind.
 type dmReceiptStatusCounts struct {
 	Received   int
 	Routing    int
 	Delivered  int
 	NoDelivery int
 	Failed     int
+}
+
+// dmFamilyReceiptCounts splits the dm-family /healthz gauge by receipt kind: the
+// DM breakdown surfaces as company_dm_receipts_*, the group-DM breakdown as
+// company_mpim_receipts_* (spec §Kind-dispatch inventory: dm-family folded into
+// the single scan, reported as company_dm_receipts plus a company_mpim_receipts
+// breakdown).
+type dmFamilyReceiptCounts struct {
+	DM   dmReceiptStatusCounts
+	Mpim dmReceiptStatusCounts
 }
 
 // Company delivery tunables. Retention is Discord parity (7 days); the
@@ -288,6 +306,9 @@ func newCompanyGateway(cfg config, dir *companyDirectoryStore, bind *companyBind
 	}
 	g.hydrateDM = func(token string, msg CompanyMessage) companyHydration {
 		return fetchCompanyHydration(token, g.slackClient, msg)
+	}
+	g.mpimMemberProbe = func(token, channel string) mpimProbeOutcome {
+		return probeMpimMembership(token, g.slackClient, channel)
 	}
 	// Visible-ack hooks (token-parameterized): the ack actor's token is chosen
 	// per receipt — the switchboard token owns reactions:write and the room
@@ -435,6 +456,15 @@ func (g *companyGateway) tryHandleEvent(w http.ResponseWriter, r *http.Request, 
 	// existing legacy behavior is byte-for-byte preserved.
 	if ev.ChannelType == "im" {
 		return g.tryHandleDMEvent(w, r, env, ev, agentApps)
+	}
+	// Group-DM admission (Phase 4b): a message.mpim owned by the mpim gateway.
+	// A registered agent app's copy admits (origin-key dedup absorbs the other
+	// member apps' copies); a switchboard-signed mpim — the switchboard also
+	// subscribes to message.mpim — is acked 200 with NO receipt and NO legacy
+	// dispatch (it has no business in agent group DMs). Unlike a switchboard DM,
+	// an unowned mpim must NOT fall through: the room path would N-plicate it.
+	if ev.ChannelType == "mpim" {
+		return g.tryHandleMpimEvent(w, r, env, ev, agentApps)
 	}
 	if _, ok := g.dirStore.Snapshot().RoomByChannel(env.TeamID, ev.Channel); !ok {
 		// Not an imported company room (including the nil-directory case):
@@ -606,10 +636,17 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 	}
 	msg := decodeCompanyMessage(origin, body)
 
-	// DM branch (Phase 4): a per-agent DM has its own routing (owner-app join,
-	// self-echo, allowed-human policy) and its own owner-token custody. It
-	// never takes the result-serialization lock (a DM is never result-bearing).
-	if r.Kind == receiptKindDM {
+	// DM-family branch (Phase 4 / 4b): a per-agent DM or group DM has its own
+	// routing (owner-app join, self-echo/bot-author, allowed-human policy, and —
+	// for mpim — the mention set + membership probe) and its own owner-token
+	// custody. Neither takes the result-serialization lock (a direct message is
+	// never result-bearing). An mpim receipt routed down the room path would park
+	// forever on RoomByChannel (spec §Kind-dispatch inventory), so the family
+	// gate is checked BEFORE the room resolution below.
+	if isDMFamilyKind(r.Kind) {
+		if r.Kind == receiptKindMpim {
+			return g.deliverMpimReceipt(r, origin, msg)
+		}
 		return g.deliverDMReceipt(r, origin, msg)
 	}
 
@@ -1567,7 +1604,7 @@ func (g *companyGateway) healthzDetail() string {
 	if p := g.storeErr.Load(); p != nil {
 		storeErr = *p
 	}
-	var dm dmReceiptStatusCounts
+	var dm dmFamilyReceiptCounts
 	if p := g.dmStatusCounts.Load(); p != nil {
 		dm = *p
 	}
@@ -1581,7 +1618,7 @@ func (g *companyGateway) healthzDetail() string {
 	apps := g.agentApps.Snapshot()
 	joinWarnings := apps.JoinWarnings(g.dirStore.Snapshot())
 	return fmt.Sprintf(
-		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\ncompany_body_missing=%d\ncompany_bodies_redacted=%d\ncompany_body_digest_mismatch=%d\n",
+		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\ncompany_mpim_receipts_received=%d\ncompany_mpim_receipts_routing=%d\ncompany_mpim_receipts_delivered=%d\ncompany_mpim_receipts_no_delivery=%d\ncompany_mpim_receipts_failed=%d\ncompany_body_missing=%d\ncompany_bodies_redacted=%d\ncompany_body_digest_mismatch=%d\n",
 		g.barrier.Load(),
 		storeReady,
 		storeErr,
@@ -1596,11 +1633,16 @@ func (g *companyGateway) healthzDetail() string {
 		len(joinWarnings),
 		g.dmSigRejects.Load(),
 		g.dmTokenMissing.Load(),
-		dm.Received,
-		dm.Routing,
-		dm.Delivered,
-		dm.NoDelivery,
-		dm.Failed,
+		dm.DM.Received,
+		dm.DM.Routing,
+		dm.DM.Delivered,
+		dm.DM.NoDelivery,
+		dm.DM.Failed,
+		dm.Mpim.Received,
+		dm.Mpim.Routing,
+		dm.Mpim.Delivered,
+		dm.Mpim.NoDelivery,
+		dm.Mpim.Failed,
 		body.Missing,
 		body.Redacted,
 		bodyDigestMismatch,

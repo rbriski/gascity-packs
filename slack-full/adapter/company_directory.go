@@ -317,6 +317,15 @@ func (d *CompanyDirectory) DMAuthorAllowed(userID string) bool {
 	return d.dmAllowedHumans[userID]
 }
 
+// DMAllowlistActive reports whether the directory is in DM allowlist mode (the
+// dm_allowed_humans key is present, even if empty). Used by the mpim reminder
+// to decide whether an unlisted excerpted author downgrades the provenance line
+// to human_root_unlisted (spec §Semantics); when the allowlist is absent every
+// workspace human is allowed and no downgrade applies.
+func (d *CompanyDirectory) DMAllowlistActive() bool {
+	return d != nil && d.dmAllowlistMode
+}
+
 // AgentByName resolves the agent for a directory slug name.
 func (d *CompanyDirectory) AgentByName(name string) (*CompanyAgent, bool) {
 	if d == nil {

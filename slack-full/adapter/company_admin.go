@@ -425,7 +425,10 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 	// the CURRENT bindings: a DM receipt resolves through dm_bindings (keyed by
 	// agent), a room receipt through the room bindings (keyed by room+agent).
 	resolveUnbound := func(agent string) (session, city string) {
-		if r.Kind == receiptKindDM {
+		if isDMFamilyKind(r.Kind) {
+			// dm-family (dm + mpim): re-resolve via dm_bindings keyed by agent
+			// (spec §Kind-dispatch inventory). An mpim receipt's failed_dm_unbound
+			// / failed_mpim_not_member target rebinds through the same registry.
 			if bd, ok := g.dmBindStore.Snapshot().BindingFor(agent); ok {
 				return bd.Session, bd.City
 			}

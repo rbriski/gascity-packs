@@ -170,15 +170,16 @@ def test_agent_manifest_has_bot_user(agent_manifest: dict) -> None:
 
 
 def test_agent_manifest_scopes_are_dm_phase_minimal(agent_manifest: dict) -> None:
-    # Phase 4 (per-agent DMs) widens the agent app's scopes exactly to the
-    # DM-actor set (spec §Wire and manifest changes): chat:write (outbound
-    # sender) + im:history (DM hydration) + reactions:write (the DM ack actor
-    # is the agent app itself). Nothing beyond these three is justified — the
+    # Phase 4 (per-agent DMs) + Phase 4b (group DMs) widen the agent app's scopes
+    # exactly to the direct-message-actor set (specs §Wire/manifest changes):
+    # chat:write (outbound sender) + im:history (DM hydration) + mpim:history
+    # (group-DM hydration + membership probe) + reactions:write (the ack actor is
+    # the agent app itself). Nothing beyond these four is justified — the
     # switchboard stays the single room-admission owner.
     scopes = agent_manifest.get("oauth_config", {}).get("scopes", {}).get("bot")
-    assert scopes == ["chat:write", "im:history", "reactions:write"], (
-        "agent app must declare exactly [chat:write, im:history, reactions:write], "
-        f"got {scopes!r}"
+    assert scopes == ["chat:write", "im:history", "mpim:history", "reactions:write"], (
+        "agent app must declare exactly [chat:write, im:history, mpim:history, "
+        f"reactions:write], got {scopes!r}"
     )
     assert scopes == sorted(scopes) and len(scopes) == len(set(scopes))
 
@@ -196,17 +197,17 @@ def test_agent_manifest_messages_tab_enabled(agent_manifest: dict) -> None:
     )
 
 
-def test_agent_manifest_subscribes_only_to_message_im(agent_manifest: dict) -> None:
-    # Phase 4: the agent app subscribes to message.im ONLY — its own 1:1 DMs.
-    # It must never observe room traffic (message.channels/groups/mpim or
-    # app_mention), which would make it a second admission owner; the
-    # switchboard remains the single room-admission owner. The event Request
-    # URL is operator-supplied on save (same public funnel), so the template
-    # carries no request_url.
+def test_agent_manifest_subscribes_to_direct_message_events(agent_manifest: dict) -> None:
+    # Phase 4 + 4b: the agent app subscribes to its own direct-message events —
+    # message.im (1:1 DMs) and message.mpim (group DMs) — and NOTHING else. It
+    # must never observe room traffic (message.channels/groups or app_mention),
+    # which would make it a second admission owner; the switchboard remains the
+    # single room-admission owner. The event Request URL is operator-supplied on
+    # save (same public funnel), so the template carries no request_url.
     subs = agent_manifest.get("settings", {}).get("event_subscriptions", {})
     events = subs.get("bot_events")
-    assert events == ["message.im"], (
-        f"agent app must subscribe to exactly [message.im], got {events!r}"
+    assert events == ["message.im", "message.mpim"], (
+        f"agent app must subscribe to exactly [message.im, message.mpim], got {events!r}"
     )
 
 

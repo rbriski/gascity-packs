@@ -55,12 +55,14 @@ type companyCurrentTurn struct {
 // the raw name.
 //
 // A DM turn is written to a dedicated subdirectory `turnsDir/dm/<session>.json`
-// (created 0700 on demand) rather than `turnsDir/<session>.dm.json`: the shared
-// sanitizer passes interior dots through, so a room turn of a session literally
-// named "<x>.dm" and the DM turn of session "<x>" would otherwise resolve to the
-// SAME file and clobber each other, misdirecting a private reply into a room
-// (review C6 / m2 / m13). The subdirectory makes the DM and room namespaces
-// disjoint regardless of session name.
+// and an mpim turn to `turnsDir/mpim/<session>.json` (each created 0700 on
+// demand) rather than `turnsDir/<session>.dm.json`: the shared sanitizer passes
+// interior dots through, so a room turn of a session literally named "<x>.dm"
+// and the DM turn of session "<x>" would otherwise resolve to the SAME file and
+// clobber each other, misdirecting a private reply into a room (review C6 / m2 /
+// m13). Giving each dm-family kind its own subdirectory keeps the room, dm, and
+// mpim namespaces disjoint regardless of session name — an mpim wake can never
+// clobber an unanswered 1:1 DM turn (spec §Pointer).
 func writeCurrentTurnPointer(turnsDir string, p companyCurrentTurn) error {
 	if strings.TrimSpace(turnsDir) == "" {
 		return errors.New("company: current-turn dir unset")
@@ -70,8 +72,13 @@ func writeCurrentTurnPointer(turnsDir string, p companyCurrentTurn) error {
 		return err
 	}
 	dir := turnsDir
-	if p.Kind == receiptKindDM {
+	switch p.Kind {
+	case receiptKindDM:
 		dir = filepath.Join(turnsDir, "dm")
+	case receiptKindMpim:
+		dir = filepath.Join(turnsDir, "mpim")
+	}
+	if dir != turnsDir {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}

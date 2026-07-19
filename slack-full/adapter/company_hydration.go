@@ -20,9 +20,14 @@ import (
 const (
 	companyRootProvenanceVerified   = "human_root_verified"
 	companyRootProvenanceUnverified = "root_unverified"
-	companyContextAvailable         = "context_available"
-	companyContextUnavailable       = "context_unavailable"
-	companyPeerAuthority            = "peer_only"
+	// companyRootProvenanceUnlisted downgrades an mpim reminder's provenance line
+	// (never "verified") whenever any excerpted group author is not on the DM
+	// allowlist, so the agent treats unlisted-author context as untrusted (spec
+	// §Semantics). Only reachable when the directory is in DM allowlist mode.
+	companyRootProvenanceUnlisted = "human_root_unlisted"
+	companyContextAvailable       = "context_available"
+	companyContextUnavailable     = "context_unavailable"
+	companyPeerAuthority          = "peer_only"
 
 	companyExcerptMaxMessages    = 8
 	companyExcerptMaxTotalBytes  = 12 * 1024

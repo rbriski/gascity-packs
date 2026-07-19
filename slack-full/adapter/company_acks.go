@@ -199,10 +199,13 @@ func (g *companyGateway) postFailureReply(r *IngressReceipt, token string) bool 
 // observable on company_dm_token_missing instead of being a silent no-op. It
 // commits the durable ackStateDegraded cursor so the count is once-per-receipt
 // (a redrive short-circuits) and no further ack calls are attempted. No-op for
-// non-DM receipts (rooms always resolve the switchboard token, so they never
-// reach here) and idempotent once the cursor is degraded.
+// non-dm-family receipts (rooms always resolve the switchboard token, so they
+// never reach here) and idempotent once the cursor is degraded. The mpim ack
+// actor is the admission owner, so its missing token degrades and counts on the
+// shared company_dm_token_missing gauge exactly as a DM (spec §Acks: degradation
+// counters shared).
 func (g *companyGateway) noteDMAckDegraded(r *IngressReceipt) {
-	if r == nil || r.Kind != receiptKindDM || r.AckState == ackStateDegraded {
+	if r == nil || !isDMFamilyKind(r.Kind) || r.AckState == ackStateDegraded {
 		return
 	}
 	g.dmTokenMissing.Add(1)

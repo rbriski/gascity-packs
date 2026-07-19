@@ -1,7 +1,10 @@
 # Phase 4b — Group DMs (mpim): Implementation Spec (v2)
 
 Status: revised after adversarial review (18 confirmed findings, 5
-blockers; archive wf_7c0b3105-2ea). Extends Phase 4
+blockers; archive wf_7c0b3105-2ea), then clarified in the Phase 4b
+pre-commit review (provenance freeze + human-only downgrade + root-leg
+downgrade, missing-token probe block, owner-join-loss degrades ack only,
+vanished-agent pointer skip). Extends Phase 4
 (`phase4-dm-spec.md`); rule-12 analogues apply. Motivating
 requirement (2026-07-19): group DMs with agents woke nobody.
 
@@ -26,9 +29,17 @@ mpim any registered agent secret can forge events for group channels
   terminal `dm_author_not_allowed` exactly as dm. Additionally,
   because group hydration can excerpt non-allowed members' text, the
   reminder's provenance line downgrades to `human_root_unlisted`
-  (never "verified") whenever any excerpted author is unlisted;
-  agents are instructed to treat unlisted-author content as
-  untrusted context. Data-at-rest note: mpim admission makes
+  (never "verified") whenever any unlisted HUMAN author appears in the
+  frozen hydration — either the verified thread-root author or any
+  excerpt line. Only humans participate: an excerpt line authored by a
+  directory agent (its `bot_user_id`) or a classic bot (empty user id)
+  is NOT an "unlisted human" and never downgrades, so an agent's own
+  reply in the recent window cannot poison the signal. The verdict is
+  computed ONCE when the hydration snapshot freezes and persisted in
+  the blob, so every retry renders byte-identical reminder bytes (the
+  frozen-hydration discipline — never recomputed from the live
+  directory). Agents are instructed to treat unlisted-author content
+  as untrusted context. Data-at-rest note: mpim admission makes
   human-to-human group text a durable receipt-store class for the
   7-day retention window; the Phase 5 body-store split is the
   redaction point and its admin verb applies.
@@ -46,15 +57,26 @@ mpim any registered agent secret can forge events for group channels
 - Origin key `(team_id, mpim_channel_id, ts)` dedups multi-app
   observation: the first member app's event admits; the rest absorb
   as replays. Receipt kind `mpim`; receipt-level `owner_app_id` =
-  admission winner = ACK ACTOR ONLY (never a wake-target input).
+  admission winner = ACK ACTOR ONLY (never a wake-target input). If the
+  winner's directory join is lost after admission (offboarded mid-
+  flight), that ONLY degrades the visible ack (counted, like a missing
+  owner token); it never parks the receipt — the other mentioned
+  agents' targets are independent of the owner and must still wake.
+  Delivery parks only when routing itself cannot proceed (a registry-
+  unavailable author answer, or a wholly empty/unavailable directory
+  snapshot that cannot resolve any mention).
 - Self-echo N-plication is absorbed the same way; first copy admits
   as `mpim_bot_author`.
 - Membership probe (blast-radius mitigation): before the FIRST
   delivery attempt for each woken agent, the delivery worker probes
   the mpim with that agent's own token (`conversations.info`);
   `not_in_channel`/`channel_not_found` → recorded failed target
-  `failed_mpim_not_member` (redrive-recoverable), never a wake. Probe
-  network errors proceed (advisory, like the session guard).
+  `failed_mpim_not_member` (redrive-recoverable), never a wake. A
+  MISSING/unloadable woken-agent token also BLOCKS the wake as
+  `failed_mpim_not_member` (durable local state, not a transient error —
+  redrive-recoverable once the token is dropped): advisory-proceed is
+  reserved ONLY for genuine probe transport errors (network / non-
+  membership Slack errors), like the session guard.
 
 ## Kind-dispatch inventory (normative — review C4/C10)
 
@@ -114,7 +136,17 @@ woken agent's OWN token.
   the dm validator's owner-join check so every woken agent's reply
   passes its own guard). The RECEIPT-level owner_app_id (admission
   winner / ack actor) is a different field with different semantics;
-  the spec's tests pin both.
+  the spec's tests pin both. If the woken agent vanished from the
+  directory between route-freeze and the pointer write, its app_id
+  resolves empty — the worker MUST NOT write that pointer (an empty
+  `owner_app_id` is refused at parse time and would brick reply-current
+  for EVERY kind on that session, including its live room/dm turns). It
+  instead fails the target recoverably (`failed_mpim_agent_unknown`,
+  redrive-recoverable) with no pointer and no wake. Defense in depth:
+  `resolve_reply_pointer_source` treats a pointer that fails parsing as
+  absent for auto-resolution (so one corrupt file cannot disable the
+  session's other reply surfaces), raising only when that kind is the
+  explicit `--kind`.
 - Reply: the woken agent's token, flat unless the human threaded
   (Phase 4 rule), through the durable-intent machinery with intent
   op `dm` (unchanged — reconciliation matches the admitted

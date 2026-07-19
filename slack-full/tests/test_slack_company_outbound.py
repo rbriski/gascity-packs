@@ -1367,3 +1367,222 @@ def test_interop_body_split_receipt_golden(env) -> None:
         "source_app_id": inner["app_id"], "source_bot_user_id": inner["user"],
     }
     assert env._scan_receipt_for_nonce(intent) == receipt["origin"]["ts"]
+
+
+# --------------------------------------------------------------------------
+# 14. Group DMs (Phase 4b): mpim pointer contract, three-way resolution,
+#     reply spoof guard + owner_app_id, delegation refusal, golden fixture.
+# --------------------------------------------------------------------------
+
+def _write_mpim_turn(mod, session: str, **overrides) -> dict:
+    tdir = mod.turns_dir()
+    tdir.mkdir(parents=True, exist_ok=True)
+    turn = {
+        "schema_version": 1,
+        "session": session,
+        "receipt_id": "in-mpim",
+        "team_id": "T0AAAAAAA",
+        "channel_id": "G0GROUPDM01",
+        "ts": "1700000000.000900",
+        "room": "",
+        "kind": "mpim",
+        "thread_root_ts": "1700000000.000900",
+        "agent": "ollie",
+        "owner_app_id": "A0AAAAAA1",
+        "delivered_at": "2026-07-18T12:00:00Z",
+    }
+    turn.update(overrides)
+    mpim_dir = tdir / "mpim"
+    mpim_dir.mkdir(parents=True, exist_ok=True)
+    (mpim_dir / f"{session}.json").write_text(json.dumps(turn))
+    return turn
+
+
+def test_mpim_pointer_parses_with_empty_room(env) -> None:
+    _write_mpim_turn(env, "ollie-dm")
+    parsed = env.read_current_turn_mpim("ollie-dm")
+    assert parsed is not None
+    assert parsed["kind"] == "mpim" and parsed["room"] == ""
+    assert parsed["owner_app_id"] == "A0AAAAAA1"
+
+
+def test_mpim_pointer_requires_owner_app_id(env) -> None:
+    _write_mpim_turn(env, "ollie-dm", owner_app_id="")
+    with pytest.raises(env.OutboundError) as exc:
+        env.read_current_turn_mpim("ollie-dm")
+    assert "owner_app_id" in str(exc.value)
+
+
+def test_resolve_source_mpim_only(env) -> None:
+    _write_mpim_turn(env, "ollie-dm")
+    assert env.resolve_reply_pointer_source("ollie-dm") == "mpim"
+
+
+def test_resolve_source_three_way_newest_wins(env) -> None:
+    # A dm turn then an mpim turn for the same session: BOTH live, newest wins.
+    _write_dm_turn(env, "sess", delivered_at="2026-07-18T12:00:00Z")
+    _write_mpim_turn(env, "sess", delivered_at="2026-07-18T12:00:05Z")
+    assert env.resolve_reply_pointer_source("sess") == "mpim"
+    # --kind dm recovers the older 1:1 turn (pointer isolation: both still live).
+    assert env.resolve_reply_pointer_source("sess", kind_override="dm") == "dm"
+    # Move the dm turn newer; it wins by delivered_at.
+    _write_dm_turn(env, "sess", delivered_at="2026-07-18T12:00:09Z")
+    assert env.resolve_reply_pointer_source("sess") == "dm"
+
+
+def test_resolve_source_mpim_kind_override_and_missing(env) -> None:
+    _write_turn(env, "sess", kind="targeted", delivered_at="2026-07-18T12:00:09Z")
+    _write_mpim_turn(env, "sess", delivered_at="2026-07-18T12:00:00Z")
+    # Room is newer, but --kind mpim forces the mpim pointer.
+    assert env.resolve_reply_pointer_source("sess", kind_override="mpim") == "mpim"
+    # --kind mpim on a company session with a pointer but no mpim one errors
+    # (a session with NO company pointer at all returns None instead — legacy).
+    _write_turn(env, "roomonly", kind="targeted")
+    with pytest.raises(env.OutboundError):
+        env.resolve_reply_pointer_source("roomonly", kind_override="mpim")
+
+
+def test_resolve_source_tie_prefers_dm_over_mpim_over_room(env) -> None:
+    # Equal delivered_at across all three: the most-private surface wins.
+    _write_turn(env, "sess", kind="targeted", delivered_at="2026-07-18T12:00:00Z")
+    _write_mpim_turn(env, "sess", delivered_at="2026-07-18T12:00:00Z")
+    assert env.resolve_reply_pointer_source("sess") == "mpim"  # mpim beats room
+    _write_dm_turn(env, "sess", delivered_at="2026-07-18T12:00:00Z")
+    assert env.resolve_reply_pointer_source("sess") == "dm"    # dm beats both
+
+
+def test_resolve_source_tolerates_poison_mpim_pointer(env) -> None:
+    # m4 defense-in-depth: a session with a healthy room pointer AND a POISONED
+    # mpim pointer (empty owner_app_id, which parse_current_turn refuses). One
+    # corrupt pointer must not brick reply-current on the session's OTHER live
+    # surfaces — auto-resolution treats the corrupt kind as absent and returns the
+    # room pointer. An explicit --kind targeting the corrupt pointer STILL errors.
+    _write_turn(env, "sess", kind="targeted", delivered_at="2026-07-18T12:00:00Z")
+    _write_mpim_turn(env, "sess", owner_app_id="", delivered_at="2026-07-18T12:00:05Z")
+    assert env.resolve_reply_pointer_source("sess") == "room"
+    with pytest.raises(env.OutboundError) as exc:
+        env.resolve_reply_pointer_source("sess", kind_override="mpim")
+    assert "owner_app_id" in str(exc.value)
+
+
+def test_mpim_reply_posts_with_woken_token_flat(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    _write_mpim_turn(env, "ollie-dm")
+    captured: list = []
+    env._slack_web_post = _mock_ok(captured, ["1700000000.001000"])
+    result = env.post_company_mpim_reply(body="on it", origin_ts="", session_name="ollie-dm")
+    assert result["status"] == "posted" and result["kind"] == "mpim"
+    p = captured[0]["payload"]
+    assert captured[0]["token"] == "xoxb-test-token"  # ollie's OWN token
+    assert p["channel"] == "G0GROUPDM01"
+    assert "thread_ts" not in p  # top-level group message → flat
+    assert "<@" not in p["text"]  # escaped, no live mention
+    # Reconciliation reuses the DM op/event_type unchanged.
+    assert p["metadata"]["event_type"] == "gc_dm_reply"
+    assert result["nonce"] == p["metadata"]["event_payload"]["nonce"]
+
+
+def test_mpim_reply_threads_only_when_human_threaded(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    _write_mpim_turn(env, "ollie-dm", ts="1700000000.000950",
+                     thread_root_ts="1700000000.000900")
+    captured: list = []
+    env._slack_web_post = _mock_ok(captured, ["1700000000.001000"])
+    env.post_company_mpim_reply(body="in thread", origin_ts="", session_name="ollie-dm")
+    assert captured[0]["payload"]["thread_ts"] == "1700000000.000900"
+
+
+def test_mpim_reply_non_winner_agent_passes_own_guard(env, tmp_path) -> None:
+    # C11 regression: an mpim pointer for the WOKEN agent riley (its own app id),
+    # even though riley may not be the admission owner, passes riley's own guard.
+    _write_dm_bindings(tmp_path)
+    _write_mpim_turn(env, "riley-dm", agent="riley", owner_app_id="A0AAAAAA2")
+    captured: list = []
+    env._slack_web_post = _mock_ok(captured, ["1700000000.001000"])
+    result = env.post_company_mpim_reply(body="ack", origin_ts="", session_name="riley-dm")
+    assert result["status"] == "posted"
+    assert captured[0]["token"] == "xoxb-test-token"  # riley's own token in this env
+
+
+def test_mpim_reply_spoof_guard_unbound_session(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path, {
+        "schema_version": 1, "dm_bindings": [{"agent": "ollie", "session": "someone-else"}]})
+    _write_mpim_turn(env, "ollie-dm")
+    with pytest.raises(env.OutboundError) as exc:
+        env.post_company_mpim_reply(body="x", origin_ts="", session_name="ollie-dm")
+    assert "spoof guard" in str(exc.value)
+
+
+def test_mpim_reply_owner_app_id_mismatch_rejected(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    _write_mpim_turn(env, "ollie-dm", owner_app_id="A0WRONGAPP")
+    with pytest.raises(env.OutboundError) as exc:
+        env.post_company_mpim_reply(body="x", origin_ts="", session_name="ollie-dm")
+    assert "owner_app_id" in str(exc.value)
+
+
+def test_mpim_reply_origin_ts_mismatch(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    _write_mpim_turn(env, "ollie-dm", ts="1700000000.000900")
+    with pytest.raises(env.OutboundError) as exc:
+        env.post_company_mpim_reply(body="x", origin_ts="1700000000.999999",
+                                    session_name="ollie-dm")
+    assert "origin-ts" in str(exc.value)
+
+
+def test_mpim_reply_needs_mpim_pointer(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    # Only a room pointer exists; the mpim verb refuses (no mpim pointer).
+    _write_turn(env, "ollie-dm", kind="targeted")
+    with pytest.raises(env.OutboundError) as exc:
+        env.post_company_mpim_reply(body="x", origin_ts="", session_name="ollie-dm")
+    assert "no mpim current-turn pointer" in str(exc.value)
+
+
+def test_mpim_reply_transient_parks_then_reconciles(env, tmp_path) -> None:
+    _write_dm_bindings(tmp_path)
+    _write_mpim_turn(env, "ollie-dm")
+    env._slack_web_post = lambda *a, **k: (_ for _ in ()).throw(
+        env.TransientPostError("timeout"))
+    parked = env.post_company_mpim_reply(body="deferred", origin_ts="", session_name="ollie-dm")
+    assert parked["status"] == "parked"
+    nonce = parked["nonce"]
+    intents = env.list_intents()
+    assert len(intents) == 1 and intents[0]["op"] == "dm"  # op unchanged for mpim
+    # The owner app's mpim self-echo lands as an mpim receipt carrying our nonce
+    # (channel is the group DM); it reconciles the op=dm intent by nonce.
+    _drop_receipt(env, nonce, "1700000000.001100", channel="G0GROUPDM01",
+                  app_id="A0AAAAAA1", event_type="gc_dm_reply", name="in-mpim-echo")
+    assert env.reconcile_posting_intents() == 1
+    resolved = env.list_intents()[0]
+    assert resolved["status"] == "published"
+    assert resolved["posted_ts"] == "1700000000.001100"
+    assert env.list_delegations() == []  # a dm-family reply owns no record
+
+
+def test_delegate_refused_from_mpim_root(env, tmp_path) -> None:
+    # An mpim kind reaching the room-pointer delegate gate is refused (dm-family).
+    _write_dm_bindings(tmp_path)
+    tdir = env.turns_dir(); tdir.mkdir(parents=True, exist_ok=True)
+    mpim_as_room = {
+        "schema_version": 1, "session": "ollie-main", "receipt_id": "in-x",
+        "team_id": "T0AAAAAAA", "channel_id": "G0GROUPDM01", "ts": "1700000000.000900",
+        "room": "", "kind": "mpim", "thread_root_ts": "1700000000.000900",
+        "agent": "ollie", "owner_app_id": "A0AAAAAA1",
+        "delivered_at": "2026-07-18T12:00:00Z",
+    }
+    (tdir / "ollie-main.json").write_text(json.dumps(mpim_as_room))
+    with pytest.raises(env.OutboundError) as exc:
+        env.run_delegate(to="riley", body="x", origin_ts="", session_name="ollie-main")
+    assert "MPIM-rooted turn" in str(exc.value)
+
+
+def test_mpim_pointer_golden_fixture_parses_if_present(env) -> None:
+    fx = FIXTURES / "mpim_current_turn.json"
+    if not fx.exists():
+        pytest.skip("mpim_current_turn.json golden fixture not present yet")
+    parsed = env.parse_current_turn(json.loads(fx.read_text()))
+    assert parsed["kind"] == "mpim"
+    assert parsed["room"] == ""  # empty room permitted for kind mpim
+    assert parsed["owner_app_id"]
+    assert "delegation_key" not in json.loads(fx.read_text())  # mpim turns are keyless

@@ -1,0 +1,30 @@
+{
+  "type": "event_callback",
+  "team_id": "T0AAAAAAA",
+  "api_app_id": "A0AAAAAA1",
+  "event_id": "Ev0MPIMHUMAN01",
+  "event": {
+    "type": "message",
+    "channel": "G0GROUPDM01",
+    "channel_type": "mpim",
+    "user": "U0HUMAN01",
+    "ts": "1700000000.000900",
+    "text": "<@U0AAAAAA1> can you and <@U0AAAAAA2> sync on the deploy?",
+    "blocks": [
+      {
+        "type": "rich_text",
+        "elements": [
+          {
+            "type": "rich_text_section",
+            "elements": [
+              {"type": "user", "user_id": "U0AAAAAA1"},
+              {"type": "text", "text": " can you and "},
+              {"type": "user", "user_id": "U0AAAAAA2"},
+              {"type": "text", "text": " sync on the deploy?"}
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

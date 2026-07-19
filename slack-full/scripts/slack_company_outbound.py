@@ -625,7 +625,11 @@ _DELEGATION_STATUSES = frozenset({"pending", "result_claimed", "expired"})
 _DELEGATION_TERMINAL = frozenset({"result_claimed", "expired"})
 _TURN_KINDS = frozenset({
     "ambient", "targeted", "peer_delegation", "peer_result", "peer_input", "dm",
+    "mpim",
 })
+# The direct-message family (per-agent DM + group DM) shares the empty-room
+# relaxation, the required owner_app_id, and the dm_bindings spoof guard.
+_DM_FAMILY_KINDS = frozenset({"dm", "mpim"})
 
 _INTENT_STR_FIELDS = (
     "nonce", "status", "created_at", "updated_at", "retry_deadline",
@@ -727,20 +731,21 @@ def parse_current_turn(data: dict[str, Any]) -> dict[str, Any]:
     if kind not in _TURN_KINDS:
         raise OutboundError(f"current_turn kind invalid: {kind!r}")
     for key in _TURN_STR_FIELDS:
-        # A DM turn has no room: the pointer's `room` field is permitted-empty
-        # for kind dm (validator relaxation, cross-language). Every other field
-        # stays required non-empty exactly as before.
-        allow_empty = key == "room" and kind == "dm"
+        # A dm-family turn (dm/mpim) has no room: the pointer's `room` field is
+        # permitted-empty for those kinds (validator relaxation, cross-language).
+        # Every other field stays required non-empty exactly as before.
+        allow_empty = key == "room" and kind in _DM_FAMILY_KINDS
         _require_str(data, key, ctx, allow_empty=allow_empty)
-    # owner_app_id is additive: required non-empty for a DM turn (the app whose
-    # token posts the reply and whose directory join names the owner agent),
-    # absent/empty for room pointers — a pre-Phase-4 room pointer parses
+    # owner_app_id is additive: required non-empty for a dm-family turn (the app
+    # whose token posts the reply and whose directory join names the acting
+    # agent), absent/empty for room pointers — a pre-Phase-4 room pointer parses
     # byte-unchanged (setdefault only touches the in-memory copy, never disk).
+    # For dm the app is the sole owner; for mpim it is the WOKEN agent's own app.
     owner_app_id = data.setdefault("owner_app_id", "")
     if not isinstance(owner_app_id, str):
         raise OutboundError("current_turn owner_app_id must be a string")
-    if kind == "dm" and not owner_app_id:
-        raise OutboundError("current_turn kind dm requires a non-empty owner_app_id")
+    if kind in _DM_FAMILY_KINDS and not owner_app_id:
+        raise OutboundError(f"current_turn kind {kind} requires a non-empty owner_app_id")
     # A delegation_key is required only for the correlated peer kinds
     # (peer_delegation/peer_result). Uncorrelated peer wakes (peer_input),
     # room-context turns (ambient/targeted), and DM turns carry no key — Go
@@ -1555,49 +1560,91 @@ def read_current_turn_dm(session: str) -> dict[str, Any] | None:
     return None
 
 
+def read_current_turn_mpim(session: str) -> dict[str, Any] | None:
+    """Parse the group-DM current-turn pointer ``mpim/<session>.json`` (None if
+    absent).
+
+    mpim turns get their OWN pointer namespace, disjoint from both the room and
+    the DM namespaces, so a group-DM wake can never clobber an unanswered 1:1 DM
+    turn (spec §Pointer). Shares the dot/dunder session aliasing with the other
+    pointer readers.
+    """
+    mpim_dir = turns_dir() / "mpim"
+    for name in session_name_aliases(session):
+        data = _read_json(mpim_dir / f"{name}.json")
+        if data is not None:
+            return parse_current_turn(data)
+    return None
+
+
+# Reply-pointer source priority for tie-breaking newest-wins: the more private /
+# more specific surface wins a delivered_at tie, so a reply is never auto-routed
+# from a private turn into a public room (nor from a 1:1 DM into a group) — an
+# operator disambiguates with --kind.
+_POINTER_SOURCE_PRIORITY = {"dm": 3, "mpim": 2, "room": 1}
+
+
 def resolve_reply_pointer_source(
     session: str, *, kind_override: str = "",
 ) -> str | None:
-    """Decide whether ``reply-current`` acts on the room or the DM pointer.
+    """Decide whether ``reply-current`` acts on the room, DM, or mpim pointer.
 
-    Returns ``"room"``, ``"dm"``, or ``None`` (no company pointer at all).
-    With both live, the NEWEST by ``delivered_at`` wins; ``kind_override``
-    (``room``/``dm``) forces one and errors if that pointer is absent. On an
-    equal (second-granularity) ``delivered_at`` the DM wins — never auto-route
-    a private reply into a public room when a DM is just as current; an
-    operator disambiguates with ``--kind``.
+    Returns ``"room"``, ``"dm"``, ``"mpim"``, or ``None`` (no company pointer at
+    all). With more than one live, the NEWEST by ``delivered_at`` wins;
+    ``kind_override`` (``room``/``dm``/``mpim``) forces one and errors if that
+    pointer is absent. On an equal (second-granularity) ``delivered_at``, or when
+    any present pointer carries an unparseable timestamp, the most-private
+    present surface wins (dm > mpim > room) — never auto-route a private reply
+    into a public room, nor a 1:1 reply into a group, when they are just as
+    current; an operator disambiguates with ``--kind``.
     """
-    room = read_current_turn(session)
-    dm = read_current_turn_dm(session)
-    if room is None and dm is None:
+    present: dict[str, dict[str, Any]] = {}
+    for src, reader in (
+        ("room", read_current_turn),
+        ("dm", read_current_turn_dm),
+        ("mpim", read_current_turn_mpim),
+    ):
+        try:
+            turn = reader(session)
+        except OutboundError:
+            # A corrupt/poisoned pointer for ONE kind (e.g. an empty owner_app_id
+            # written for a vanished woken agent) must not brick reply-current on
+            # the session's OTHER live surfaces: treat that kind as absent for
+            # auto-resolution. An explicit --kind targeting the corrupt pointer
+            # still surfaces the parse error below (we re-raise for it here).
+            if kind_override == src:
+                raise
+            continue
+        if turn is not None:
+            present[src] = turn
+    if not present:
         # Not a company session at all: the legacy reply path owns it, and any
         # --kind is the legacy conversation kind (dm/room/thread), not a company
         # pointer override — never hijack it here.
         return None
-    if kind_override == "room":
-        if room is None:
+    if kind_override in _POINTER_SOURCE_PRIORITY:
+        if kind_override not in present:
             raise OutboundError(
-                f"--kind room: session {session!r} has no room current-turn pointer")
-        return "room"
-    if kind_override == "dm":
-        if dm is None:
-            raise OutboundError(
-                f"--kind dm: session {session!r} has no DM current-turn pointer")
-        return "dm"
+                f"--kind {kind_override}: session {session!r} has no "
+                f"{kind_override} current-turn pointer")
+        return kind_override
     if kind_override:
-        raise OutboundError(f"--kind must be 'room' or 'dm', got {kind_override!r}")
-    if room is not None and dm is not None:
-        room_at = _parse_rfc3339(room.get("delivered_at", ""))
-        dm_at = _parse_rfc3339(dm.get("delivered_at", ""))
-        if room_at is not None and dm_at is not None:
-            return "room" if room_at > dm_at else "dm"
-        # An unparseable timestamp on either side: prefer the DM (privacy-safe).
-        return "dm"
-    if dm is not None:
-        return "dm"
-    if room is not None:
-        return "room"
-    return None
+        raise OutboundError(
+            f"--kind must be 'room', 'dm', or 'mpim', got {kind_override!r}")
+    parsed = {src: _parse_rfc3339(t.get("delivered_at", "")) for src, t in present.items()}
+    if any(v is None for v in parsed.values()):
+        # An unparseable timestamp anywhere: fall back to the most-private
+        # present surface rather than trusting any ordering (privacy-safe).
+        for pref in ("dm", "mpim", "room"):
+            if pref in present:
+                return pref
+    best_src = None
+    best_key: tuple | None = None
+    for src in present:
+        key = (parsed[src], _POINTER_SOURCE_PRIORITY[src])
+        if best_key is None or key > best_key:
+            best_key, best_src = key, src
+    return best_src
 
 
 def _load_context():
@@ -1661,6 +1708,24 @@ def _verify_pointer_dm(session_name: str, origin_ts: str) -> dict[str, Any]:
         raise OutboundError(
             f"DM pointer for session {session_name!r} has kind {turn['kind']!r}, "
             "not 'dm'")
+    _check_turn_identity(turn, session_name, origin_ts)
+    return turn
+
+
+def _verify_pointer_mpim(session_name: str, origin_ts: str) -> dict[str, Any]:
+    """Load + anti-spoof the group-DM current-turn pointer (``mpim/<session>.json``)."""
+    if not session_name:
+        raise OutboundError(
+            "GC_SESSION_NAME is not set; company verbs need the bound session name")
+    turn = read_current_turn_mpim(session_name)
+    if turn is None:
+        raise OutboundError(
+            f"no mpim current-turn pointer for session {session_name!r}; "
+            "this session has no active mpim turn")
+    if turn["kind"] != "mpim":
+        raise OutboundError(
+            f"mpim pointer for session {session_name!r} has kind {turn['kind']!r}, "
+            "not 'mpim'")
     _check_turn_identity(turn, session_name, origin_ts)
     return turn
 
@@ -1731,16 +1796,16 @@ def run_delegate(*, to: str, body: str, origin_ts: str, session_name: str) -> di
     prune()
 
     turn = _verify_pointer(session_name, origin_ts)
-    # A DM-rooted turn carries no delegation authority (spec Routing: "the
-    # human-root gate refuses delegation verbs from a dm-kind root"). The room
-    # pointer this verb reads is a distinct file from the DM pointer, so a dm
-    # kind cannot normally reach here — the explicit refusal is the human-root
-    # gate's kind check extended to name it.
-    if turn["kind"] == "dm":
+    # A dm-family-rooted turn (dm/mpim) carries no delegation authority (spec
+    # §Kind-dispatch inventory: "delegation human-root gate | dm-family refused").
+    # The room pointer this verb reads is a distinct file from the dm/ and mpim/
+    # pointers, so a dm-family kind cannot normally reach here — the explicit
+    # refusal is the human-root gate's kind check extended to name it.
+    if turn["kind"] in _DM_FAMILY_KINDS:
         raise OutboundError(
-            "delegate is refused from a DM-rooted turn: a per-agent DM carries "
-            "no delegation authority (delegations and results stay visible in "
-            "company rooms).")
+            f"delegate is refused from a {turn['kind'].upper()}-rooted turn: a "
+            "direct message carries no delegation authority (delegations and "
+            "results stay visible in company rooms).")
     # S8 strict one-hop: delegate proceeds only from a human-rooted turn
     # (ambient/targeted) and hard-errors on every peer kind alike. A delegated
     # recipient may reply-current a result but must not redelegate, and a
@@ -2208,45 +2273,44 @@ def post_company_root_reply(*, body: str, origin_ts: str, session_name: str) -> 
     return {"status": "posted", "kind": turn["kind"], "posted_ts": posted_ts}
 
 
-def post_company_dm_reply(*, body: str, origin_ts: str, session_name: str) -> dict[str, Any]:
-    """Post a per-agent DM reply into the DM channel as the owner agent.
+def _post_dm_family_reply(
+    turn: dict[str, Any], *, body: str, session_name: str, report_kind: str,
+) -> dict[str, Any]:
+    """Shared dm-family (dm/mpim) reply core over an already-verified pointer.
 
-    The acting/owner agent is the DM pointer's ``agent``; the reply posts with
-    that agent's OWN bot token (``load_bot_token``) to the DM channel, escaped
-    with no live mentions. It is routed through the SAME durable-intent
-    machinery as room replies (op=``dm``): created before the POST, reconciled
-    against the owner app's admitted self-echo on a timeout/5xx (never a blind
-    repost), failed on a definitive 4xx. The DM spoof guard requires the calling
-    session to be the owner agent's ``dm_bindings`` session.
+    The acting agent is the pointer's ``agent``; the reply posts with that
+    agent's OWN bot token (``load_bot_token``), escaped with no live mentions,
+    through the SAME durable-intent machinery as room replies (op=``dm`` for both
+    kinds — reconciliation matches the admitted echo receipts by nonce exactly as
+    a DM; a distinct op would break ``_scan_receipt_for_nonce``'s gates). Created
+    before the POST, reconciled against the admitted self-echo on a timeout/5xx
+    (never a blind repost), failed on a definitive 4xx. The spoof guard requires
+    the calling session to be the acting agent's ``dm_bindings`` session.
     """
-    if not body.strip():
-        raise OutboundError("--body/--body-file must be non-empty")
-    reconcile_posting_intents()
-    prune()
-
-    turn = _verify_pointer_dm(session_name, origin_ts)
     agents, dm_bindings = _load_dm_context()
     _verify_dm_binding(dm_bindings, turn, session_name)
 
     acting = turn["agent"]
     src = agents.get(acting)
     if src is None:
-        raise OutboundError(f"DM owner agent {acting!r} is not in the directory")
-    # The pointer's owner_app_id must join to the owner agent's directory app_id
-    # (defense in depth: the token/self-echo reconciliation both key on it).
+        raise OutboundError(f"{report_kind} owner agent {acting!r} is not in the directory")
+    # The pointer's owner_app_id must join to the acting agent's directory app_id
+    # (for dm the sole owner; for mpim the woken agent's own app — the per-target
+    # pointer field): defense in depth, since token/self-echo reconciliation both
+    # key on the acting identity.
     owner_app_id = turn.get("owner_app_id", "")
     if owner_app_id and owner_app_id != src.get("app_id"):
         raise OutboundError(
-            f"DM pointer owner_app_id {owner_app_id!r} does not match agent "
+            f"{report_kind} pointer owner_app_id {owner_app_id!r} does not match agent "
             f"{acting!r} directory app_id {src.get('app_id')!r}")
 
     token = load_bot_token(acting)
     text = compose_synthesis_text(body)  # escaped, no live mention
-    # DMs are flat conversations: a reply to a top-level DM message posts
-    # in-channel. Threading applies only when the human themselves replied
-    # inside a thread (the turn's root differs from its own ts). The intent
-    # tuple still keys on thread_root_ts either way.
-    dm_thread_ts = "" if turn["thread_root_ts"] == turn["ts"] else turn["thread_root_ts"]
+    # Direct messages are flat conversations: a reply to a top-level message
+    # posts in-channel. Threading applies only when the human themselves replied
+    # inside a thread (the turn's root differs from its own ts). The intent tuple
+    # still keys on thread_root_ts either way.
+    thread_ts = "" if turn["thread_root_ts"] == turn["ts"] else turn["thread_root_ts"]
     intent, outcome = _durable_company_post(
         op="dm",
         source_agent=acting, source_app_id=src["app_id"],
@@ -2255,11 +2319,48 @@ def post_company_dm_reply(*, body: str, origin_ts: str, session_name: str) -> di
         target_agent=acting, target_bot_user_id=src["bot_user_id"],
         team=turn["team_id"], channel=turn["channel_id"], room="",
         human_root_ts=turn["thread_root_ts"], requester_session=session_name,
-        body=body, text=text, thread_ts=dm_thread_ts, token=token,
+        body=body, text=text, thread_ts=thread_ts, token=token,
         metadata_nonce="",
         make_metadata=dm_metadata,
     )
-    return _company_post_report(intent, outcome, kind="dm")
+    return _company_post_report(intent, outcome, kind=report_kind)
+
+
+def post_company_dm_reply(*, body: str, origin_ts: str, session_name: str) -> dict[str, Any]:
+    """Post a per-agent DM reply into the DM channel as the owner agent.
+
+    The acting/owner agent is the DM pointer's ``agent``; see
+    :func:`_post_dm_family_reply` for the durable-intent + spoof-guard contract.
+    """
+    if not body.strip():
+        raise OutboundError("--body/--body-file must be non-empty")
+    reconcile_posting_intents()
+    prune()
+
+    turn = _verify_pointer_dm(session_name, origin_ts)
+    return _post_dm_family_reply(
+        turn, body=body, session_name=session_name, report_kind="dm")
+
+
+def post_company_mpim_reply(*, body: str, origin_ts: str, session_name: str) -> dict[str, Any]:
+    """Post a group-DM (mpim) reply into the mpim channel as the woken agent.
+
+    The acting agent is the mpim pointer's ``agent`` (the WOKEN agent for this
+    per-target, per-session pointer); its own bot token posts the reply, flat
+    unless the human threaded. Routed through the same durable-intent machinery
+    (op=``dm``) so a timed-out reply reconciles against the owner app's admitted
+    mpim self-echo (mpim_bot_author receipt carrying the nonce) rather than a
+    blind repost. The spoof guard requires the calling session to be the woken
+    agent's ``dm_bindings`` session.
+    """
+    if not body.strip():
+        raise OutboundError("--body/--body-file must be non-empty")
+    reconcile_posting_intents()
+    prune()
+
+    turn = _verify_pointer_mpim(session_name, origin_ts)
+    return _post_dm_family_reply(
+        turn, body=body, session_name=session_name, report_kind="mpim")
 
 
 # --- CLI entry point -------------------------------------------------------

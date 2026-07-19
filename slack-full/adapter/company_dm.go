@@ -233,37 +233,7 @@ func (g *companyGateway) dmAuthorDecision(dir *CompanyDirectory, r *IngressRecei
 // definitive FAILED target under the unbound key namespace (failed_dm_unbound),
 // recoverable via company-redrive re-resolution after a binding is imported.
 func (g *companyGateway) ensureDMTarget(r *IngressReceipt, owner *CompanyAgent, dmb *DMBindings, now time.Time) {
-	if r.Targets == nil {
-		r.Targets = make(map[string]TargetDelivery, 1)
-	}
-	binding, bound := dmb.BindingFor(owner.Name)
-	if !bound {
-		key := companyUnboundTargetKeyPrefix + owner.Name
-		if _, exists := r.Targets[key]; exists {
-			return
-		}
-		r.Targets[key] = TargetDelivery{
-			Kind:      wakeKindDM,
-			Status:    companyTargetFailed,
-			Detail:    companyReasonFailedDMUnbound,
-			UpdatedAt: now,
-			Agent:     owner.Name,
-		}
-		return
-	}
-	key := companyBoundTargetKeyPrefix + binding.Session
-	if _, exists := r.Targets[key]; exists {
-		return
-	}
-	r.Targets[key] = TargetDelivery{
-		Session:        binding.Session,
-		City:           binding.City,
-		Kind:           wakeKindDM,
-		Status:         companyTargetPending,
-		IdempotencyKey: companyIdempotencyKey(r.ID, binding.Session),
-		UpdatedAt:      now,
-		Agent:          owner.Name,
-	}
+	addDMFamilyTarget(r, owner, dmb, now, wakeKindDM)
 }
 
 // deliverDMTargets hydrates (owner token) and delivers the single pending DM
@@ -412,11 +382,13 @@ func (g *companyGateway) dmOwnerAgentName(r *IngressReceipt) string {
 
 // ackActorToken returns the Slack token that should act as the visible-ack
 // actor for r (spec §Acks): the switchboard token for a room receipt, the
-// owner agent's bot token for a DM receipt. A DM whose owner token is missing
+// owner agent's bot token for a dm-family receipt. For an mpim the owner is the
+// admission winner (the ack actor, never a wake-target input), joined from
+// OwnerAppID exactly as a DM. A dm-family receipt whose owner token is missing
 // (or whose owner no longer joins a directory agent) reports ok=false, so acks
-// silently degrade rather than using the switchboard token on a DM channel.
+// silently degrade rather than using the switchboard token on a private channel.
 func (g *companyGateway) ackActorToken(r *IngressReceipt) (string, bool) {
-	if r != nil && r.Kind == receiptKindDM {
+	if r != nil && isDMFamilyKind(r.Kind) {
 		agent := g.dmOwnerAgentName(r)
 		if agent == "" {
 			return "", false

@@ -85,10 +85,24 @@ const (
 
 // Receipt-level conversation kinds (IngressReceipt.Kind). Empty is the
 // room / legacy default carried by every Phase 1-3 receipt; "dm" marks a
-// per-agent DM receipt (Phase 4). The same "dm" literal is the wake kind on
-// the single DM target and the current-turn pointer kind, so one value spans
-// receipt, target, and pointer.
-const receiptKindDM = "dm"
+// per-agent DM receipt (Phase 4) and "mpim" a group-DM receipt (Phase 4b).
+// Each literal is also the wake kind on the target and the current-turn
+// pointer kind, so one value spans receipt, target, and pointer. The two
+// direct-message kinds form the "dm family" (isDMFamilyKind): they share the
+// DM delivery worker, owner-token custody, and dm_bindings wake registry.
+const (
+	receiptKindDM   = "dm"
+	receiptKindMpim = "mpim"
+)
+
+// isDMFamilyKind reports whether a receipt/target/pointer kind belongs to the
+// direct-message family (per-agent DM or group DM). Every seam that once tested
+// Kind == "dm" now tests this predicate (spec §Kind-dispatch inventory): the DM
+// worker dispatch, the owner-token ack actor, the dm_bindings redrive
+// re-resolution, and the shared degradation counters all cover both kinds.
+func isDMFamilyKind(kind string) bool {
+	return kind == receiptKindDM || kind == receiptKindMpim
+}
 
 // ingressRetentionFloor is the minimum accepted Sweep retention. Terminal
 // receipts are the dedup memory for Slack's Delayed Events redelivery
@@ -705,7 +719,7 @@ func (s *IngressReceiptStore) Sweep(retention time.Duration) (removed int, err e
 // posted and only the ⚠️ reaction remains, so healing re-applies the reaction
 // WITHOUT re-posting the reply. healNeeded is always collected (cheap on the
 // already-decoded receipt); the caller applies it only when acks are enabled.
-func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending, healNeeded []*IngressReceipt, removed int, dmCounts dmReceiptStatusCounts, bodyCounts bodyIntegrityCounts, err error) {
+func (s *IngressReceiptStore) SweepAndPending(retention time.Duration) (pending, healNeeded []*IngressReceipt, removed int, dmCounts dmFamilyReceiptCounts, bodyCounts bodyIntegrityCounts, err error) {
 	if retention < ingressRetentionFloor {
 		return nil, nil, 0, dmCounts, bodyCounts, fmt.Errorf("ingress receipts: retention %s below %s floor", retention, ingressRetentionFloor)
 	}
@@ -795,17 +809,9 @@ func (s *IngressReceiptStore) WriteFailures() uint64 {
 	return s.writeFailures.Load()
 }
 
-// tally folds one DM receipt (Kind == "dm") into the /healthz company_dm_receipts
-// gauge by status. Non-DM receipts are ignored. It rides the single
-// SweepAndPending scan (which already decodes every receipt) so the gauge costs
-// no extra I/O and no extra time under the store mutex the HTTP admission hot
-// path contends for (m8: the former DMReceiptStatusCounts second full scan is
-// gone).
-func (c *dmReceiptStatusCounts) tally(r *IngressReceipt) {
-	if r == nil || r.Kind != receiptKindDM {
-		return
-	}
-	switch r.Status {
+// add folds one receipt status into the per-status tally.
+func (c *dmReceiptStatusCounts) add(status string) {
+	switch status {
 	case ingressStatusReceived:
 		c.Received++
 	case ingressStatusRouting:
@@ -816,6 +822,25 @@ func (c *dmReceiptStatusCounts) tally(r *IngressReceipt) {
 		c.NoDelivery++
 	case ingressStatusFailed:
 		c.Failed++
+	}
+}
+
+// tally folds one dm-family receipt into the /healthz gauge by kind and status:
+// a "dm" receipt into the DM breakdown (company_dm_receipts), an "mpim" receipt
+// into the group-DM breakdown (company_mpim_receipts). Non-dm-family receipts
+// are ignored. It rides the single SweepAndPending scan (which already decodes
+// every receipt) so the gauge costs no extra I/O and no extra time under the
+// store mutex the HTTP admission hot path contends for (m8: the former
+// DMReceiptStatusCounts second full scan is gone).
+func (c *dmFamilyReceiptCounts) tally(r *IngressReceipt) {
+	if r == nil {
+		return
+	}
+	switch r.Kind {
+	case receiptKindDM:
+		c.DM.add(r.Status)
+	case receiptKindMpim:
+		c.Mpim.add(r.Status)
 	}
 }
 

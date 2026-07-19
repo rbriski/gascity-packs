@@ -139,11 +139,11 @@ def _maybe_company_reply(args: argparse.Namespace) -> int | None:
         import slack_company_outbound as outbound  # type: ignore
     except ImportError:
         return None
-    # `--kind room|dm` overrides which pointer this reply acts on when both a
-    # room and a DM turn are live; anything else (thread / unset) leaves the
-    # newest-by-delivered-at default. A non-room/dm value is ignored here and
+    # `--kind room|dm|mpim` overrides which pointer this reply acts on when more
+    # than one turn is live; anything else (thread / unset) leaves the
+    # newest-by-delivered-at default. A non-company value is ignored here and
     # left to the legacy conversation-kind path.
-    kind_override = args.kind if args.kind in ("room", "dm") else ""
+    kind_override = args.kind if args.kind in ("room", "dm", "mpim") else ""
     origin_ts = (getattr(args, "origin_ts", "") or "").strip()
     try:
         source = outbound.resolve_reply_pointer_source(
@@ -153,6 +153,9 @@ def _maybe_company_reply(args: argparse.Namespace) -> int | None:
         body = _load_body(args)
         if source == "dm":
             result = outbound.post_company_dm_reply(
+                body=body, origin_ts=origin_ts, session_name=session_name)
+        elif source == "mpim":
+            result = outbound.post_company_mpim_reply(
                 body=body, origin_ts=origin_ts, session_name=session_name)
         else:
             turn = outbound.read_current_turn(session_name)
@@ -185,9 +188,9 @@ def main(argv: list[str]) -> int:
                         help=("Conversation kind (dm/room/thread). When omitted, "
                               "auto-detected from channel id prefix (C/G=room, "
                               "D=dm; default fallback dm). Company rooms: on a "
-                              "session with both a room and a DM current-turn "
-                              "pointer, 'room'/'dm' overrides which the reply "
-                              "acts on (default: newest by delivered-at)."))
+                              "session with more than one live current-turn "
+                              "pointer, 'room'/'dm'/'mpim' overrides which the "
+                              "reply acts on (default: newest by delivered-at)."))
     parser.add_argument("--reply-to", default="",
                         help="Slack message ts to reply to (threaded reply)")
     parser.add_argument(

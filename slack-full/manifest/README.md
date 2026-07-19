@@ -265,6 +265,52 @@ verifies via the trial path), and the DM binding must precede live traffic
 for a human to DM a bot, so the per-agent DM phase is dead-on-arrival
 without it. Leave it on.
 
+### Group DMs (Phase 4b)
+
+The **group-DM phase** lets a human wake agents by mentioning them in a
+multi-party DM (mpim). Wake policy is **mention-only**: a human message
+that natively mentions member agents wakes exactly the mentioned, homed
+agents (via `dm_bindings`); an unmentioned or bot-authored message wakes
+nobody (terminal `mpim_no_mention` / `mpim_bot_author`). There is no
+ambient set and no delegation authority from an mpim root. The template
+adds:
+
+- `oauth_config.scopes.bot`: **`mpim:history`** (read the group-DM channel
+  for hydration and the membership probe).
+- `settings.event_subscriptions.bot_events`: **`message.mpim`**, pointed
+  at the same public funnel `request_url` as `message.im`.
+
+The switchboard already subscribes to `message.mpim`; the adapter absorbs
+switchboard-signed mpim events (200, no receipt, no legacy dispatch), so
+**no switchboard manifest change is needed.**
+
+**Rollout ordering — the adapter deploy MUST precede the manifest update
+(spec §Rollout).** Until the mpim-aware adapter is deployed, a member
+app's `message.mpim` event falls into the legacy dispatch path,
+N-plicated once per member app. So:
+
+0. **Deploy the adapter's mpim branch FIRST.** Do not add `mpim:history` /
+   `message.mpim` to any agent app before the adapter that owns mpim
+   admission is live.
+1. **Capture the live mpim wire fixture** (one app, one test group) so the
+   mention extractor is validated against real `message.mpim` rich_text
+   synthesis before the fleet trusts it (the committed fixture is marked
+   SYNTHETIC until then).
+2. **Bulk manifest update via the config token**: add `mpim:history` +
+   `message.mpim` to all 18 agent apps; each reinstall activates the
+   scope. (No new `register-agent-app` or `dm_bindings` step — mpim reuses
+   the per-agent registration and DM bindings from Phase 4.)
+3. **Pilot** the existing ollie + olivia group DM: mention each in turn
+   (exclusive wakes), both (two targets on one receipt), an unmentioned
+   message (no wake), and confirm the non-winner agent's reply passes its
+   own guard.
+4. **Fleet-wide.**
+
+An agent that is mentioned but not actually in the group records a
+`failed_mpim_not_member` target (the membership probe), and one that has
+no `dm_bindings` row records `failed_dm_unbound`; both drain later with
+`gc slack company-redrive` once the agent is invited / bound.
+
 ### Switchboard changes for company rooms
 
 Enabling company rooms also touches the switchboard app (`app.json`),
