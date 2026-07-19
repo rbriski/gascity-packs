@@ -578,17 +578,26 @@ func TestMpimMissingOwnerTokenAckDegradesCounted(t *testing.T) {
 
 // ---- item 10: LIVE wire fixture (captured 2026-07-19, workspace T0ARJCFV8QL) --
 
-// TestMpimWireFixtureParse pins the shape of a captured message.mpim envelope.
-// NOTE: the committed fixture is SYNTHETIC (hand-built) pending a LIVE capture
-// (spec test-plan item 10) — the rich_text mention synthesis in mpim is only
-// pinned for channels, so the mention extractor must be validated against a real
-// event before the fleet trusts it. This test asserts the envelope + inner shape
-// and that ExtractMentionIDs resolves both mentioned agents.
+// TestMpimWireFixtureParse pins the shape of the LIVE message.mpim capture
+// (workspace T0ARJCFV8QL, 2026-07-19, spec test-plan item 10): it proves Slack
+// synthesizes rich_text mention elements in mpim — the assumption the mention
+// extractor rests on — using the real event's app and user ids.
 func TestMpimWireFixtureParse(t *testing.T) {
-	dir := testDirectory(t)
+	f := baseDirectoryFile()
+	f.Agents = []CompanyAgent{
+		{Name: "ollie", AppID: "A0BHQ812PL7", BotUserID: "U0BJ2AA5GMT"},
+		{Name: "olivia", AppID: "A0BJ5N5FNBU", BotUserID: "U0BHZEU1VQT"},
+	}
+	f.Rooms[0].Members = []string{"ollie", "olivia"}
+	f.Rooms[0].AmbientWake = []string{"ollie"}
+	f.Rooms[0].MentionWake = []string{"ollie", "olivia"}
+	dir, err := ParseCompanyDirectory(marshalDirectory(t, f))
+	if err != nil {
+		t.Fatalf("build live-id directory: %v", err)
+	}
 	env := readEnvFixture(t, "message_mpim_human.json")
-	if env.APIAppID != ollieAppID {
-		t.Errorf("fixture api_app_id = %q, want %q", env.APIAppID, ollieAppID)
+	if env.APIAppID != "A0BHQ812PL7" {
+		t.Errorf("fixture api_app_id = %q, want live ollie app", env.APIAppID)
 	}
 	var ev slackMessageEvent
 	if err := json.Unmarshal(env.Event, &ev); err != nil {
@@ -603,8 +612,8 @@ func TestMpimWireFixtureParse(t *testing.T) {
 	for _, a := range woken {
 		names = append(names, a.Name)
 	}
-	if len(names) != 2 || names[0] != "ollie" || names[1] != "riley" {
-		t.Errorf("woken agents = %v, want [ollie riley] (mention order)", names)
+	if len(names) != 2 || names[0] != "ollie" || names[1] != "olivia" {
+		t.Errorf("woken agents = %v, want [ollie olivia] (mention order)", names)
 	}
 }
 
