@@ -296,12 +296,13 @@ func (g *companyGateway) deliverDMTargets(r *IngressReceipt, origin ReceiptOrigi
 		}
 		// Advisory session-existence guard (gated): a 404/409 leaves the target
 		// pending (do NOT post), consuming one attempt; the sweep re-checks.
-		if blocked, detail := g.sessionGuardBlock(td.City, td.Session); blocked {
+		guard := g.sessionGuardBlock(td.City, td.Session)
+		if guard.blocked {
 			td.Attempts++
 			td.UpdatedAt = now
 			td.Status = companyTargetPending
-			td.Detail = detail
-			if detail == companyDetailSessionMissing {
+			td.Detail = guard.detail
+			if guard.detail == companyDetailSessionMissing {
 				// Self-heal: re-resolve a stale dm_binding or materialize the cold
 				// session. room=nil → currentBindingSession resolves via dm_bindings.
 				heal := g.healSessionMissing(r, nil, key, td)
@@ -310,8 +311,14 @@ func (g *companyGateway) deliverDMTargets(r *IngressReceipt, origin ReceiptOrigi
 				continue
 			}
 			results[key] = td
-			log.Printf("company dm: session guard held receipt=%s session=%s attempts=%d detail=%s", id, td.Session, td.Attempts, detail)
+			log.Printf("company dm: session guard held receipt=%s session=%s attempts=%d detail=%s", id, td.Session, td.Attempts, guard.detail)
 			continue
+		}
+		if guard.sleeping {
+			// The guard GET showed the target asleep/drained: wake it before the
+			// message POST so the delivered message is actually processed rather
+			// than silently queued. Advisory — a wake failure still proceeds.
+			g.wakeSession(r, td)
 		}
 		// The DM current-turn pointer (company-current-turn/dm/<session>.json) is
 		// written atomically before the gc POST. room=nil → the pointer's kind is
@@ -335,6 +342,13 @@ func (g *companyGateway) deliverDMTargets(r *IngressReceipt, origin ReceiptOrigi
 		case postDelivered:
 			td.Status = companyTargetDelivered
 			td.Detail = ""
+			if guard.sleeping && g.sessionAsleepNow(td.City, td.Session) {
+				// Silent-queue case: delivered (2xx) but the wake did not take — the
+				// session is still asleep. Leave it delivered (the message is queued)
+				// and surface it for observability rather than failing the target.
+				g.deliveredAsleep.Add(1)
+				log.Printf("company dm: delivered to still-asleep session receipt=%s session=%s", id, td.Session)
+			}
 			results[key] = td
 		case postRetryable:
 			td.Status = companyTargetPending
@@ -424,16 +438,31 @@ func (g *companyGateway) ackActorToken(r *IngressReceipt) (string, bool) {
 	return g.slackToken, true
 }
 
+// sessionGuardOutcome is the advisory session-existence guard's decision plus
+// the sleeping disposition read from the pre-delivery GET. blocked=true (with a
+// session_missing / session_ambiguous detail) leaves the target pending without
+// posting. sleeping=true means the guard's 200 record showed an asleep/drained
+// state: the caller wakes the session before the message POST and re-checks
+// after, since a bare POST would silently queue with nothing to process it.
+type sessionGuardOutcome struct {
+	blocked  bool
+	detail   string
+	sleeping bool
+}
+
 // sessionGuardBlock implements the advisory session-existence guard (spec
-// §Session-existence guard). It returns (blocked, detail): blocked=true (with
-// session_missing / session_ambiguous) leaves the target pending without
-// posting; blocked=false proceeds. The guard is advisory — flag-off, a network
-// error, or any non-404/409 response all proceed, so the guard never reduces
-// availability below flag-off behavior. A 200 caches the (city, session)
-// positive for sessionCacheTTL; negatives are never cached.
-func (g *companyGateway) sessionGuardBlock(city, session string) (bool, string) {
+// §Session-existence guard). blocked=true (session_missing / session_ambiguous)
+// leaves the target pending without posting; blocked=false proceeds. The guard is
+// advisory — flag-off, a network error, or any non-404/409 response all proceed,
+// so it never reduces availability below flag-off behavior. A 200 caches the
+// (city, session) positive for sessionCacheTTL and, when the record's state is
+// asleep/drained, sets sleeping so the caller wakes before delivering; negatives
+// are never cached. A cache hit skips the GET (sleeping is unknown → false): the
+// prior 200's wake already cleared the drain, and a delivered target never
+// re-sweeps.
+func (g *companyGateway) sessionGuardBlock(city, session string) sessionGuardOutcome {
 	if !g.verifySessions || session == "" {
-		return false, ""
+		return sessionGuardOutcome{}
 	}
 	targetCity := city
 	if targetCity == "" {
@@ -444,7 +473,7 @@ func (g *companyGateway) sessionGuardBlock(city, session string) (bool, string) 
 	exp, cached := g.sessionCache[key]
 	g.sessionCacheMu.Unlock()
 	if cached && g.now().Before(exp) {
-		return false, ""
+		return sessionGuardOutcome{}
 	}
 
 	apiBase := g.cfg.gcAPIBase
@@ -454,36 +483,43 @@ func (g *companyGateway) sessionGuardBlock(city, session string) (bool, string) 
 			// No configured base for this city — proceed as unchecked rather than
 			// block (availability floor). The delivery POST itself surfaces the
 			// misconfiguration definitively.
-			return false, ""
+			return sessionGuardOutcome{}
 		}
 		apiBase = mapped
 	}
 	target := fmt.Sprintf("%s/v0/city/%s/session/%s", apiBase, url.PathEscape(targetCity), url.PathEscape(session))
 	req, err := http.NewRequest(http.MethodGet, target, nil)
 	if err != nil {
-		return false, "" // proceed unchecked
+		return sessionGuardOutcome{} // proceed unchecked
 	}
 	req.Header.Set("X-GC-Request", companyDeliverRequestTag)
 	resp, err := g.deliverClient.Do(req)
 	if err != nil {
-		return false, "" // guard network error → proceed as if unchecked
+		return sessionGuardOutcome{} // guard network error → proceed as if unchecked
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, companyMaxErrorBodyBytesRead))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, companyMaxErrorBodyBytesRead))
 	switch resp.StatusCode {
 	case http.StatusOK:
 		g.sessionCacheMu.Lock()
 		g.sessionCache[key] = g.now().Add(sessionCacheTTL)
 		g.sessionCacheMu.Unlock()
-		return false, ""
+		// A parseable record with an asleep/drained state trips the wake path; an
+		// empty or unparseable body (state unknown) is treated as awake.
+		sleeping := false
+		var rec companySessionRecord
+		if err := json.Unmarshal(body, &rec); err == nil {
+			sleeping = isSleepingSessionState(rec.State)
+		}
+		return sessionGuardOutcome{sleeping: sleeping}
 	case http.StatusNotFound:
-		return true, companyDetailSessionMissing
+		return sessionGuardOutcome{blocked: true, detail: companyDetailSessionMissing}
 	case http.StatusConflict:
-		return true, companyDetailSessionAmbiguous
+		return sessionGuardOutcome{blocked: true, detail: companyDetailSessionAmbiguous}
 	default:
 		// Any other status (incl. 5xx) → proceed unchecked; the guard must
 		// never reduce availability below flag-off.
-		return false, ""
+		return sessionGuardOutcome{}
 	}
 }
 

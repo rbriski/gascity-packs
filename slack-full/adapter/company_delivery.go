@@ -169,6 +169,12 @@ type companyGateway struct {
 	// bound sessions (company_materialize_requests).
 	targetReresolved    atomic.Uint64
 	materializeRequests atomic.Uint64
+	// deliveredAsleep counts targets that returned a delivered 2xx but whose
+	// post-delivery GET still showed the session asleep/drained — the silent-queue
+	// case where the message queued but nothing woke to process it. The target
+	// stays delivered (the message is queued); the counter is pure observability
+	// (company_delivered_asleep).
+	deliveredAsleep atomic.Uint64
 	// materializeAttempts throttles auto-materialization to at most ONE POST per
 	// (city, session) per sweep interval, keyed by city+"\x00"+session → the last
 	// attempt time. The delivery worker and the sweep both fire through this gate.
@@ -856,12 +862,13 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 		// post) with the guard detail, consuming one attempt so the cap still
 		// bounds the loop; the sweep re-checks. A guard error or flag-off never
 		// blocks.
-		if blocked, detail := g.sessionGuardBlock(td.City, td.Session); blocked {
+		guard := g.sessionGuardBlock(td.City, td.Session)
+		if guard.blocked {
 			td.Attempts++
 			td.UpdatedAt = now
 			td.Status = companyTargetPending
-			td.Detail = detail
-			if detail == companyDetailSessionMissing {
+			td.Detail = guard.detail
+			if guard.detail == companyDetailSessionMissing {
 				// Self-heal a session-not-found hold: re-resolve a stale binding or
 				// materialize the cold session. Never fails the target — the notice
 				// stays suppressed while the attempts budget remains.
@@ -871,8 +878,14 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 				continue
 			}
 			results[key] = td
-			log.Printf("company: session guard held receipt=%s session=%s attempts=%d detail=%s", id, td.Session, td.Attempts, detail)
+			log.Printf("company: session guard held receipt=%s session=%s attempts=%d detail=%s", id, td.Session, td.Attempts, guard.detail)
 			continue
+		}
+		if guard.sleeping {
+			// The guard GET showed the target asleep/drained: wake it before the
+			// message POST so the delivered message is actually processed rather
+			// than silently queued. Advisory — a wake failure still proceeds.
+			g.wakeSession(r, td)
 		}
 		// The current-turn pointer is written atomically BEFORE the gc POST on
 		// every wake, so the Python verbs have deterministic context the
@@ -897,6 +910,13 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 		case postDelivered:
 			td.Status = companyTargetDelivered
 			td.Detail = ""
+			if guard.sleeping && g.sessionAsleepNow(td.City, td.Session) {
+				// Silent-queue case: delivered (2xx) but the wake did not take — the
+				// session is still asleep. Leave it delivered (the message is queued)
+				// and surface it for observability rather than failing the target.
+				g.deliveredAsleep.Add(1)
+				log.Printf("company: delivered to still-asleep session receipt=%s session=%s", id, td.Session)
+			}
 			results[key] = td
 		case postRetryable:
 			// Timeout / connection error / 5xx / 408 / 429: leave pending for
@@ -1236,6 +1256,24 @@ type companySessionCreateRequest struct {
 // does not look like a template/pool name.
 type companySessionRecord struct {
 	Template string `json:"template,omitempty"`
+	// State is the supervisor's lifecycle state for the session. The delivery
+	// path reads it to detect an asleep/drained session that would silently queue
+	// a delivered message without processing it (the pre-delivery wake trigger).
+	State string `json:"state,omitempty"`
+}
+
+// isSleepingSessionState reports whether a supervisor session state means the
+// session would accept a delivered message (202) but never process it until
+// woken. Only the two states that exhibit the silent-queue defect count; any
+// other (or unknown/empty) state is treated as awake so the wake path never
+// fires speculatively.
+func isSleepingSessionState(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "asleep", "drained":
+		return true
+	default:
+		return false
+	}
 }
 
 // looksLikeTemplateName reports whether a session name looks like a
@@ -1449,6 +1487,93 @@ func (g *companyGateway) fetchSessionTemplate(apiBase, city, session string) str
 		return ""
 	}
 	return rec.Template
+}
+
+// companyCityBase resolves the (targetCity, apiBase) a target delivers against.
+// An empty City means the adapter's own city and gcAPIBase. A city that matches
+// the adapter's own city also uses gcAPIBase. A different city uses its
+// SLACK_COMPANY_CITY_APIS base; ok=false when that city has no configured base,
+// so best-effort probes/mutations skip rather than post to the wrong host.
+func (g *companyGateway) companyCityBase(city string) (targetCity, apiBase string, ok bool) {
+	if city == "" || city == g.cfg.cityName {
+		tc := city
+		if tc == "" {
+			tc = g.cfg.cityName
+		}
+		return tc, g.cfg.gcAPIBase, true
+	}
+	mapped, found := g.cfg.companyCityAPIs[city]
+	if !found {
+		return city, "", false
+	}
+	return city, mapped, true
+}
+
+// wakeSession fires a best-effort wake POST for a target whose pre-delivery guard
+// GET showed it asleep/drained. It is advisory: any transport error or non-2xx
+// status is logged and swallowed so the caller proceeds to the message POST
+// regardless — the message still queues, and a post-delivery re-check surfaces a
+// session that never woke via company_delivered_asleep. The Idempotency-Key
+// (wake:<receipt>:<session>) makes a redrive's repeat wake a supervisor no-op.
+func (g *companyGateway) wakeSession(r *IngressReceipt, td TargetDelivery) {
+	targetCity, apiBase, ok := g.companyCityBase(td.City)
+	if !ok {
+		return
+	}
+	target := fmt.Sprintf("%s/v0/city/%s/session/%s/wake",
+		apiBase, url.PathEscape(targetCity), url.PathEscape(td.Session))
+	req, err := http.NewRequest(http.MethodPost, target, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("X-GC-Request", companyDeliverRequestTag)
+	req.Header.Set("Idempotency-Key", "wake:"+r.ID+":"+td.Session)
+	resp, err := g.deliverClient.Do(req)
+	if err != nil {
+		log.Printf("company: wake POST receipt=%s city=%s session=%s: %v", r.ID, targetCity, td.Session, err)
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, companyMaxErrorBodyBytesRead))
+	log.Printf("company: wake requested receipt=%s city=%s session=%s status=%d",
+		r.ID, targetCity, td.Session, resp.StatusCode)
+}
+
+// sessionAsleepNow does a single best-effort GET — independent of the positive
+// existence cache — and reports whether the session's state is still
+// asleep/drained. Used only after a delivered POST to a session that was asleep
+// before the wake: a true here is the silent-queue case. Any error, non-2xx, or
+// unparseable/absent state reports false (assume awake) — an advisory probe never
+// converts a delivered target into a failure.
+func (g *companyGateway) sessionAsleepNow(city, session string) bool {
+	if session == "" {
+		return false
+	}
+	targetCity, apiBase, ok := g.companyCityBase(city)
+	if !ok {
+		return false
+	}
+	target := fmt.Sprintf("%s/v0/city/%s/session/%s",
+		apiBase, url.PathEscape(targetCity), url.PathEscape(session))
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("X-GC-Request", companyDeliverRequestTag)
+	resp, err := g.deliverClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, companyMaxErrorBodyBytesRead))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	var rec companySessionRecord
+	if err := json.Unmarshal(body, &rec); err != nil {
+		return false
+	}
+	return isSleepingSessionState(rec.State)
 }
 
 // decodeCompanyMessage reconstructs the router's CompanyMessage view from
@@ -1914,7 +2039,7 @@ func (g *companyGateway) healthzDetail() string {
 	apps := g.agentApps.Snapshot()
 	joinWarnings := apps.JoinWarnings(g.dirStore.Snapshot())
 	return fmt.Sprintf(
-		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_target_reresolved=%d\ncompany_materialize_requests=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\ncompany_mpim_receipts_received=%d\ncompany_mpim_receipts_routing=%d\ncompany_mpim_receipts_delivered=%d\ncompany_mpim_receipts_no_delivery=%d\ncompany_mpim_receipts_failed=%d\ncompany_body_missing=%d\ncompany_bodies_redacted=%d\ncompany_body_digest_mismatch=%d\n",
+		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_target_reresolved=%d\ncompany_materialize_requests=%d\ncompany_delivered_asleep=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\ncompany_mpim_receipts_received=%d\ncompany_mpim_receipts_routing=%d\ncompany_mpim_receipts_delivered=%d\ncompany_mpim_receipts_no_delivery=%d\ncompany_mpim_receipts_failed=%d\ncompany_body_missing=%d\ncompany_bodies_redacted=%d\ncompany_body_digest_mismatch=%d\n",
 		g.barrier.Load(),
 		storeReady,
 		storeErr,
@@ -1922,6 +2047,7 @@ func (g *companyGateway) healthzDetail() string {
 		g.deliveryFailures.Load(),
 		g.targetReresolved.Load(),
 		g.materializeRequests.Load(),
+		g.deliveredAsleep.Load(),
 		g.stalePostingIntents.Load(),
 		g.companyCorrelationParked.Load(),
 		g.dirStore.Snapshot() != nil,

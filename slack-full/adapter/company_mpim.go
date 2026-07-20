@@ -328,12 +328,13 @@ func (g *companyGateway) deliverMpimTargets(r *IngressReceipt, origin ReceiptOri
 			}
 		}
 		// Advisory session-existence guard (shared with DM/rooms).
-		if blocked, detail := g.sessionGuardBlock(td.City, td.Session); blocked {
+		guard := g.sessionGuardBlock(td.City, td.Session)
+		if guard.blocked {
 			td.Attempts++
 			td.UpdatedAt = now
 			td.Status = companyTargetPending
-			td.Detail = detail
-			if detail == companyDetailSessionMissing {
+			td.Detail = guard.detail
+			if guard.detail == companyDetailSessionMissing {
 				// Self-heal: re-resolve a stale dm_binding or materialize the cold
 				// session. room=nil → currentBindingSession resolves via dm_bindings.
 				heal := g.healSessionMissing(r, nil, key, td)
@@ -342,8 +343,14 @@ func (g *companyGateway) deliverMpimTargets(r *IngressReceipt, origin ReceiptOri
 				continue
 			}
 			results[key] = td
-			log.Printf("company mpim: session guard held receipt=%s session=%s attempts=%d detail=%s", id, td.Session, td.Attempts, detail)
+			log.Printf("company mpim: session guard held receipt=%s session=%s attempts=%d detail=%s", id, td.Session, td.Attempts, guard.detail)
 			continue
+		}
+		if guard.sleeping {
+			// The guard GET showed the target asleep/drained: wake it before the
+			// message POST so the delivered message is actually processed rather
+			// than silently queued. Advisory — a wake failure still proceeds.
+			g.wakeSession(r, td)
 		}
 		// The mpim current-turn pointer (company-current-turn/mpim/<session>.json)
 		// is written atomically before the gc POST. owner_app_id is the WOKEN
@@ -386,6 +393,13 @@ func (g *companyGateway) deliverMpimTargets(r *IngressReceipt, origin ReceiptOri
 		case postDelivered:
 			td.Status = companyTargetDelivered
 			td.Detail = ""
+			if guard.sleeping && g.sessionAsleepNow(td.City, td.Session) {
+				// Silent-queue case: delivered (2xx) but the wake did not take — the
+				// session is still asleep. Leave it delivered (the message is queued)
+				// and surface it for observability rather than failing the target.
+				g.deliveredAsleep.Add(1)
+				log.Printf("company mpim: delivered to still-asleep session receipt=%s session=%s", id, td.Session)
+			}
 			results[key] = td
 		case postRetryable:
 			td.Status = companyTargetPending
