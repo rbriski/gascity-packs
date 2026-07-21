@@ -169,6 +169,13 @@ type companyGateway struct {
 	// bound sessions (company_materialize_requests).
 	targetReresolved    atomic.Uint64
 	materializeRequests atomic.Uint64
+	// bootRequests counts session-create POSTs fired by the delivered-asleep
+	// boot escalation (company_boot_requests): a target that delivered 2xx but
+	// whose post-delivery re-check still showed the session asleep, where the
+	// wake POST cleared the drain flag without starting a runtime. Distinct from
+	// materializeRequests (the 404 self-heal) so the two levers are observable
+	// apart even though they share the throttle gate below.
+	bootRequests atomic.Uint64
 	// deliveredAsleep counts targets that returned a delivered 2xx but whose
 	// post-delivery GET still showed the session asleep/drained — the silent-queue
 	// case where the message queued but nothing woke to process it. The target
@@ -916,6 +923,10 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 				// and surface it for observability rather than failing the target.
 				g.deliveredAsleep.Add(1)
 				log.Printf("company: delivered to still-asleep session receipt=%s session=%s", id, td.Session)
+				// Boot escalation: the wake cleared the drain flag without starting a
+				// runtime, so materialize one (throttled, advisory) to actually process
+				// the queued message.
+				g.tryBoot(r, td)
 			}
 			results[key] = td
 		case postRetryable:
@@ -1423,7 +1434,61 @@ func (g *companyGateway) tryMaterialize(r *IngressReceipt, td TargetDelivery) bo
 			r.ID, td.Session)
 		return false
 	}
+	return g.postSessionCreate(r, td, apiBase, targetCity, name, "materialize", &g.materializeRequests)
+}
 
+// tryBoot fires the delivered-asleep boot escalation for a target that returned
+// a delivered 2xx but whose post-delivery re-check still showed the session
+// asleep/drained — the wake POST cleared the drain flag without starting a
+// runtime, so the message sits queued and unprocessed. It materializes a runtime
+// with POST /v0/city/{city}/sessions {"name": <n>, "kind": "agent"},
+// Idempotency-Key boot:<receipt>:<session>, counted as company_boot_requests and
+// throttled through the SAME per-(city,session) gate as tryMaterialize so a
+// session is never double-POSTed within one sweep interval.
+//
+// <n> reuses tryMaterialize's name discipline: the bound session when it looks
+// like a template/pool alias. When the binding instead targets an EXACT
+// session_name, materializing from the supervisor record's template field would
+// create a NEW orphan instance rather than boot the asleep one — so tryBoot
+// logs and skips, and the delivered-asleep counter (already incremented at the
+// call site) is the sole record of the still-queued case. Best-effort: any
+// transport/status outcome leaves the target delivered (advisory).
+func (g *companyGateway) tryBoot(r *IngressReceipt, td TargetDelivery) bool {
+	if !looksLikeTemplateName(td.Session) {
+		// Exact session_name binding: booting from the record template would
+		// orphan the asleep instance. Skip rather than create a runaway session.
+		log.Printf("company: boot skip receipt=%s session=%s: exact session_name binding (materialize would orphan the asleep session)",
+			r.ID, td.Session)
+		return false
+	}
+	targetCity, apiBase, ok := g.companyCityBase(td.City)
+	if !ok {
+		// No configured base for this city — nothing to boot against.
+		return false
+	}
+	// Throttle gate shared with tryMaterialize: record the attempt under the lock
+	// BEFORE any POST so racing receipts (and a same-sweep 404 heal) can never
+	// double-fire a session-create within one interval.
+	throttleKey := targetCity + "\x00" + td.Session
+	g.materializeMu.Lock()
+	if last, seen := g.materializeAttempts[throttleKey]; seen && g.now().Sub(last) < g.sweepInterval {
+		g.materializeMu.Unlock()
+		return false
+	}
+	g.materializeAttempts[throttleKey] = g.now()
+	g.materializeMu.Unlock()
+
+	return g.postSessionCreate(r, td, apiBase, targetCity, td.Session, "boot", &g.bootRequests)
+}
+
+// postSessionCreate performs the session-create POST shared by the 404 self-heal
+// (tryMaterialize) and the delivered-asleep boot escalation (tryBoot). Callers
+// own throttling and name derivation; this owns the request, the counter, and
+// the best-effort outcome. verb is BOTH the Idempotency-Key prefix and the log
+// label ("materialize" or "boot"). Returns true iff the POST was attempted — a
+// transport error still counts as attempted so the caller does not re-derive
+// within the throttle interval.
+func (g *companyGateway) postSessionCreate(r *IngressReceipt, td TargetDelivery, apiBase, targetCity, name, verb string, counter *atomic.Uint64) bool {
 	payload, err := json.Marshal(companySessionCreateRequest{Name: name, Kind: "agent"})
 	if err != nil {
 		return false
@@ -1435,19 +1500,19 @@ func (g *companyGateway) tryMaterialize(r *IngressReceipt, td TargetDelivery) bo
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GC-Request", companyDeliverRequestTag)
-	req.Header.Set("Idempotency-Key", "materialize:"+r.ID+":"+td.Session)
+	req.Header.Set("Idempotency-Key", verb+":"+r.ID+":"+td.Session)
 
-	g.materializeRequests.Add(1)
+	counter.Add(1)
 	resp, err := g.deliverClient.Do(req)
 	if err != nil {
-		log.Printf("company: materialize POST receipt=%s city=%s session=%s name=%s: %v",
-			r.ID, targetCity, td.Session, name, err)
+		log.Printf("company: %s POST receipt=%s city=%s session=%s name=%s: %v",
+			verb, r.ID, targetCity, td.Session, name, err)
 		return true
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, companyMaxErrorBodyBytesRead))
-	log.Printf("company: materialize requested receipt=%s city=%s session=%s name=%s status=%d",
-		r.ID, targetCity, td.Session, name, resp.StatusCode)
+	log.Printf("company: %s requested receipt=%s city=%s session=%s name=%s status=%d",
+		verb, r.ID, targetCity, td.Session, name, resp.StatusCode)
 	return true
 }
 
@@ -1596,6 +1661,7 @@ func decodeCompanyMessage(origin ReceiptOrigin, event json.RawMessage) CompanyMe
 		Subtype:         ev.Subtype,
 		Text:            ev.Text,
 		Blocks:          ev.Blocks,
+		Files:           ev.Files,
 	}
 }
 
@@ -2039,7 +2105,7 @@ func (g *companyGateway) healthzDetail() string {
 	apps := g.agentApps.Snapshot()
 	joinWarnings := apps.JoinWarnings(g.dirStore.Snapshot())
 	return fmt.Sprintf(
-		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_target_reresolved=%d\ncompany_materialize_requests=%d\ncompany_delivered_asleep=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\ncompany_mpim_receipts_received=%d\ncompany_mpim_receipts_routing=%d\ncompany_mpim_receipts_delivered=%d\ncompany_mpim_receipts_no_delivery=%d\ncompany_mpim_receipts_failed=%d\ncompany_body_missing=%d\ncompany_bodies_redacted=%d\ncompany_body_digest_mismatch=%d\n",
+		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_target_reresolved=%d\ncompany_materialize_requests=%d\ncompany_boot_requests=%d\ncompany_delivered_asleep=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\ncompany_mpim_receipts_received=%d\ncompany_mpim_receipts_routing=%d\ncompany_mpim_receipts_delivered=%d\ncompany_mpim_receipts_no_delivery=%d\ncompany_mpim_receipts_failed=%d\ncompany_body_missing=%d\ncompany_bodies_redacted=%d\ncompany_body_digest_mismatch=%d\n",
 		g.barrier.Load(),
 		storeReady,
 		storeErr,
@@ -2047,6 +2113,7 @@ func (g *companyGateway) healthzDetail() string {
 		g.deliveryFailures.Load(),
 		g.targetReresolved.Load(),
 		g.materializeRequests.Load(),
+		g.bootRequests.Load(),
 		g.deliveredAsleep.Load(),
 		g.stalePostingIntents.Load(),
 		g.companyCorrelationParked.Load(),

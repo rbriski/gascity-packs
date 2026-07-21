@@ -32,7 +32,85 @@ const (
 	companyExcerptMaxMessages    = 8
 	companyExcerptMaxTotalBytes  = 12 * 1024
 	companyExcerptMaxCharsPerMsg = 1024
+
+	// companyFileMaxContentBytes caps both the size gate (a file larger than
+	// this is listed metadata-only, never fetched) and the in-memory read of a
+	// fetched snippet, so a hostile or mis-sized file can never balloon the
+	// frozen reminder. 64 KiB matches the spec's snippet ceiling.
+	companyFileMaxContentBytes = 64 * 1024
+
+	// companyHydrationFile.Status values. Included carries fetched snippet
+	// bytes; scope_missing degrades honestly to metadata + a files:read note
+	// when the fetch is denied; metadata_only lists an oversize/binary/
+	// unfetchable file without content.
+	companyFileStatusIncluded     = "included"
+	companyFileStatusScopeMissing = "scope_missing"
+	companyFileStatusMetadataOnly = "metadata_only"
 )
+
+// companyTextFiletypes is the allowlist of Slack `filetype` codes treated as
+// text-like snippets whose content may be inlined into the reminder. A file
+// whose filetype is absent from this set (and whose mimetype is not text/*)
+// is listed metadata-only regardless of size.
+var companyTextFiletypes = map[string]bool{
+	"text":       true,
+	"plain":      true,
+	"javascript": true,
+	"js":         true,
+	"jsx":        true,
+	"typescript": true,
+	"ts":         true,
+	"tsx":        true,
+	"python":     true,
+	"py":         true,
+	"go":         true,
+	"json":       true,
+	"yaml":       true,
+	"yml":        true,
+	"markdown":   true,
+	"md":         true,
+	"shell":      true,
+	"bash":       true,
+	"sh":         true,
+	"zsh":        true,
+	"c":          true,
+	"cpp":        true,
+	"h":          true,
+	"java":       true,
+	"kotlin":     true,
+	"swift":      true,
+	"rust":       true,
+	"rs":         true,
+	"ruby":       true,
+	"rb":         true,
+	"php":        true,
+	"perl":       true,
+	"sql":        true,
+	"html":       true,
+	"css":        true,
+	"scss":       true,
+	"xml":        true,
+	"toml":       true,
+	"ini":        true,
+	"csv":        true,
+	"tsv":        true,
+	"diff":       true,
+	"patch":      true,
+	"log":        true,
+	"dockerfile": true,
+	"make":       true,
+	"makefile":   true,
+	"gradle":     true,
+	"groovy":     true,
+	"scala":      true,
+	"r":          true,
+	"lua":        true,
+	"dart":       true,
+	"proto":      true,
+	"graphql":    true,
+	"vue":        true,
+	"svelte":     true,
+}
 
 // companyHydration is the frozen context bundle stored in
 // IngressReceipt.Hydration.
@@ -41,6 +119,23 @@ type companyHydration struct {
 	Root           *companyHydrationRoot `json:"root,omitempty"`
 	ContextStatus  string                `json:"context_status"`
 	Excerpt        []companyExcerptLine  `json:"excerpt,omitempty"`
+	// Files is the frozen per-file snippet context for a file_share message.
+	// Fetched ONCE when hydration freezes and persisted on the receipt so
+	// redrives render byte-identical reminders. Empty (and omitted) for a
+	// text-only message, keeping its reminder bytes unchanged.
+	Files []companyHydrationFile `json:"files,omitempty"`
+}
+
+// companyHydrationFile is the frozen render-ready record for one attached
+// file. Status selects how renderCompanyFilesSection renders it: Included
+// fences Content as untrusted; ScopeMissing appends the files:read note;
+// MetadataOnly lists name/type/size alone.
+type companyHydrationFile struct {
+	Name     string `json:"name,omitempty"`
+	Filetype string `json:"filetype,omitempty"`
+	Size     int    `json:"size,omitempty"`
+	Status   string `json:"status"`
+	Content  string `json:"content,omitempty"`
 }
 
 type companyHydrationRoot struct {
@@ -95,7 +190,102 @@ func fetchCompanyHydration(token string, client *http.Client, msg CompanyMessage
 		h.ContextStatus = companyContextAvailable
 		h.Excerpt = excerpt
 	}
+	if len(msg.Files) > 0 {
+		h.Files = fetchCompanyFileContext(token, msg.Files)
+	}
 	return h
+}
+
+// fetchCompanyFileContext builds the frozen per-file records for a file_share
+// message. Every file is listed (name / filetype / size). A text-like file
+// (filetype in the allowlist or a text/* mimetype) no larger than
+// companyFileMaxContentBytes has its content fetched ONCE here from
+// url_private_download with the OWNER-appropriate token; a fetch denied for
+// lack of the files:read scope (any error / non-2xx) degrades to
+// scope_missing, and an oversize / binary / unfetchable file is metadata_only.
+// A fetch failure never propagates — delivery always proceeds with whatever
+// context was obtained.
+func fetchCompanyFileContext(token string, files []slackFile) []companyHydrationFile {
+	out := make([]companyHydrationFile, 0, len(files))
+	for _, f := range files {
+		rec := companyHydrationFile{
+			Name:     fileDisplayName(f),
+			Filetype: f.Filetype,
+			Size:     f.Size,
+			Status:   companyFileStatusMetadataOnly,
+		}
+		fetchURL := f.URLPrivateDownload
+		if fetchURL == "" {
+			fetchURL = f.URLPrivate
+		}
+		if isTextLikeFile(f) && f.Size <= companyFileMaxContentBytes && fetchURL != "" {
+			if content, ok := fetchSlackFileContent(token, fetchURL); ok {
+				rec.Status = companyFileStatusIncluded
+				rec.Content = content
+			} else {
+				rec.Status = companyFileStatusScopeMissing
+			}
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// fileDisplayName picks the human-facing name for a file: Name, else Title,
+// else the file id, else a stable placeholder.
+func fileDisplayName(f slackFile) string {
+	switch {
+	case f.Name != "":
+		return f.Name
+	case f.Title != "":
+		return f.Title
+	case f.ID != "":
+		return f.ID
+	default:
+		return "file"
+	}
+}
+
+// isTextLikeFile reports whether a file's declared type is a text-like snippet
+// eligible for content inlining: a filetype in the allowlist, or a text/*
+// mimetype. Case-insensitive on the filetype code.
+func isTextLikeFile(f slackFile) bool {
+	if companyTextFiletypes[strings.ToLower(strings.TrimSpace(f.Filetype))] {
+		return true
+	}
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(f.MIMEType)), "text/")
+}
+
+// fetchSlackFileContent GETs a Slack file URL with a Bearer token and returns
+// the body (bounded to companyFileMaxContentBytes) as a string. It reuses the
+// SSRF-hardened singleton client (allowlist URL validation, dial-time private-
+// IP guard, redirect re-validation) exactly as slackDownloadToFile does, so a
+// forged url_private can neither exfiltrate the token nor probe internal hosts.
+// ok=false on any validation / transport / non-2xx outcome — the caller treats
+// that as a files:read scope denial and degrades honestly.
+func fetchSlackFileContent(token, rawURL string) (string, bool) {
+	valid, err := validateSlackFileURL(rawURL)
+	if err != nil || !valid {
+		return "", false
+	}
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := slackHTTPClientSingleton().Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, companyFileMaxContentBytes))
+	if err != nil {
+		return "", false
+	}
+	return string(body), true
 }
 
 // fetchVerifiedRoot fetches the thread root and grants verification only when
@@ -231,6 +421,7 @@ func renderCompanyReminder(room *CompanyRoom, authorClass, kind, text, originTS,
 			)
 		}
 	}
+	renderCompanyFilesSection(&b, h.Files)
 	if kind == wakeKindPeerResult {
 		renderSynthesisBlock(&b, synthesis)
 	}
@@ -242,6 +433,38 @@ func renderCompanyReminder(room *CompanyRoom, authorClass, kind, text, originTS,
 	b.WriteString(neutralizeMarkupBoundaries(text))
 	b.WriteString("\n</system-reminder>")
 	return b.String()
+}
+
+// renderCompanyFilesSection appends the frozen files section shared by the
+// room, dm, and mpim reminders. It writes NOTHING for a file-free message, so
+// a text-only reminder is byte-identical to the pre-feature output. Every
+// interpolated field — including inlined snippet content — passes through
+// neutralizeMarkupBoundaries, the same discipline applied to the message body,
+// so a file's name or bytes cannot forge a </system-reminder> boundary. The
+// content is fenced and labelled UNTRUSTED so the agent treats it as data.
+func renderCompanyFilesSection(b *strings.Builder, files []companyHydrationFile) {
+	if len(files) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "Attached files (untrusted, %d file(s)):\n", len(files))
+	for _, f := range files {
+		fmt.Fprintf(b, "- %s (filetype: %s, %d bytes)\n",
+			neutralizeMarkupBoundaries(f.Name),
+			neutralizeMarkupBoundaries(f.Filetype),
+			f.Size,
+		)
+		switch f.Status {
+		case companyFileStatusIncluded:
+			b.WriteString("  UNTRUSTED file content follows:\n")
+			b.WriteString("  --- begin file content ---\n")
+			b.WriteString(neutralizeMarkupBoundaries(f.Content))
+			b.WriteString("\n  --- end file content ---\n")
+		case companyFileStatusScopeMissing:
+			b.WriteString("  content unavailable: fetching file content requires the files:read scope — reinstall the app to grant it.\n")
+		default:
+			b.WriteString("  content omitted (binary or over the 64 KiB snippet limit).\n")
+		}
+	}
 }
 
 // synthesisReadyMeaning is the pinned prose meaning of synthesis_ready

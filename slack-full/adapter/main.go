@@ -1023,13 +1023,20 @@ type slackEventEnvelope struct {
 }
 
 // slackFile is a subset of Slack's file object, just the fields we need
-// to download the bytes and pass useful metadata up to gc.
+// to download the bytes and pass useful metadata up to gc. Filetype, Size,
+// and URLPrivateDownload feed the company file-hydration path (snippet
+// content inlined into the frozen reminder); the download URL is preferred
+// over url_private for content fetches because Slack marks it with the
+// Content-Disposition that yields the raw bytes rather than an HTML wrapper.
 type slackFile struct {
-	ID         string `json:"id"`
-	Name       string `json:"name,omitempty"`
-	Title      string `json:"title,omitempty"`
-	URLPrivate string `json:"url_private,omitempty"`
-	MIMEType   string `json:"mimetype,omitempty"`
+	ID                 string `json:"id"`
+	Name               string `json:"name,omitempty"`
+	Title              string `json:"title,omitempty"`
+	URLPrivate         string `json:"url_private,omitempty"`
+	URLPrivateDownload string `json:"url_private_download,omitempty"`
+	MIMEType           string `json:"mimetype,omitempty"`
+	Filetype           string `json:"filetype,omitempty"`
+	Size               int    `json:"size,omitempty"`
 }
 
 type slackMessageEvent struct {

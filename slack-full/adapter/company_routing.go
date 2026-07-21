@@ -116,6 +116,11 @@ type CompanyMessage struct {
 	// event_payload) carried on delegation / result posts; the correlation
 	// layer (company_peer.go) reads it for claim admission.
 	Metadata json.RawMessage
+	// Files is the message's attached file objects (subtype file_share). The
+	// hydrator reads them to render a files section and inline snippet content
+	// into the frozen reminder; empty for the common text-only message so its
+	// reminder bytes are unchanged.
+	Files []slackFile
 }
 
 // WakeTarget names one agent to wake and why (ambient vs targeted).
