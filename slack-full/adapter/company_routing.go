@@ -127,6 +127,12 @@ type CompanyMessage struct {
 type WakeTarget struct {
 	Agent CompanyAgent
 	Kind  string // wakeKindAmbient | wakeKindTargeted
+	// Overlay marks a target admitted by the delivery worker's live-membership
+	// eligibility overlay (a stale-roster mention of a genuine live member). The
+	// pure router NEVER sets it — it is stamped only in company_delivery.go — and
+	// it drives the dm_bindings session fallback in ensureTargets (an overlay
+	// agent has no room binding by construction).
+	Overlay bool
 }
 
 // RouteDecision is the pure routing result. Room == nil means the channel
@@ -138,6 +144,14 @@ type RouteDecision struct {
 	Author AuthorClass
 	Wakes  []WakeTarget
 	Reason string
+	// OverlayCandidates lists the mentioned directory agents that were excluded
+	// from the wake set ONLY by roster membership/mention_wake, populated solely
+	// on the AuthorHuman mentioned_no_eligible path (empty on every other
+	// decision). It is the exact candidate set the delivery worker's
+	// live-membership eligibility overlay may admit as targeted wakes when a
+	// candidate's bot is a genuine live channel member — never persisted, never
+	// broadening ambient, never a non-directory identity.
+	OverlayCandidates []CompanyAgent
 }
 
 // companyMentionTokenRE matches a canonical Slack user mention token in
@@ -300,8 +314,18 @@ func ComputeWakeSet(dir *CompanyDirectory, msg CompanyMessage, selfBotUserID str
 		// Exclusive mention routing: ambient is suppressed entirely, even
 		// when no mentioned agent turns out member+eligible.
 		seen := make(map[string]bool)
+		var driftCandidates []CompanyAgent
+		candidateSeen := make(map[string]bool)
 		for _, a := range companyMentions {
 			if !dir.IsMember(room, a.Name) || !dir.IsMentionEligible(room, a.Name) {
+				// Excluded ONLY by roster membership/mention_wake — and because
+				// companyMentions is already directory-resolved, this is exactly
+				// the candidate set the delivery worker's live-membership overlay
+				// may admit when the roster has drifted from live channel state.
+				if !candidateSeen[a.BotUserID] {
+					candidateSeen[a.BotUserID] = true
+					driftCandidates = append(driftCandidates, *a)
+				}
 				continue
 			}
 			if seen[a.BotUserID] {
@@ -311,7 +335,10 @@ func ComputeWakeSet(dir *CompanyDirectory, msg CompanyMessage, selfBotUserID str
 			dec.Wakes = append(dec.Wakes, WakeTarget{Agent: *a, Kind: wakeKindTargeted})
 		}
 		if len(dec.Wakes) == 0 {
+			// Terminal mentioned_no_eligible — surface the drift candidates so the
+			// delivery worker can verify live membership before terminalizing.
 			dec.Reason = wakeReasonMentionedNoEligible
+			dec.OverlayCandidates = driftCandidates
 		}
 		return dec
 	}

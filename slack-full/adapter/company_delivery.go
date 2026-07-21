@@ -204,6 +204,20 @@ type companyGateway struct {
 	// from the single SweepAndPending scan (Phase 5 body-store split).
 	bodyIntegrity atomic.Pointer[bodyIntegrityCounts]
 
+	// Roster-drift live-membership eligibility overlay. channelMembersProbe
+	// fetches the LIVE conversations.members id set for a channel over the
+	// switchboard token (swappable in tests; nil or a probe failure fails the
+	// overlay closed). channelMembersCache is the positive-only per-channel cache
+	// of that set with a companyChannelMembersTTL window, so at most one Slack
+	// call fires per channel per TTL even under a burst of stale-roster mentions.
+	// rosterDriftWakes counts the targets the overlay admitted
+	// (company_roster_drift_wakes) — the operator's signal that the declarative
+	// roster has drifted from live channel membership and should be recaptured.
+	channelMembersProbe func(channel string) (map[string]bool, bool)
+	channelMembersMu    sync.Mutex
+	channelMembersCache map[string]channelMemberSet
+	rosterDriftWakes    atomic.Uint64
+
 	retention     time.Duration
 	sweepInterval time.Duration
 	staleWindow   time.Duration
@@ -212,6 +226,24 @@ type companyGateway struct {
 
 // sessionCacheTTL bounds a positive session-existence cache entry (Phase 4).
 const sessionCacheTTL = 10 * time.Minute
+
+// Roster-drift eligibility overlay tunables. The membership set is cached per
+// channel for companyChannelMembersTTL (the design's 5-minute TTL); the probe
+// follows conversations.members cursor pages to a bounded cap so a pathological
+// channel cannot wedge the delivery worker, and honors at most one Retry-After
+// no longer than companyChannelMembersRetryCap before failing closed.
+const (
+	companyChannelMembersTTL      = 5 * time.Minute
+	companyChannelMembersMaxPages = 20
+	companyChannelMembersRetryCap = 10 * time.Second
+)
+
+// channelMemberSet is one cached live-membership snapshot for a channel: the
+// set of member user ids and the clock reading it was fetched at (TTL anchor).
+type channelMemberSet struct {
+	members   map[string]bool
+	fetchedAt time.Time
+}
 
 // Advisory session-guard target details (Phase 4). Left on a target that the
 // guard blocked; preserved through the attempt-cap exhaustion path so a
@@ -316,6 +348,7 @@ func newCompanyGateway(cfg config, dir *companyDirectoryStore, bind *companyBind
 		locksDir:            cfg.companyLocksDir,
 		inflight:            make(map[string]bool),
 		chains:              newChainRegistry(),
+		channelMembersCache: make(map[string]channelMemberSet),
 		visibleAcks:         cfg.companyVisibleAcks,
 		secretsDir:          cfg.companySecretsDir,
 		verifySessions:      cfg.companyVerifySessions,
@@ -342,6 +375,12 @@ func newCompanyGateway(cfg config, dir *companyDirectoryStore, bind *companyBind
 	}
 	g.mpimMemberProbe = func(token, channel string) mpimProbeOutcome {
 		return probeMpimMembership(token, g.slackClient, channel)
+	}
+	// Roster-drift overlay probe: LIVE channel membership over the switchboard
+	// token (channels:read/groups:read). Swappable in tests; a failure fails the
+	// overlay closed so membership can only ADD availability, never remove it.
+	g.channelMembersProbe = func(channel string) (map[string]bool, bool) {
+		return fetchChannelMembers(g.slackToken, g.slackClient, channel)
 	}
 	// Visible-ack hooks (token-parameterized): the ack actor's token is chosen
 	// per receipt — the switchboard token owns reactions:write and the room
@@ -743,18 +782,31 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 			return deliverParkedPreclaim
 		}
 		if len(decision.Wakes) == 0 {
-			// Admitted but nobody woken (bot author, empty ambient set,
-			// mentioned-but-ineligible, …): terminal no_delivery carrying the
-			// machine-readable routing reason.
-			if err := g.commitReceipt(r, func(cur *IngressReceipt) {
-				cur.Status = ingressStatusNoDelivery
-				cur.Reason = decision.Reason
-			}); err != nil {
-				log.Printf("company: finalize no_delivery %s: %v", id, err)
-				return deliverError
+			// Live-membership eligibility overlay (roster drift): a mention that
+			// would terminalize mentioned_no_eligible because company_directory.json
+			// is stale can still be mention-eligible when the mentioned agent's bot
+			// is a GENUINE live channel member (a workspace admin invited the app but
+			// no operator has recaptured the roster yet). The overlay only ADDS
+			// availability — a probe failure or a non-member leaves the fail-closed
+			// terminalize below intact — never persists to the directory, never
+			// broadens ambient, and never admits a non-directory identity.
+			if overlay := g.admitRosterDriftWakes(dir, room, decision, msg); len(overlay) > 0 {
+				decision.Wakes = overlay
+				decision.Reason = ""
+			} else {
+				// Admitted but nobody woken (bot author, empty ambient set,
+				// mentioned-but-ineligible with no live-member drift, …): terminal
+				// no_delivery carrying the machine-readable routing reason.
+				if err := g.commitReceipt(r, func(cur *IngressReceipt) {
+					cur.Status = ingressStatusNoDelivery
+					cur.Reason = decision.Reason
+				}); err != nil {
+					log.Printf("company: finalize no_delivery %s: %v", id, err)
+					return deliverError
+				}
+				g.applyTerminalAck(r)
+				return deliverTerminal
 			}
-			g.applyTerminalAck(r)
-			return deliverTerminal
 		}
 
 		// Freeze the wake set into (agent, kind, delegation_key) triples. For
@@ -1008,6 +1060,11 @@ type frozenWake struct {
 	// (non-nil iff Kind is peer_result); deliverReceipt marshals it into the
 	// receipt's Synthesis field in the routing commit that freezes targets.
 	Snapshot *companySynthesisSnapshot
+	// RosterDriftOverlay marks a wake admitted by the live-membership eligibility
+	// overlay. Such an agent has no room binding by construction, so ensureTargets
+	// resolves its session via dm_bindings (failed_dm_unbound when absent) rather
+	// than the room-binding-only path.
+	RosterDriftOverlay bool
 }
 
 // freezeWakes converts a RouteDecision into frozen wakes. Human decisions map
@@ -1025,7 +1082,7 @@ type frozenWake struct {
 func (g *companyGateway) freezeWakes(dir *CompanyDirectory, room *CompanyRoom, msg CompanyMessage, decision RouteDecision, authorAgent *CompanyAgent) (frozen []frozenWake, parkReason string) {
 	if decision.Author != AuthorCompanyBot || authorAgent == nil {
 		for _, wt := range decision.Wakes {
-			frozen = append(frozen, frozenWake{Agent: wt.Agent, Kind: wt.Kind})
+			frozen = append(frozen, frozenWake{Agent: wt.Agent, Kind: wt.Kind, RosterDriftOverlay: wt.Overlay})
 		}
 		return frozen, ""
 	}
@@ -1078,17 +1135,33 @@ func (g *companyGateway) ensureTargets(r *IngressReceipt, room *CompanyRoom, wak
 		var session, targetCity string
 		binding, bound := bindings.BindingFor(room.Name, wt.Agent.Name)
 		if bound {
+			// Existing room bindings win when present, even for an overlay agent.
 			session, targetCity = binding.Session, binding.City
+		} else if wt.RosterDriftOverlay {
+			// An overlay-admitted agent has no room binding for this room by
+			// construction (it is not a declared roster member). Resolve its
+			// canonical per-agent session via dm_bindings — the singleton session
+			// the agent already runs — carrying that binding's city.
+			if db, ok := g.dmBindStore.Snapshot().BindingFor(wt.Agent.Name); ok {
+				session, targetCity, bound = db.Session, db.City, true
+			}
 		}
 		if !bound {
 			key := companyUnboundTargetKeyPrefix + wt.Agent.Name
 			if _, exists := r.Targets[key]; exists {
 				continue
 			}
+			detail := fmt.Sprintf("no company binding for (room=%s, agent=%s)", room.Name, wt.Agent.Name)
+			if wt.RosterDriftOverlay {
+				// Overlay agent with neither a room binding nor a dm binding: the
+				// normal unbound handling, surfaced under failed_dm_unbound
+				// (redrive-recoverable once a binding is imported).
+				detail = companyReasonFailedDMUnbound
+			}
 			r.Targets[key] = TargetDelivery{
 				Kind:          wt.Kind,
 				Status:        companyTargetFailed,
-				Detail:        fmt.Sprintf("no company binding for (room=%s, agent=%s)", room.Name, wt.Agent.Name),
+				Detail:        detail,
 				UpdatedAt:     now,
 				Agent:         wt.Agent.Name,
 				DelegationKey: wt.DelegationKey,
@@ -1110,6 +1183,152 @@ func (g *companyGateway) ensureTargets(r *IngressReceipt, room *CompanyRoom, wak
 			DelegationKey:  wt.DelegationKey,
 		}
 	}
+}
+
+// admitRosterDriftWakes runs the live-membership eligibility overlay for a
+// terminal mentioned_no_eligible human decision. For each mentioned directory
+// agent excluded only by the (possibly stale) roster, it admits the agent as a
+// targeted wake iff the agent's bot_user_id is a LIVE member of the channel. The
+// member set is fetched once per channel and cached (companyChannelMembersTTL);
+// any probe failure admits nobody (fail closed) so the check can only ADD
+// availability, never reduce it. Each admitted target increments
+// company_roster_drift_wakes and logs the drift so operators can recapture the
+// roster declaratively. Returns nil when the overlay admits nobody.
+func (g *companyGateway) admitRosterDriftWakes(dir *CompanyDirectory, room *CompanyRoom, decision RouteDecision, msg CompanyMessage) []WakeTarget {
+	if g == nil || len(decision.OverlayCandidates) == 0 {
+		return nil
+	}
+	members, ok := g.liveChannelMembers(msg.ChannelID)
+	if !ok {
+		return nil // probe failed — keep today's fail-closed mentioned_no_eligible
+	}
+	var out []WakeTarget
+	for i := range decision.OverlayCandidates {
+		a := decision.OverlayCandidates[i]
+		if !members[a.BotUserID] {
+			continue
+		}
+		out = append(out, WakeTarget{Agent: a, Kind: wakeKindTargeted, Overlay: true})
+		g.rosterDriftWakes.Add(1)
+		log.Printf("company: roster-drift eligibility overlay admitted agent=%s bot_user_id=%s room=%s channel=%s (live channel member, directory roster stale — recapture declaratively)",
+			a.Name, a.BotUserID, room.Name, msg.ChannelID)
+	}
+	return out
+}
+
+// liveChannelMembers returns the LIVE member id set for a channel, served from a
+// positive per-channel cache with a companyChannelMembersTTL window so a burst of
+// stale-roster mentions fires at most one Slack call per channel per TTL. A probe
+// failure is never cached (each mention re-probes until it succeeds) and returns
+// ok=false so the caller fails closed.
+func (g *companyGateway) liveChannelMembers(channel string) (map[string]bool, bool) {
+	if channel == "" {
+		return nil, false
+	}
+	now := g.now()
+	g.channelMembersMu.Lock()
+	if ent, ok := g.channelMembersCache[channel]; ok && now.Sub(ent.fetchedAt) < companyChannelMembersTTL {
+		members := ent.members
+		g.channelMembersMu.Unlock()
+		return members, true
+	}
+	g.channelMembersMu.Unlock()
+
+	probe := g.channelMembersProbe
+	if probe == nil {
+		return nil, false
+	}
+	members, ok := probe(channel)
+	if !ok {
+		return nil, false
+	}
+	g.channelMembersMu.Lock()
+	if g.channelMembersCache == nil {
+		g.channelMembersCache = make(map[string]channelMemberSet)
+	}
+	g.channelMembersCache[channel] = channelMemberSet{members: members, fetchedAt: now}
+	g.channelMembersMu.Unlock()
+	return members, true
+}
+
+// slackConversationsMembersResp is the subset of conversations.members the
+// roster-drift overlay consumes.
+type slackConversationsMembersResp struct {
+	OK               bool     `json:"ok"`
+	Error            string   `json:"error,omitempty"`
+	Members          []string `json:"members"`
+	ResponseMetadata struct {
+		NextCursor string `json:"next_cursor"`
+	} `json:"response_metadata"`
+}
+
+// fetchChannelMembers returns the LIVE member id set for a channel via
+// conversations.members over the switchboard token. Cursor pages are followed to
+// a bounded cap; a single Retry-After (no longer than companyChannelMembersRetryCap)
+// is honored on a 429 before giving up. ANY failure — network, missing scope,
+// repeated/large 429, non-ok body, or an unexhausted page cap — returns ok=false
+// so the overlay fails closed (membership can only add availability).
+func fetchChannelMembers(token string, client *http.Client, channel string) (map[string]bool, bool) {
+	if token == "" || channel == "" || client == nil {
+		return nil, false
+	}
+	members := make(map[string]bool)
+	cursor := ""
+	retried := false
+	for page := 0; page < companyChannelMembersMaxPages; page++ {
+		q := url.Values{}
+		q.Set("channel", channel)
+		q.Set("limit", "1000")
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		req, err := http.NewRequest(http.MethodGet, slackAPIBase+"/conversations.members?"+q.Encode(), nil)
+		if err != nil {
+			return nil, false
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, false
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			// Honor exactly one Retry-After within the cap, then fail closed. A
+			// missing/too-large backpressure signal is a plain fail-closed rather
+			// than an unbounded worker stall.
+			delay := time.Duration(retryAfterSeconds(resp.Header)) * time.Second
+			resp.Body.Close()
+			if retried || delay <= 0 || delay > companyChannelMembersRetryCap {
+				return nil, false
+			}
+			retried = true
+			time.Sleep(delay)
+			continue // retry the SAME cursor page
+		}
+		raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if rerr != nil || resp.StatusCode >= 300 {
+			return nil, false
+		}
+		var body slackConversationsMembersResp
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return nil, false
+		}
+		if !body.OK {
+			return nil, false // missing_scope, channel_not_found, … → fail closed
+		}
+		for _, m := range body.Members {
+			if m != "" {
+				members[m] = true
+			}
+		}
+		cursor = body.ResponseMetadata.NextCursor
+		if cursor == "" {
+			return members, true // cursor exhausted — complete membership view
+		}
+	}
+	// Hit the page cap without exhausting the cursor: an incomplete view. Fail
+	// closed rather than admit on a partial member set.
+	return nil, false
 }
 
 // isBotAuthored reports whether a message is bot-authored (bot_message
@@ -2105,7 +2324,7 @@ func (g *companyGateway) healthzDetail() string {
 	apps := g.agentApps.Snapshot()
 	joinWarnings := apps.JoinWarnings(g.dirStore.Snapshot())
 	return fmt.Sprintf(
-		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_target_reresolved=%d\ncompany_materialize_requests=%d\ncompany_boot_requests=%d\ncompany_delivered_asleep=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\ncompany_mpim_receipts_received=%d\ncompany_mpim_receipts_routing=%d\ncompany_mpim_receipts_delivered=%d\ncompany_mpim_receipts_no_delivery=%d\ncompany_mpim_receipts_failed=%d\ncompany_body_missing=%d\ncompany_bodies_redacted=%d\ncompany_body_digest_mismatch=%d\n",
+		"company_barrier_ready=%v\ncompany_store_ready=%v\ncompany_store_error=%q\ncompany_write_failures=%d\ncompany_delivery_failures=%d\ncompany_target_reresolved=%d\ncompany_materialize_requests=%d\ncompany_boot_requests=%d\ncompany_delivered_asleep=%d\ncompany_roster_drift_wakes=%d\ncompany_stale_posting_intents=%d\ncompany_correlation_parked=%d\ncompany_directory_loaded=%v\ncompany_bindings_loaded=%v\ncompany_dm_bindings_loaded=%v\nregistered_agent_apps=%d\nregistered_agent_apps_join_warnings=%d\ncompany_dm_sig_reject=%d\ncompany_dm_token_missing=%d\ncompany_dm_receipts_received=%d\ncompany_dm_receipts_routing=%d\ncompany_dm_receipts_delivered=%d\ncompany_dm_receipts_no_delivery=%d\ncompany_dm_receipts_failed=%d\ncompany_mpim_receipts_received=%d\ncompany_mpim_receipts_routing=%d\ncompany_mpim_receipts_delivered=%d\ncompany_mpim_receipts_no_delivery=%d\ncompany_mpim_receipts_failed=%d\ncompany_body_missing=%d\ncompany_bodies_redacted=%d\ncompany_body_digest_mismatch=%d\n",
 		g.barrier.Load(),
 		storeReady,
 		storeErr,
@@ -2115,6 +2334,7 @@ func (g *companyGateway) healthzDetail() string {
 		g.materializeRequests.Load(),
 		g.bootRequests.Load(),
 		g.deliveredAsleep.Load(),
+		g.rosterDriftWakes.Load(),
 		g.stalePostingIntents.Load(),
 		g.companyCorrelationParked.Load(),
 		g.dirStore.Snapshot() != nil,
