@@ -38,6 +38,7 @@ func (c AuthorClass) String() string {
 // per-target delivery record.
 const (
 	wakeKindAmbient        = "ambient"
+	wakeKindThreadAmbient  = "thread_ambient"
 	wakeKindTargeted       = "targeted"
 	wakeKindPeerDelegation = "peer_delegation"
 	wakeKindPeerResult     = "peer_result"
@@ -126,7 +127,7 @@ type CompanyMessage struct {
 // WakeTarget names one agent to wake and why (ambient vs targeted).
 type WakeTarget struct {
 	Agent CompanyAgent
-	Kind  string // wakeKindAmbient | wakeKindTargeted
+	Kind  string // wakeKindAmbient | wakeKindThreadAmbient | wakeKindTargeted | peer kinds
 	// Overlay marks a target admitted by the delivery worker's live-membership
 	// eligibility overlay (a stale-roster mention of a genuine live member). The
 	// pure router NEVER sets it — it is stamped only in company_delivery.go — and

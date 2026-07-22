@@ -41,6 +41,9 @@ rooms keeps the legacy pipeline unchanged.
   room. Membership does not cause the session to run for every message.
 - **Ambient wake**: a member that receives a human message containing no
   native mention of a company agent.
+- **Thread ambient wake**: a member whose authenticated agent identity has
+  already posted in a thread and therefore receives later untagged human turns
+  in that same thread.
 - **Mention wake**: a member that receives a message whose native mention
   tokens include that member's registered bot user ID.
 - **Delegation**: a visible, directed company-bot message created with
@@ -265,7 +268,8 @@ for that message; they do not add to it.
 
 | Author and message | Sessions woken |
 | --- | --- |
-| Allowed human, no native company-agent mention | The room's `ambient_wake` members |
+| Allowed human root, no native company-agent mention | The room's `ambient_wake` members |
+| Allowed human thread reply, no native company-agent mention | The room's `ambient_wake` members plus authenticated prior agent participants in that thread |
 | Allowed human, one or more native company-agent mentions | Only the mentioned, eligible members |
 | Registered company bot, no native company-agent mention | Nobody |
 | Registered company bot with native company-agent mentions | Only the mentioned, eligible members |
@@ -283,6 +287,22 @@ mention-eligibility checks. Multiple eligible mentions wake each named
 receiver exactly once. The v0 delegation command emits one target per
 message so requests and results remain individually correlated.
 
+Thread participation is fail-closed and receipt-backed. An agent joins the
+ambient reader set only after a bot-authored reply in that exact
+`(team_id, channel_id, thread_root_ts)` passes the `bots.info` company-author
+corroboration and the agent is a current room member. Unknown bots, raw
+`user`/`app_id` claims, switchboard posts, root channel posts, and arbitrary
+text cannot enroll a participant. Later untagged human replies retain the
+configured room ambient set and add those participants with wake kind
+`thread_ambient`; a native company-agent mention remains exclusive and adds no
+thread readers. The verified author name is stored on the ingress receipt, so
+participation survives adapter restarts and expires with receipt retention.
+
+Plain text such as `riley` is intentionally not adapter-level addressing. A
+thread participant or configured ambient reader receives that turn and applies
+the agent response policy; an agent outside those reader sets must first be
+introduced with a native Slack mention.
+
 Author classification is fail-closed. A human author has a `user` ID, no
 `bot_id`, and an allowlisted subtype (absent, `file_share`,
 `thread_broadcast`). A bot author (`bot_message` subtype or `bot_id`
@@ -298,8 +318,9 @@ Suppression is deterministic and adapter-side: the switchboard computes the
 wake set from the directory and delivers only to sessions bound in the
 company-bindings registry. Company rooms bypass the legacy path in which
 the channel-bound session receives every message and is prompt-trusted to
-stay silent. All room members may read the Slack transcript; agents that
-are neither ambient nor mentioned receive no session turn.
+stay silent. All room members may read the Slack transcript; agents that are
+neither configured ambient readers, prior thread participants, nor mentioned
+receive no session turn.
 
 ## Context Hydration
 

@@ -58,6 +58,14 @@ type companyGateway struct {
 	// storeMu serializes store-construction attempts (startRecovery).
 	storeMu sync.Mutex
 
+	// threadParticipants is a bounded in-memory index derived from the durable
+	// receipt ledger. It is hydrated lazily once per process, updated only after
+	// participant evidence is durably committed, and pruned on the receipt sweep
+	// retention boundary. The ledger remains the restart authority.
+	threadParticipantsMu     sync.Mutex
+	threadParticipants       map[threadParticipantKey][]threadParticipantEvent
+	threadParticipantsLoaded bool
+
 	// deliveryFailures counts failed target delivery attempts (retryable
 	// pending, definitive 4xx, and attempts-exhausted), surfaced on
 	// /healthz so silent delivery loss is observable.
@@ -781,6 +789,24 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 			g.parkReceipt(r)
 			return deliverParkedPreclaim
 		}
+		// Persist authenticated in-thread company-agent authorship before any
+		// terminalization or gc delivery. Later untagged human replies derive their
+		// ambient readers from this receipt-backed evidence, including after a
+		// restart. A failed write leaves this receipt retryable; participation must
+		// never exist only in memory.
+		if participant := verifiedThreadParticipant(dir, room, msg, decision, authorAgent); participant != "" && r.ThreadParticipantAgent != participant {
+			if err := g.commitReceipt(r, func(cur *IngressReceipt) {
+				cur.ThreadParticipantAgent = participant
+			}); err != nil {
+				log.Printf("company: persist thread participant receipt=%s agent=%s: %v", id, participant, err)
+				return deliverError
+			}
+			g.rememberThreadParticipant(r)
+		}
+		// Native mentions remain exclusive inside addThreadAmbientWakes. Untagged
+		// human thread replies retain configured ambient wakes and add prior
+		// authenticated participants under the distinct thread_ambient kind.
+		decision = g.addThreadAmbientWakes(dir, room, r, msg, decision)
 		if len(decision.Wakes) == 0 {
 			// Live-membership eligibility overlay (roster drift): a mention that
 			// would terminalize mentioned_no_eligible because company_directory.json
@@ -2140,6 +2166,7 @@ func (g *companyGateway) sweepOnce() {
 		return
 	}
 	now := g.now()
+	g.pruneThreadParticipants(now)
 	parked := 0
 	var eligible []*IngressReceipt
 	for _, rec := range pending {

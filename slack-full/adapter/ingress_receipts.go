@@ -204,9 +204,10 @@ type TargetDelivery struct {
 	// City optionally targets a session in a different gc city than the
 	// adapter's own (city-qualified binding); empty = the adapter's city.
 	City string `json:"city,omitempty"`
-	// Kind is the frozen wake kind: "ambient" | "targeted" (human legs) or
-	// "peer_delegation" | "peer_result" | "peer_input" (company-bot legs,
-	// Phase 2c). Only peer_delegation / peer_result carry a DelegationKey.
+	// Kind is the frozen wake kind: "ambient" | "thread_ambient" | "targeted"
+	// (human legs) or "peer_delegation" | "peer_result" | "peer_input"
+	// (company-bot legs, Phase 2c). Only peer_delegation / peer_result carry a
+	// DelegationKey.
 	Kind           string    `json:"kind"`
 	Status         string    `json:"status"`          // "pending" | "delivered" | "failed"
 	IdempotencyKey string    `json:"idempotency_key"` // ingress:<id>:target:<session>
@@ -280,9 +281,16 @@ type IngressReceipt struct {
 	// and diverge its lock name / rendered root from the pre-redaction value. Empty
 	// on a legacy receipt admitted before this field existed; receiptRootTS falls
 	// back to body-derivation there (both shapes forever).
-	ThreadRootTS string                    `json:"thread_root_ts,omitempty"`
-	Targets      map[string]TargetDelivery `json:"targets,omitempty"`
-	Reason       string                    `json:"reason,omitempty"` // parked/no_delivery/failed detail
+	ThreadRootTS string `json:"thread_root_ts,omitempty"`
+	// ThreadParticipantAgent records the directory agent whose authenticated
+	// company-bot identity authored this message in a thread. It is written only
+	// after bots.info-backed corroboration, and lets later untagged human replies
+	// derive ambient readers from the durable receipt ledger across restarts.
+	// Empty for root posts, humans, unknown bots, switchboard self-events, DMs,
+	// and company agents that are not declared members of the room.
+	ThreadParticipantAgent string                    `json:"thread_participant_agent,omitempty"`
+	Targets                map[string]TargetDelivery `json:"targets,omitempty"`
+	Reason                 string                    `json:"reason,omitempty"` // parked/no_delivery/failed detail
 	// Hydration is the frozen context bundle (verified human root +
 	// bounded untrusted excerpt) fetched ONCE at first delivery so redrives
 	// re-render byte-identical reminders under the same Idempotency-Key
