@@ -624,8 +624,8 @@ _OP_EVENT_TYPES = {
 _DELEGATION_STATUSES = frozenset({"pending", "result_claimed", "expired"})
 _DELEGATION_TERMINAL = frozenset({"result_claimed", "expired"})
 _TURN_KINDS = frozenset({
-    "ambient", "targeted", "peer_delegation", "peer_result", "peer_input", "dm",
-    "mpim",
+    "ambient", "thread_ambient", "targeted", "peer_delegation", "peer_result",
+    "peer_input", "dm", "mpim",
 })
 # The direct-message family (per-agent DM + group DM) shares the empty-room
 # relaxation, the required owner_app_id, and the dm_bindings spoof guard.
@@ -748,9 +748,9 @@ def parse_current_turn(data: dict[str, Any]) -> dict[str, Any]:
         raise OutboundError(f"current_turn kind {kind} requires a non-empty owner_app_id")
     # A delegation_key is required only for the correlated peer kinds
     # (peer_delegation/peer_result). Uncorrelated peer wakes (peer_input),
-    # room-context turns (ambient/targeted), and DM turns carry no key — Go
-    # emits them keyless, and the reply path posts into the thread root without
-    # a record.
+    # room-context turns (ambient/thread_ambient/targeted), and DM turns carry
+    # no key — Go emits them keyless, and the reply path posts into the thread
+    # root without a record.
     if kind in ("peer_delegation", "peer_result"):
         _require_str(data, "delegation_key", ctx)
     return data
@@ -1807,14 +1807,15 @@ def run_delegate(*, to: str, body: str, origin_ts: str, session_name: str) -> di
             "direct message carries no delegation authority (delegations and "
             "results stay visible in company rooms).")
     # S8 strict one-hop: delegate proceeds only from a human-rooted turn
-    # (ambient/targeted) and hard-errors on every peer kind alike. A delegated
-    # recipient may reply-current a result but must not redelegate, and a
-    # requester issues every sibling delegation from its human turn(s) before
-    # waiting — delegating from a result turn would enable a second synthesis.
-    if turn["kind"] not in ("ambient", "targeted"):
+    # (ambient/thread_ambient/targeted) and hard-errors on every peer kind
+    # alike. A delegated recipient may reply-current a result but must not
+    # redelegate, and a requester issues every sibling delegation from its
+    # human turn(s) before waiting — delegating from a result turn would enable
+    # a second synthesis.
+    if turn["kind"] not in ("ambient", "thread_ambient", "targeted"):
         raise OutboundError(
             f"delegate is one-hop: it runs only from a human-rooted turn "
-            f"(ambient/targeted), not a {turn['kind']!r} turn. Issue every "
+            f"(ambient/thread_ambient/targeted), not a {turn['kind']!r} turn. Issue every "
             "sibling delegation from your human-rooted turn before waiting; a "
             "delegated recipient may `reply-current` a result but must not "
             "redelegate.")
@@ -2244,11 +2245,11 @@ def post_peer_synthesis(
 def post_company_root_reply(*, body: str, origin_ts: str, session_name: str) -> dict[str, Any]:
     """Post an ordinary reply into the company room's thread root.
 
-    For ambient/targeted/peer_input turns (a human message or an uncorrelated
-    peer wake): the acting agent answers into ``thread_root_ts`` with its own
-    token and no live mentions (escaped body, no gc metadata). No delegation
-    record is involved. This replaces the legacy resolution, which the company
-    delivery path never feeds.
+    For ambient/thread_ambient/targeted/peer_input turns (a human message or an
+    uncorrelated peer wake): the acting agent answers into ``thread_root_ts``
+    with its own token and no live mentions (escaped body, no gc metadata). No
+    delegation record is involved. This replaces the legacy resolution, which
+    the company delivery path never feeds.
     """
     if not body.strip():
         raise OutboundError("--body/--body-file must be non-empty")
@@ -2256,7 +2257,7 @@ def post_company_root_reply(*, body: str, origin_ts: str, session_name: str) -> 
     prune()
 
     turn = _verify_pointer(session_name, origin_ts)
-    if turn["kind"] not in ("ambient", "targeted", "peer_input"):
+    if turn["kind"] not in ("ambient", "thread_ambient", "targeted", "peer_input"):
         raise OutboundError(
             f"current turn kind is {turn['kind']!r}, not a room-reply kind")
     agents, rooms, bindings = _load_context()
@@ -2424,4 +2425,3 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
-

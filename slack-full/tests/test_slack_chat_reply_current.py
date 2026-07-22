@@ -509,11 +509,11 @@ def test_company_synthesis_gate_refuses_then_allow_partial_passes(
     assert printed["allow_partial"] is True
 
 
-@pytest.mark.parametrize("kind", ["ambient", "targeted"])
+@pytest.mark.parametrize("kind", ["ambient", "thread_ambient", "targeted"])
 def test_company_ambient_targeted_posts_root_reply(
         monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, kind: str) -> None:
-    """P-E: ambient/targeted company turns answer into the room thread root with
-    the acting token, instead of falling through to legacy resolution."""
+    """Human-authored room turns answer into the room thread root with the
+    acting token, instead of falling through to legacy resolution."""
     rc, common = _import_modules()
     outbound = _import_outbound()
     _setup_company(outbound, tmp_path)

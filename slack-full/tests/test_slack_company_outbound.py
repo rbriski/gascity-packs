@@ -405,6 +405,21 @@ def test_delegate_threaded_pointer_posts_into_root(env) -> None:
     assert captured[0]["payload"]["thread_ts"] == "1700000000.000050"
 
 
+def test_delegate_thread_ambient_is_human_rooted(env) -> None:
+    _write_turn(env, "ollie-main", kind="thread_ambient",
+                ts="1700000000.000200",
+                thread_root_ts="1700000000.000050")
+    captured: list = []
+    env._slack_web_post = _mock_ok(captured, ["1700000000.000600"])
+
+    result = env.run_delegate(
+        to="riley", body="please take this", origin_ts="",
+        session_name="ollie-main")
+
+    assert result["status"] == "published"
+    assert captured[0]["payload"]["thread_ts"] == "1700000000.000050"
+
+
 def test_delegate_one_pending_rejected(env) -> None:
     _write_turn(env, "ollie-main")
     env._slack_web_post = _mock_ok([], ["1700000000.000500"])

@@ -125,8 +125,9 @@ def _maybe_company_reply(args: argparse.Namespace) -> int | None:
       * ``peer_delegation`` → post a delegation result into the human root
         thread (``gc_delegation_result`` gate, requester the only live mention);
       * ``peer_result`` → post a synthesis into the root with no live mentions;
-      * ``ambient`` / ``targeted`` / ``peer_input`` → post an ordinary reply
-        into the room's thread root with no live mentions.
+      * ``ambient`` / ``thread_ambient`` / ``targeted`` / ``peer_input`` →
+        post an ordinary reply into the room's thread root with no live
+        mentions.
 
     Only the *absence* of a company pointer returns ``None`` so the legacy path
     runs byte-for-byte; a session with any company pointer answers into the
@@ -167,7 +168,7 @@ def _maybe_company_reply(args: argparse.Namespace) -> int | None:
                 result = outbound.post_peer_synthesis(
                     body=body, origin_ts=origin_ts, session_name=session_name,
                     allow_partial=bool(getattr(args, "allow_partial", False)))
-            else:  # ambient / targeted / peer_input → root reply
+            else:  # ambient / thread_ambient / targeted / peer_input → root reply
                 result = outbound.post_company_root_reply(
                     body=body, origin_ts=origin_ts, session_name=session_name)
     except (outbound.OutboundError, outbound.TransientPostError,
