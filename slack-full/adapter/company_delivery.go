@@ -1720,23 +1720,19 @@ func recordHeal(results map[string]TargetDelivery, removeKeys map[string]bool, k
 
 // tryMaterialize fires at most ONE session-materialization POST per (city,
 // session) per sweep interval for a cold bound target stuck in session_missing.
-// It POSTs /v0/city/{city}/sessions {"name": <n>, "kind": "agent"} with an
-// Idempotency-Key of materialize:<receipt>:<session>, where <n> is the
-// template/pool-shaped binding session. An exact session_name is never
-// materialized from its supervisor record's former template: that would create
-// an unrelated adhoc instance and leave the stale binding broken. It reports
-// whether a POST was fired this pass (false = exact name, throttled, or no
-// derivable name). Best-effort: any transport/status outcome leaves the target
+// Template/pool-shaped bindings POST /v0/city/{city}/sessions. Exact bindings
+// POST /v0/city/{city}/session/{name}/wake instead: the supervisor only
+// materializes that request when {name} is a configured named session, while a
+// stale concrete session name returns 404 without minting an orphan from its
+// former template. Both use materialize:<receipt>:<session> as their
+// Idempotency-Key. Best-effort: any transport/status outcome leaves the target
 // pending for the next sweep to re-probe — the attempts budget bounds everything.
 func (g *companyGateway) tryMaterialize(r *IngressReceipt, td TargetDelivery) bool {
-	if !looksLikeTemplateName(td.Session) {
-		log.Printf("company: materialize skip receipt=%s session=%s: exact session_name binding (materialize would create an orphan)",
-			r.ID, td.Session)
+	targetCity, apiBase, ok := g.companyCityBase(td.City)
+	if !ok {
+		// No configured base for this city — the delivery POST already surfaces
+		// the misconfiguration definitively; nothing to materialize against.
 		return false
-	}
-	targetCity := td.City
-	if targetCity == "" {
-		targetCity = g.cfg.cityName
 	}
 	// Throttle gate: record the attempt under the lock BEFORE any work so two
 	// receipts racing the same cold session can never double-fire within a sweep
@@ -1750,15 +1746,8 @@ func (g *companyGateway) tryMaterialize(r *IngressReceipt, td TargetDelivery) bo
 	g.materializeAttempts[throttleKey] = g.now()
 	g.materializeMu.Unlock()
 
-	apiBase := g.cfg.gcAPIBase
-	if td.City != "" && td.City != g.cfg.cityName {
-		mapped, ok := g.cfg.companyCityAPIs[td.City]
-		if !ok {
-			// No configured base for this city — the delivery POST already surfaces
-			// the misconfiguration definitively; nothing to materialize against.
-			return false
-		}
-		apiBase = mapped
+	if !looksLikeTemplateName(td.Session) {
+		return g.postSessionWake(r, td, apiBase, targetCity, "materialize", &g.materializeRequests)
 	}
 
 	name := g.materializeName(apiBase, targetCity, td.Session)
@@ -1780,21 +1769,12 @@ func (g *companyGateway) tryMaterialize(r *IngressReceipt, td TargetDelivery) bo
 // throttled through the SAME per-(city,session) gate as tryMaterialize so a
 // session is never double-POSTed within one sweep interval.
 //
-// <n> reuses tryMaterialize's name discipline: the bound session when it looks
-// like a template/pool alias. When the binding instead targets an EXACT
-// session_name, materializing from the supervisor record's template field would
-// create a NEW orphan instance rather than boot the asleep one — so tryBoot
-// logs and skips, and the delivered-asleep counter (already incremented at the
-// call site) is the sole record of the still-queued case. Best-effort: any
-// transport/status outcome leaves the target delivered (advisory).
+// <n> reuses tryMaterialize's name discipline for template/pool aliases. Exact
+// named-session targets use the safe /session/{name}/wake endpoint, which wakes
+// or materializes only the configured canonical identity and cannot create an
+// adhoc worker from a stale concrete name. Best-effort: any transport/status
+// outcome leaves the target delivered (advisory).
 func (g *companyGateway) tryBoot(r *IngressReceipt, td TargetDelivery) bool {
-	if !looksLikeTemplateName(td.Session) {
-		// Exact session_name binding: booting from the record template would
-		// orphan the asleep instance. Skip rather than create a runaway session.
-		log.Printf("company: boot skip receipt=%s session=%s: exact session_name binding (materialize would orphan the asleep session)",
-			r.ID, td.Session)
-		return false
-	}
 	targetCity, apiBase, ok := g.companyCityBase(td.City)
 	if !ok {
 		// No configured base for this city — nothing to boot against.
@@ -1812,6 +1792,9 @@ func (g *companyGateway) tryBoot(r *IngressReceipt, td TargetDelivery) bool {
 	g.materializeAttempts[throttleKey] = g.now()
 	g.materializeMu.Unlock()
 
+	if !looksLikeTemplateName(td.Session) {
+		return g.postSessionWake(r, td, apiBase, targetCity, "boot", &g.bootRequests)
+	}
 	return g.postSessionCreate(r, td, apiBase, targetCity, td.Session, "boot", &g.bootRequests)
 }
 
@@ -1892,23 +1875,36 @@ func (g *companyGateway) wakeSession(r *IngressReceipt, td TargetDelivery) {
 	if !ok {
 		return
 	}
+	g.postSessionWake(r, td, apiBase, targetCity, "wake", nil)
+}
+
+// postSessionWake performs the safe named-session wake/materialization POST.
+// The supervisor resolves the path target against configured named sessions;
+// an absent stale concrete session therefore returns 404 without creating a
+// replacement from an unrelated template. Returns true iff the HTTP request
+// was attempted. counter may be nil for the ordinary pre-delivery wake.
+func (g *companyGateway) postSessionWake(r *IngressReceipt, td TargetDelivery, apiBase, targetCity, verb string, counter *atomic.Uint64) bool {
 	target := fmt.Sprintf("%s/v0/city/%s/session/%s/wake",
 		apiBase, url.PathEscape(targetCity), url.PathEscape(td.Session))
 	req, err := http.NewRequest(http.MethodPost, target, nil)
 	if err != nil {
-		return
+		return false
 	}
 	req.Header.Set("X-GC-Request", companyDeliverRequestTag)
-	req.Header.Set("Idempotency-Key", "wake:"+r.ID+":"+td.Session)
+	req.Header.Set("Idempotency-Key", verb+":"+r.ID+":"+td.Session)
+	if counter != nil {
+		counter.Add(1)
+	}
 	resp, err := g.deliverClient.Do(req)
 	if err != nil {
-		log.Printf("company: wake POST receipt=%s city=%s session=%s: %v", r.ID, targetCity, td.Session, err)
-		return
+		log.Printf("company: session wake POST verb=%s receipt=%s city=%s session=%s: %v", verb, r.ID, targetCity, td.Session, err)
+		return true
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, companyMaxErrorBodyBytesRead))
-	log.Printf("company: wake requested receipt=%s city=%s session=%s status=%d",
-		r.ID, targetCity, td.Session, resp.StatusCode)
+	log.Printf("company: session wake requested verb=%s receipt=%s city=%s session=%s status=%d",
+		verb, r.ID, targetCity, td.Session, resp.StatusCode)
+	return true
 }
 
 // sessionAsleepNow does a single best-effort GET — independent of the positive

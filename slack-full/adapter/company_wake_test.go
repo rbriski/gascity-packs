@@ -108,21 +108,23 @@ func TestDMDeliverAsleepSessionWakesThenDelivers(t *testing.T) {
 	}
 }
 
-// TestDMDeliverWakeFailureStillDelivers: a wake POST that fails (non-2xx) is
-// advisory — the message POST proceeds and the target still delivers.
+// TestDMDeliverWakeFailureStillDelivers: named-session wake POSTs that fail
+// (non-2xx) are advisory — the message POST proceeds and the target still
+// delivers. A still-asleep re-check triggers the separate boot escalation.
 func TestDMDeliverWakeFailureStillDelivers(t *testing.T) {
 	h, _, _ := setupDM(t)
 	h.gw.verifySessions = true
 
 	var mu sync.Mutex
-	var wakeCount, deliverCount int
+	var wakeIdem []string
+	var deliverCount int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case isGuardGET(r):
 			writeSessionState(w, "asleep")
 		case isWakePost(r):
 			mu.Lock()
-			wakeCount++
+			wakeIdem = append(wakeIdem, r.Header.Get("Idempotency-Key"))
 			mu.Unlock()
 			w.WriteHeader(http.StatusInternalServerError) // wake fails
 		case isDeliverPost(r):
@@ -149,8 +151,14 @@ func TestDMDeliverWakeFailureStillDelivers(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if wakeCount != 1 {
-		t.Errorf("wake POSTs = %d, want 1 (wake attempted despite failure)", wakeCount)
+	if len(wakeIdem) != 2 {
+		t.Fatalf("wake POSTs = %d, want 2 (pre-delivery wake + boot escalation): %v", len(wakeIdem), wakeIdem)
+	}
+	if want := "wake:" + r.ID + ":ollie"; wakeIdem[0] != want {
+		t.Errorf("pre-delivery wake idempotency key = %q, want %q", wakeIdem[0], want)
+	}
+	if want := "boot:" + r.ID + ":ollie"; wakeIdem[1] != want {
+		t.Errorf("boot wake idempotency key = %q, want %q", wakeIdem[1], want)
 	}
 	if deliverCount != 1 {
 		t.Errorf("delivery POSTs = %d, want 1", deliverCount)
@@ -224,7 +232,8 @@ func TestDMDeliverStillAsleepIncrementsCounter(t *testing.T) {
 	h.gw.verifySessions = true
 
 	var mu sync.Mutex
-	var getCount, wakeCount, deliverCount int
+	var getCount, deliverCount int
+	var wakeIdem []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case isGuardGET(r):
@@ -234,7 +243,7 @@ func TestDMDeliverStillAsleepIncrementsCounter(t *testing.T) {
 			writeSessionState(w, "drained") // never clears — wake did not take
 		case isWakePost(r):
 			mu.Lock()
-			wakeCount++
+			wakeIdem = append(wakeIdem, r.Header.Get("Idempotency-Key"))
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
 		case isDeliverPost(r):
@@ -261,8 +270,14 @@ func TestDMDeliverStillAsleepIncrementsCounter(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if wakeCount != 1 {
-		t.Errorf("wake POSTs = %d, want 1", wakeCount)
+	if len(wakeIdem) != 2 {
+		t.Fatalf("wake POSTs = %d, want 2 (pre-delivery wake + boot escalation): %v", len(wakeIdem), wakeIdem)
+	}
+	if want := "wake:" + r.ID + ":ollie"; wakeIdem[0] != want {
+		t.Errorf("pre-delivery wake idempotency key = %q, want %q", wakeIdem[0], want)
+	}
+	if want := "boot:" + r.ID + ":ollie"; wakeIdem[1] != want {
+		t.Errorf("boot wake idempotency key = %q, want %q", wakeIdem[1], want)
 	}
 	if deliverCount != 1 {
 		t.Errorf("delivery POSTs = %d, want 1", deliverCount)

@@ -960,13 +960,13 @@ func TestMpimRedriveReprobesStillNotMember(t *testing.T) {
 
 func TestMpimSessionGuardHoldsThenProceeds(t *testing.T) {
 	// The advisory session-existence guard applies to mpim targets (dm-family):
-	// a 404 session leaves the target pending/session_missing without posting, and
-	// the target delivers once the session materializes.
+	// a 404 session leaves the target pending/materializing without a delivery
+	// POST, and the target delivers once the session materializes.
 	h, _, _, _ := setupMpim(t)
 	h.gw.verifySessions = true
 	var missing atomic.Bool
 	missing.Store(true)
-	var posts atomic.Int64
+	var deliveryPosts atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && !strings.HasSuffix(r.URL.Path, "/messages") {
 			if missing.Load() {
@@ -976,7 +976,9 @@ func TestMpimSessionGuardHoldsThenProceeds(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		posts.Add(1)
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/messages") {
+			deliveryPosts.Add(1)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -993,15 +995,15 @@ func TestMpimSessionGuardHoldsThenProceeds(t *testing.T) {
 	if r.Status != ingressStatusRouting {
 		t.Fatalf("status = %q, want routing (guard held, not terminal)", r.Status)
 	}
-	if posts.Load() != 0 {
-		t.Fatalf("guard did not prevent the POST: posts=%d", posts.Load())
+	if deliveryPosts.Load() != 0 {
+		t.Fatalf("guard did not prevent the delivery POST: posts=%d", deliveryPosts.Load())
 	}
 	var detail string
 	for _, td := range r.Targets {
 		detail = td.Detail
 	}
-	if detail != companyDetailSessionMissing {
-		t.Fatalf("target detail = %q, want session_missing", detail)
+	if detail != companyDetailMaterializing {
+		t.Fatalf("target detail = %q, want materializing", detail)
 	}
 
 	missing.Store(false)
@@ -1011,8 +1013,8 @@ func TestMpimSessionGuardHoldsThenProceeds(t *testing.T) {
 	if r.Status != ingressStatusDelivered {
 		t.Fatalf("status after materialize = %q, want delivered", r.Status)
 	}
-	if posts.Load() != 1 {
-		t.Errorf("delivery posts = %d, want 1", posts.Load())
+	if deliveryPosts.Load() != 1 {
+		t.Errorf("delivery posts = %d, want 1", deliveryPosts.Load())
 	}
 }
 

@@ -721,10 +721,10 @@ func TestDMSessionGuardHoldsThenProceeds(t *testing.T) {
 	h.gw.verifySessions = true
 
 	// A custom gc: 404 on the session-existence GET while missing.Load()==true,
-	// 200 once the session materializes; 200 on the delivery POST.
+	// 200 once the session materializes; 200 on wake and delivery POSTs.
 	var sessionMissing atomic.Bool
 	sessionMissing.Store(true)
-	var posts atomic.Int64
+	var deliveryPosts atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && !strings.HasSuffix(r.URL.Path, "/messages") {
 			if sessionMissing.Load() {
@@ -734,7 +734,9 @@ func TestDMSessionGuardHoldsThenProceeds(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		posts.Add(1)
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/messages") {
+			deliveryPosts.Add(1)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -750,16 +752,16 @@ func TestDMSessionGuardHoldsThenProceeds(t *testing.T) {
 	if r.Status != ingressStatusRouting {
 		t.Fatalf("status = %q, want routing (guard held, not terminal)", r.Status)
 	}
-	if posts.Load() != 0 {
-		t.Fatalf("guard did not prevent the POST: posts=%d", posts.Load())
+	if deliveryPosts.Load() != 0 {
+		t.Fatalf("guard did not prevent the delivery POST: posts=%d", deliveryPosts.Load())
 	}
 	var detail string
 	var attempts int
 	for _, td := range r.Targets {
 		detail, attempts = td.Detail, td.Attempts
 	}
-	if detail != companyDetailSessionMissing || attempts < 1 {
-		t.Fatalf("target detail/attempts = %q/%d, want session_missing/>=1", detail, attempts)
+	if detail != companyDetailMaterializing || attempts < 1 {
+		t.Fatalf("target detail/attempts = %q/%d, want materializing/>=1", detail, attempts)
 	}
 
 	// Session materializes; a re-drive re-checks (negatives are not cached: the
@@ -771,8 +773,8 @@ func TestDMSessionGuardHoldsThenProceeds(t *testing.T) {
 	if r.Status != ingressStatusDelivered {
 		t.Fatalf("status after materialize = %q, want delivered", r.Status)
 	}
-	if posts.Load() != 1 {
-		t.Errorf("delivery posts = %d, want 1", posts.Load())
+	if deliveryPosts.Load() != 1 {
+		t.Errorf("delivery posts = %d, want 1", deliveryPosts.Load())
 	}
 }
 

@@ -246,27 +246,100 @@ func TestCompanyColdPoolMaterializesThenDelivers(t *testing.T) {
 	}
 }
 
-// TestCompanyExactSessionMissingDoesNotMaterializeTemplate reproduces the
-// Tessa outage: an exact session_name binding has vanished, but its supervisor
-// record still names the template it was minted from. Creating that template
-// would produce a new adhoc instance without repairing the exact binding, so
-// self-heal must leave the target pending for a rebind instead of creating an
-// orphan session.
-func TestCompanyExactSessionMissingDoesNotMaterializeTemplate(t *testing.T) {
+// TestCompanyColdNamedSessionWakesThenDelivers proves a cold configured named
+// session uses the supervisor's safe wake/materialization endpoint. Unlike a
+// POST /sessions template create, POST /session/{name}/wake can materialize the
+// canonical named-session identity without minting an unrelated adhoc worker.
+func TestCompanyColdNamedSessionWakesThenDelivers(t *testing.T) {
+	h, _, _ := setupDM(t)
+	h.gw.verifySessions = true
+
+	var mu sync.Mutex
+	var live bool
+	var wakePaths, wakeIdem, deliverPaths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		switch {
+		case isGuardGET(r):
+			mu.Lock()
+			l := live
+			mu.Unlock()
+			if l {
+				writeSessionState(w, "active")
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+			}
+		case isWakePost(r):
+			mu.Lock()
+			wakePaths = append(wakePaths, p)
+			wakeIdem = append(wakeIdem, r.Header.Get("Idempotency-Key"))
+			live = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && strings.HasSuffix(p, "/messages"):
+			mu.Lock()
+			deliverPaths = append(deliverPaths, p)
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+	h.gw.cfg.gcAPIBase = srv.URL
+
+	ts := "1700000000.010150"
+	if _, handled := admitDMViaHandler(t, h, dmMessage("U0HUMAN01", ts, "hi"), ollieAppID, 0); !handled {
+		t.Fatal("not handled")
+	}
+	h.wait()
+	r := getReceipt(t, h, ts)
+	if r.Status != ingressStatusRouting {
+		t.Fatalf("pass 1 status = %q, want routing (waking named session)", r.Status)
+	}
+
+	h.gw.triggerDelivery(dmOrigin(ts))
+	h.wait()
+	r = getReceipt(t, h, ts)
+	if r.Status != ingressStatusDelivered {
+		t.Fatalf("pass 2 status = %q, want delivered", r.Status)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(wakePaths) != 1 || !strings.HasSuffix(wakePaths[0], "/session/ollie/wake") {
+		t.Fatalf("wake paths = %v, want one canonical named-session wake", wakePaths)
+	}
+	if want := "materialize:" + r.ID + ":ollie"; len(wakeIdem) != 1 || wakeIdem[0] != want {
+		t.Fatalf("wake idempotency keys = %v, want [%s]", wakeIdem, want)
+	}
+	if len(deliverPaths) != 1 || !strings.Contains(deliverPaths[0], "/session/ollie/messages") {
+		t.Fatalf("delivery paths = %v, want a single ollie delivery", deliverPaths)
+	}
+	if got := h.gw.materializeRequests.Load(); got != 1 {
+		t.Fatalf("company_materialize_requests = %d, want 1", got)
+	}
+}
+
+// TestCompanyExactSessionMissingUsesSafeWakeWithoutTemplateOrphan reproduces
+// the Tessa outage: an exact session_name binding has vanished. Self-heal may
+// probe the safe named-session wake endpoint (which returns 404 here), but it
+// must never POST the former template to /sessions and create an orphan.
+func TestCompanyExactSessionMissingUsesSafeWakeWithoutTemplateOrphan(t *testing.T) {
 	h, _, _ := setupDM(t)
 
 	var mu sync.Mutex
-	getCount, materializeCount := 0, 0
+	wakeCount, sessionCreateCount := 0, 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet:
+		case isWakePost(r):
 			mu.Lock()
-			getCount++
+			wakeCount++
 			mu.Unlock()
-			_ = json.NewEncoder(w).Encode(companySessionRecord{Template: "teams.lead"})
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sessions"):
 			mu.Lock()
-			materializeCount++
+			sessionCreateCount++
 			mu.Unlock()
 			w.WriteHeader(http.StatusAccepted)
 		default:
@@ -278,20 +351,20 @@ func TestCompanyExactSessionMissingDoesNotMaterializeTemplate(t *testing.T) {
 
 	r := &IngressReceipt{ID: "in-exact-session"}
 	td := TargetDelivery{Session: "s-tr-wisp-q9j91"}
-	if h.gw.tryMaterialize(r, td) {
-		t.Fatal("tryMaterialize fired for an exact session_name binding")
+	if !h.gw.tryMaterialize(r, td) {
+		t.Fatal("tryMaterialize did not probe the safe named-session wake endpoint")
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if getCount != 0 {
-		t.Errorf("supervisor template lookups = %d, want 0 for exact session_name", getCount)
+	if wakeCount != 1 {
+		t.Errorf("named-session wake POSTs = %d, want 1", wakeCount)
 	}
-	if materializeCount != 0 {
-		t.Errorf("materialize POSTs = %d, want 0 (would create an orphan)", materializeCount)
+	if sessionCreateCount != 0 {
+		t.Errorf("session-create POSTs = %d, want 0 (would create an orphan)", sessionCreateCount)
 	}
-	if got := h.gw.materializeRequests.Load(); got != 0 {
-		t.Errorf("company_materialize_requests = %d, want 0", got)
+	if got := h.gw.materializeRequests.Load(); got != 1 {
+		t.Errorf("company_materialize_requests = %d, want 1", got)
 	}
 }
 

@@ -178,27 +178,26 @@ func TestBootThrottleSharedWithMaterialize(t *testing.T) {
 	}
 }
 
-// TestBootEscalationExactNameBindingSkips — a still-asleep session bound to an
-// EXACT session_name (not a template/pool alias) is logged and skipped: no boot
-// POST fires (materializing from the record template would orphan the asleep
-// instance), but the delivered-asleep counter still records the still-queued
-// case.
-func TestBootEscalationExactNameBindingSkips(t *testing.T) {
+// TestBootEscalationExactNameBindingUsesNamedWake proves a still-asleep exact
+// named-session target receives a second, boot-keyed wake request instead of a
+// template create. The first wake is the ordinary pre-delivery wake; the second
+// is the post-delivery escalation after the session still reports drained.
+func TestBootEscalationExactNameBindingUsesNamedWake(t *testing.T) {
 	h, _, _ := setupDM(t)
 	h.gw.verifySessions = true
 	// setupDM's default binding is ollie → "ollie" (exact session_name).
 
 	var mu sync.Mutex
-	bootCount := 0
+	var wakeIdem []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case isGuardGET(r):
 			writeSessionState(w, "drained")
-		case isSessionsPost(r):
+		case isWakePost(r):
 			mu.Lock()
-			bootCount++
+			wakeIdem = append(wakeIdem, r.Header.Get("Idempotency-Key"))
 			mu.Unlock()
-			w.WriteHeader(http.StatusAccepted)
+			w.WriteHeader(http.StatusOK)
 		default:
 			w.WriteHeader(http.StatusOK)
 		}
@@ -218,11 +217,17 @@ func TestBootEscalationExactNameBindingSkips(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if bootCount != 0 {
-		t.Errorf("boot POSTs = %d, want 0 (exact session_name skipped)", bootCount)
+	if len(wakeIdem) != 2 {
+		t.Fatalf("wake POSTs = %d, want 2 (pre-delivery wake + boot escalation): %v", len(wakeIdem), wakeIdem)
 	}
-	if got := h.gw.bootRequests.Load(); got != 0 {
-		t.Errorf("company_boot_requests = %d, want 0", got)
+	if want := "wake:" + r.ID + ":ollie"; wakeIdem[0] != want {
+		t.Errorf("pre-delivery wake idempotency key = %q, want %q", wakeIdem[0], want)
+	}
+	if want := "boot:" + r.ID + ":ollie"; wakeIdem[1] != want {
+		t.Errorf("boot wake idempotency key = %q, want %q", wakeIdem[1], want)
+	}
+	if got := h.gw.bootRequests.Load(); got != 1 {
+		t.Errorf("company_boot_requests = %d, want 1", got)
 	}
 	if got := h.gw.deliveredAsleep.Load(); got != 1 {
 		t.Errorf("company_delivered_asleep = %d, want 1 (still-asleep recorded)", got)
