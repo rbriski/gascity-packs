@@ -4,10 +4,10 @@
 Python owns company *outbound* (the Discord ownership split): posting
 intents, per-agent token files, ``chat.postMessage``, delegation-record
 creation, receipt-based lazy recovery, and pruning. Go owns ingress
-(author resolution, trust, result-claim/expiry transitions, the
-current-turn pointer). Both sides share on-disk state under the adapter
-state root, serialized by the lock contract and validated fail-closed on
-both sides.
+(author resolution, trust, result-claim/expiry transitions, the mutable
+current-turn pointer, and immutable by-reference turn records). Both sides
+share on-disk state under the adapter state root, serialized by the lock
+contract and validated fail-closed on both sides.
 
 This module is a library: the ``gc slack delegate`` verb
 (``cmd_delegate``/``cmd_cancel``) and ``reply-current``'s company-context
@@ -630,6 +630,7 @@ _TURN_KINDS = frozenset({
 # The direct-message family (per-agent DM + group DM) shares the empty-room
 # relaxation, the required owner_app_id, and the dm_bindings spoof guard.
 _DM_FAMILY_KINDS = frozenset({"dm", "mpim"})
+_TURN_REF_RE = re.compile(r"^gct-[0-9a-f]{20}$")
 
 _INTENT_STR_FIELDS = (
     "nonce", "status", "created_at", "updated_at", "retry_deadline",
@@ -753,6 +754,15 @@ def parse_current_turn(data: dict[str, Any]) -> dict[str, Any]:
     # root without a record.
     if kind in ("peer_delegation", "peer_result"):
         _require_str(data, "delegation_key", ctx)
+    # ``turn_ref`` is additive so pre-immutable mutable pointers remain
+    # readable during rollout.  Immutable records require it at their reader
+    # boundary below; when present anywhere it must use the opaque, filename-
+    # safe format minted by the Go delivery worker.
+    turn_ref = data.setdefault("turn_ref", "")
+    if not isinstance(turn_ref, str):
+        raise OutboundError("current_turn turn_ref must be a string")
+    if turn_ref and _TURN_REF_RE.fullmatch(turn_ref) is None:
+        raise OutboundError(f"current_turn turn_ref invalid: {turn_ref!r}")
     return data
 
 
@@ -1577,6 +1587,33 @@ def read_current_turn_mpim(session: str) -> dict[str, Any] | None:
     return None
 
 
+def read_turn_ref(session: str, turn_ref: str) -> dict[str, Any] | None:
+    """Read one immutable delivery record by its opaque turn reference.
+
+    The record lives outside all mutable room/DM pointer namespaces, so a
+    later wake cannot change the channel or thread selected by this lookup.
+    ``session`` is checked here (and again by the verb spoof guards) so a turn
+    reference copied from another agent session cannot be used to act as it.
+    """
+    if _TURN_REF_RE.fullmatch(turn_ref or "") is None:
+        raise OutboundError(
+            f"--turn-ref must match gct- followed by 20 lowercase hex digits, "
+            f"got {turn_ref!r}")
+    data = _read_json(turns_dir() / "by-ref" / f"{turn_ref}.json")
+    if data is None:
+        return None
+    turn = parse_current_turn(data)
+    if turn.get("turn_ref") != turn_ref:
+        raise OutboundError(
+            f"immutable turn record {turn_ref!r} contains mismatched "
+            f"turn_ref {turn.get('turn_ref')!r}")
+    if turn["session"] not in session_name_aliases(session):
+        raise OutboundError(
+            f"immutable turn {turn_ref!r} belongs to session "
+            f"{turn['session']!r}, not GC_SESSION_NAME {session!r} (spoof guard)")
+    return turn
+
+
 # Reply-pointer source priority for tie-breaking newest-wins: the more private /
 # more specific surface wins a delivered_at tie, so a reply is never auto-routed
 # from a private turn into a public room (nor from a 1:1 DM into a group) — an
@@ -1585,7 +1622,7 @@ _POINTER_SOURCE_PRIORITY = {"dm": 3, "mpim": 2, "room": 1}
 
 
 def resolve_reply_pointer_source(
-    session: str, *, kind_override: str = "",
+    session: str, *, kind_override: str = "", turn_ref: str = "",
 ) -> str | None:
     """Decide whether ``reply-current`` acts on the room, DM, or mpim pointer.
 
@@ -1598,6 +1635,22 @@ def resolve_reply_pointer_source(
     into a public room, nor a 1:1 reply into a group, when they are just as
     current; an operator disambiguates with ``--kind``.
     """
+    if turn_ref:
+        turn = read_turn_ref(session, turn_ref)
+        if turn is None:
+            raise OutboundError(
+                f"no immutable company turn record for --turn-ref {turn_ref!r}")
+        source = (
+            "dm" if turn["kind"] == "dm" else
+            "mpim" if turn["kind"] == "mpim" else
+            "room"
+        )
+        if kind_override and kind_override != source:
+            raise OutboundError(
+                f"--kind {kind_override!r} does not match --turn-ref "
+                f"{turn_ref!r} surface {source!r}")
+        return source
+
     present: dict[str, dict[str, Any]] = {}
     for src, reader in (
         ("room", read_current_turn),
@@ -1680,8 +1733,40 @@ def _check_turn_identity(turn: dict[str, Any], session_name: str, origin_ts: str
             f"GC_SESSION_NAME {session_name!r} (spoof guard)")
 
 
-def _verify_pointer(session_name: str, origin_ts: str) -> dict[str, Any]:
+def _verify_turn_ref(
+    session_name: str, origin_ts: str, turn_ref: str,
+) -> dict[str, Any]:
+    if not session_name:
+        raise OutboundError(
+            "GC_SESSION_NAME is not set; company verbs need the bound session name")
+    turn = read_turn_ref(session_name, turn_ref)
+    if turn is None:
+        raise OutboundError(
+            f"no immutable company turn record for --turn-ref {turn_ref!r}; "
+            "the turn may have expired")
+    _check_turn_identity(turn, session_name, origin_ts)
+    return turn
+
+
+def _require_turn_ref_for_new_pointer(turn: dict[str, Any]) -> None:
+    """Fail closed instead of silently using a mutable post-rollout pointer."""
+    turn_ref = turn.get("turn_ref") or ""
+    if turn_ref:
+        raise OutboundError(
+            "this company turn has immutable routing context; pass "
+            f"--turn-ref {turn_ref} exactly as shown in the Slack reminder")
+
+
+def _verify_pointer(
+    session_name: str, origin_ts: str, turn_ref: str = "",
+) -> dict[str, Any]:
     """Load + anti-spoof the room current-turn pointer for this session."""
+    if turn_ref:
+        turn = _verify_turn_ref(session_name, origin_ts, turn_ref)
+        if turn["kind"] in _DM_FAMILY_KINDS:
+            raise OutboundError(
+                f"--turn-ref {turn_ref!r} is a {turn['kind']} turn, not a room turn")
+        return turn
     if not session_name:
         raise OutboundError(
             "GC_SESSION_NAME is not set; company verbs need the bound session name")
@@ -1690,12 +1775,21 @@ def _verify_pointer(session_name: str, origin_ts: str) -> dict[str, Any]:
         raise OutboundError(
             f"no company current-turn pointer for session {session_name!r}; "
             "this session has no active company turn")
+    _require_turn_ref_for_new_pointer(turn)
     _check_turn_identity(turn, session_name, origin_ts)
     return turn
 
 
-def _verify_pointer_dm(session_name: str, origin_ts: str) -> dict[str, Any]:
+def _verify_pointer_dm(
+    session_name: str, origin_ts: str, turn_ref: str = "",
+) -> dict[str, Any]:
     """Load + anti-spoof the DM current-turn pointer (``dm/<session>.json``)."""
+    if turn_ref:
+        turn = _verify_turn_ref(session_name, origin_ts, turn_ref)
+        if turn["kind"] != "dm":
+            raise OutboundError(
+                f"--turn-ref {turn_ref!r} has kind {turn['kind']!r}, not 'dm'")
+        return turn
     if not session_name:
         raise OutboundError(
             "GC_SESSION_NAME is not set; company verbs need the bound session name")
@@ -1708,12 +1802,21 @@ def _verify_pointer_dm(session_name: str, origin_ts: str) -> dict[str, Any]:
         raise OutboundError(
             f"DM pointer for session {session_name!r} has kind {turn['kind']!r}, "
             "not 'dm'")
+    _require_turn_ref_for_new_pointer(turn)
     _check_turn_identity(turn, session_name, origin_ts)
     return turn
 
 
-def _verify_pointer_mpim(session_name: str, origin_ts: str) -> dict[str, Any]:
+def _verify_pointer_mpim(
+    session_name: str, origin_ts: str, turn_ref: str = "",
+) -> dict[str, Any]:
     """Load + anti-spoof the group-DM current-turn pointer (``mpim/<session>.json``)."""
+    if turn_ref:
+        turn = _verify_turn_ref(session_name, origin_ts, turn_ref)
+        if turn["kind"] != "mpim":
+            raise OutboundError(
+                f"--turn-ref {turn_ref!r} has kind {turn['kind']!r}, not 'mpim'")
+        return turn
     if not session_name:
         raise OutboundError(
             "GC_SESSION_NAME is not set; company verbs need the bound session name")
@@ -1726,6 +1829,7 @@ def _verify_pointer_mpim(session_name: str, origin_ts: str) -> dict[str, Any]:
         raise OutboundError(
             f"mpim pointer for session {session_name!r} has kind {turn['kind']!r}, "
             "not 'mpim'")
+    _require_turn_ref_for_new_pointer(turn)
     _check_turn_identity(turn, session_name, origin_ts)
     return turn
 
@@ -1733,13 +1837,20 @@ def _verify_pointer_mpim(session_name: str, origin_ts: str) -> dict[str, Any]:
 def _verify_binding(rooms, bindings, turn: dict[str, Any], session_name: str) -> None:
     room = turn["room"]
     agent = turn["agent"]
+    if room not in rooms:
+        raise OutboundError(f"room {room!r} is not in the company directory")
     bound = _session_for_binding(bindings, room, agent)
     if bound not in session_name_aliases(session_name):
         raise OutboundError(
             f"(room={room}, agent={agent}) is not bound to session "
             f"{session_name!r} (bound to {bound!r}); refusing to act (spoof guard)")
-    if room not in rooms:
-        raise OutboundError(f"room {room!r} is not in the company directory")
+    room_rec = rooms[room]
+    expected_route = (room_rec.get("team_id"), room_rec.get("channel_id"))
+    actual_route = (turn.get("team_id"), turn.get("channel_id"))
+    if actual_route != expected_route:
+        raise OutboundError(
+            f"turn route team/channel {actual_route!r} does not match room "
+            f"{room!r} directory route {expected_route!r} (spoof guard)")
 
 
 def _load_dm_context():
@@ -1780,7 +1891,10 @@ def _verify_dm_binding(dm_bindings, turn: dict[str, Any], session_name: str) -> 
 
 # --- verb: delegate --------------------------------------------------------
 
-def run_delegate(*, to: str, body: str, origin_ts: str, session_name: str) -> dict[str, Any]:
+def run_delegate(
+    *, to: str, body: str, origin_ts: str, session_name: str,
+    turn_ref: str = "",
+) -> dict[str, Any]:
     """Post ``<@to> body`` into the human root's thread as the acting agent.
 
     Durably persists a posting intent before the POST, enforces one pending
@@ -1795,7 +1909,7 @@ def run_delegate(*, to: str, body: str, origin_ts: str, session_name: str) -> di
     reconcile_posting_intents()
     prune()
 
-    turn = _verify_pointer(session_name, origin_ts)
+    turn = _verify_pointer(session_name, origin_ts, turn_ref)
     # A dm-family-rooted turn (dm/mpim) carries no delegation authority (spec
     # §Kind-dispatch inventory: "delegation human-root gate | dm-family refused").
     # The room pointer this verb reads is a distinct file from the dm/ and mpim/
@@ -1850,10 +1964,12 @@ def run_delegate(*, to: str, body: str, origin_ts: str, session_name: str) -> di
         pending = find_pending_delegation(team, channel, human_root_ts, responder_bot, requester_bot)
         if pending is not None:
             _, rec = pending
+            turn_flag = f" --turn-ref {turn_ref}" if turn_ref else ""
             raise OutboundError(
                 f"a pending delegation to {to!r} already exists for this thread "
                 f"(record {delegation_filename(team, channel, rec['ts'])}); "
-                "await its result or `gc slack delegate --cancel --to " + to + "`")
+                f"await its result or `gc slack delegate{turn_flag} "
+                f"--cancel --to {to}`")
 
         tuple8 = (
             src["app_id"], requester_bot, to, responder_bot,
@@ -1934,12 +2050,14 @@ def _delegate_report(status: str, intent: dict[str, Any], team: str, channel: st
 
 # --- verb: delegate --cancel ----------------------------------------------
 
-def run_cancel(*, to: str, origin_ts: str, session_name: str) -> dict[str, Any]:
+def run_cancel(
+    *, to: str, origin_ts: str, session_name: str, turn_ref: str = "",
+) -> dict[str, Any]:
     """Transition the caller's own pending delegation for the tuple to ``expired``."""
     reconcile_posting_intents()
     prune()
 
-    turn = _verify_pointer(session_name, origin_ts)
+    turn = _verify_pointer(session_name, origin_ts, turn_ref)
     agents, rooms, bindings = _load_context()
     _verify_binding(rooms, bindings, turn, session_name)
 
@@ -2088,7 +2206,9 @@ def _company_post_report(
     return report
 
 
-def post_peer_result(*, body: str, origin_ts: str, session_name: str) -> dict[str, Any]:
+def post_peer_result(
+    *, body: str, origin_ts: str, session_name: str, turn_ref: str = "",
+) -> dict[str, Any]:
     """Post a delegation result into the human root's thread (responder → requester).
 
     The acting agent is the delegation's expected responder; the result posts
@@ -2102,7 +2222,7 @@ def post_peer_result(*, body: str, origin_ts: str, session_name: str) -> dict[st
     reconcile_posting_intents()
     prune()
 
-    turn = _verify_pointer(session_name, origin_ts)
+    turn = _verify_pointer(session_name, origin_ts, turn_ref)
     if turn["kind"] != "peer_delegation":
         raise OutboundError(f"current turn kind is {turn['kind']!r}, not peer_delegation")
     agents, rooms, bindings = _load_context()
@@ -2181,6 +2301,8 @@ def _synthesis_gate(turn: dict[str, Any], *, allow_partial: bool) -> dict[str, A
         f"  - {pd['expected_responder_agent']} (delegation_ts {pd['delegation_ts']})"
         for pd in state["pending_delegations"]
     )
+    turn_ref = turn.get("turn_ref") or ""
+    turn_flag = f" --turn-ref {turn_ref}" if turn_ref else ""
     raise OutboundError(
         "synthesis is not ready: "
         f"{state['responded_delegation_count']} of "
@@ -2188,13 +2310,14 @@ def _synthesis_gate(turn: dict[str, Any], *, allow_partial: bool) -> dict[str, A
         "delegations have durably claimed a result. Still pending:\n"
         f"{pending_lines}\n"
         "remedies: wait for the remaining sibling result wake, or "
-        "`gc slack delegate --cancel --to <agent>` for a dead sibling "
+        f"`gc slack delegate{turn_flag} --cancel --to <agent>` for a dead sibling "
         "(expires it out of the compatible set, so the next claim freezes "
         "ready); or pass --allow-partial to synthesize the partial set now.")
 
 
 def post_peer_synthesis(
     *, body: str, origin_ts: str, session_name: str, allow_partial: bool = False,
+    turn_ref: str = "",
 ) -> dict[str, Any]:
     """Post a synthesis into the human root thread with no live agent mentions.
 
@@ -2211,7 +2334,7 @@ def post_peer_synthesis(
     reconcile_posting_intents()
     prune()
 
-    turn = _verify_pointer(session_name, origin_ts)
+    turn = _verify_pointer(session_name, origin_ts, turn_ref)
     if turn["kind"] != "peer_result":
         raise OutboundError(f"current turn kind is {turn['kind']!r}, not peer_result")
     agents, rooms, bindings = _load_context()
@@ -2242,7 +2365,9 @@ def post_peer_synthesis(
     return report
 
 
-def post_company_root_reply(*, body: str, origin_ts: str, session_name: str) -> dict[str, Any]:
+def post_company_root_reply(
+    *, body: str, origin_ts: str, session_name: str, turn_ref: str = "",
+) -> dict[str, Any]:
     """Post an ordinary reply into the company room's thread root.
 
     For ambient/thread_ambient/targeted/peer_input turns (a human message or an
@@ -2256,7 +2381,7 @@ def post_company_root_reply(*, body: str, origin_ts: str, session_name: str) -> 
     reconcile_posting_intents()
     prune()
 
-    turn = _verify_pointer(session_name, origin_ts)
+    turn = _verify_pointer(session_name, origin_ts, turn_ref)
     if turn["kind"] not in ("ambient", "thread_ambient", "targeted", "peer_input"):
         raise OutboundError(
             f"current turn kind is {turn['kind']!r}, not a room-reply kind")
@@ -2327,7 +2452,9 @@ def _post_dm_family_reply(
     return _company_post_report(intent, outcome, kind=report_kind)
 
 
-def post_company_dm_reply(*, body: str, origin_ts: str, session_name: str) -> dict[str, Any]:
+def post_company_dm_reply(
+    *, body: str, origin_ts: str, session_name: str, turn_ref: str = "",
+) -> dict[str, Any]:
     """Post a per-agent DM reply into the DM channel as the owner agent.
 
     The acting/owner agent is the DM pointer's ``agent``; see
@@ -2338,12 +2465,14 @@ def post_company_dm_reply(*, body: str, origin_ts: str, session_name: str) -> di
     reconcile_posting_intents()
     prune()
 
-    turn = _verify_pointer_dm(session_name, origin_ts)
+    turn = _verify_pointer_dm(session_name, origin_ts, turn_ref)
     return _post_dm_family_reply(
         turn, body=body, session_name=session_name, report_kind="dm")
 
 
-def post_company_mpim_reply(*, body: str, origin_ts: str, session_name: str) -> dict[str, Any]:
+def post_company_mpim_reply(
+    *, body: str, origin_ts: str, session_name: str, turn_ref: str = "",
+) -> dict[str, Any]:
     """Post a group-DM (mpim) reply into the mpim channel as the woken agent.
 
     The acting agent is the mpim pointer's ``agent`` (the WOKEN agent for this
@@ -2359,7 +2488,7 @@ def post_company_mpim_reply(*, body: str, origin_ts: str, session_name: str) -> 
     reconcile_posting_intents()
     prune()
 
-    turn = _verify_pointer_mpim(session_name, origin_ts)
+    turn = _verify_pointer_mpim(session_name, origin_ts, turn_ref)
     return _post_dm_family_reply(
         turn, body=body, session_name=session_name, report_kind="mpim")
 
@@ -2389,15 +2518,20 @@ def cmd_delegate(argv: list[str]) -> int:
                         help="Expire the caller's own pending delegation to --to")
     parser.add_argument("--origin-ts", default="",
                         help="Pin a specific turn ts when a newer wake overwrote the pointer")
+    parser.add_argument("--turn-ref", default="",
+                        help="Immutable turn reference from the Slack reminder")
     args = parser.parse_args(argv)
 
     session_name = os.environ.get("GC_SESSION_NAME", "").strip()
     if args.cancel:
-        result = run_cancel(to=args.to, origin_ts=args.origin_ts, session_name=session_name)
+        result = run_cancel(
+            to=args.to, origin_ts=args.origin_ts, session_name=session_name,
+            turn_ref=args.turn_ref)
     else:
         body = _load_body_arg(args.body, args.body_file)
         result = run_delegate(
-            to=args.to, body=body, origin_ts=args.origin_ts, session_name=session_name)
+            to=args.to, body=body, origin_ts=args.origin_ts,
+            session_name=session_name, turn_ref=args.turn_ref)
     print(json.dumps(result, indent=2, sort_keys=True))
     if result.get("status") == "parked":
         print(

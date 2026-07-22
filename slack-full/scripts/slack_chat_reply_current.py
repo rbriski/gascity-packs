@@ -135,6 +135,10 @@ def _maybe_company_reply(args: argparse.Namespace) -> int | None:
     """
     session_name = os.environ.get("GC_SESSION_NAME", "").strip()
     if not session_name:
+        if (getattr(args, "turn_ref", "") or "").strip():
+            raise SystemExit(
+                "--turn-ref requires GC_SESSION_NAME so the immutable company "
+                "turn can be verified against its bound agent session")
         return None
     try:
         import slack_company_outbound as outbound  # type: ignore
@@ -146,31 +150,38 @@ def _maybe_company_reply(args: argparse.Namespace) -> int | None:
     # left to the legacy conversation-kind path.
     kind_override = args.kind if args.kind in ("room", "dm", "mpim") else ""
     origin_ts = (getattr(args, "origin_ts", "") or "").strip()
+    turn_ref = (getattr(args, "turn_ref", "") or "").strip()
     try:
         source = outbound.resolve_reply_pointer_source(
-            session_name, kind_override=kind_override)
+            session_name, kind_override=kind_override, turn_ref=turn_ref)
         if source is None:
             return None  # no company pointer — fall through to the legacy path
         body = _load_body(args)
         if source == "dm":
             result = outbound.post_company_dm_reply(
-                body=body, origin_ts=origin_ts, session_name=session_name)
+                body=body, origin_ts=origin_ts, session_name=session_name,
+                turn_ref=turn_ref)
         elif source == "mpim":
             result = outbound.post_company_mpim_reply(
-                body=body, origin_ts=origin_ts, session_name=session_name)
+                body=body, origin_ts=origin_ts, session_name=session_name,
+                turn_ref=turn_ref)
         else:
-            turn = outbound.read_current_turn(session_name)
+            turn = (outbound.read_turn_ref(session_name, turn_ref)
+                    if turn_ref else outbound.read_current_turn(session_name))
             kind = turn.get("kind") if turn is not None else None
             if kind == "peer_delegation":
                 result = outbound.post_peer_result(
-                    body=body, origin_ts=origin_ts, session_name=session_name)
+                    body=body, origin_ts=origin_ts, session_name=session_name,
+                    turn_ref=turn_ref)
             elif kind == "peer_result":
                 result = outbound.post_peer_synthesis(
                     body=body, origin_ts=origin_ts, session_name=session_name,
-                    allow_partial=bool(getattr(args, "allow_partial", False)))
+                    allow_partial=bool(getattr(args, "allow_partial", False)),
+                    turn_ref=turn_ref)
             else:  # ambient / thread_ambient / targeted / peer_input → root reply
                 result = outbound.post_company_root_reply(
-                    body=body, origin_ts=origin_ts, session_name=session_name)
+                    body=body, origin_ts=origin_ts, session_name=session_name,
+                    turn_ref=turn_ref)
     except (outbound.OutboundError, outbound.TransientPostError,
             outbound.DefinitivePostError) as exc:
         raise SystemExit(f"company reply failed: {exc}") from exc
@@ -198,6 +209,11 @@ def main(argv: list[str]) -> int:
         "--origin-ts", default="",
         help=("Company rooms: pin a specific turn ts when a newer wake has "
               "overwritten the current-turn pointer (mismatch is a hard error)."))
+    parser.add_argument(
+        "--turn-ref", default="",
+        help=("Company messages: immutable turn reference from the authenticated "
+              "Slack reminder. Selects that exact channel/thread even when a "
+              "newer message woke the same session."))
     parser.add_argument(
         "--allow-partial", action="store_true",
         help=("Company rooms: on a peer_result (synthesis) turn, synthesize the "

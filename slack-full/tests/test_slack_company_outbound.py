@@ -159,6 +159,17 @@ def test_parsers_accept_golden_fixtures() -> None:
         turn["team_id"], turn["channel_id"], turn["ts"])
 
 
+@pytest.mark.parametrize("turn_ref", [
+    "../current", "gct-short", "gct-AAAAAAAAAAAAAAAAAAAA",
+    "gct-0000000000000000000g",
+])
+def test_read_turn_ref_rejects_noncanonical_input(turn_ref: str) -> None:
+    mod = _mod()
+    with pytest.raises(mod.OutboundError) as exc:
+        mod.read_turn_ref("riley-main", turn_ref)
+    assert "--turn-ref" in str(exc.value)
+
+
 @pytest.mark.parametrize("mutate,err", [
     (lambda d: d.update(schema_version=2), "schema_version"),
     (lambda d: d.update(status="bogus"), "status"),

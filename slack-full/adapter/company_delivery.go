@@ -106,6 +106,10 @@ type companyGateway struct {
 	delegationsDir string
 	turnsDir       string
 	locksDir       string
+	// turnRecordsPrunedAt throttles the immutable turn-record retention scan;
+	// the delivery sweep itself runs every minute, while this directory only
+	// needs receipt-parity cleanup once an hour.
+	turnRecordsPrunedAt atomic.Int64
 	// stalePostingIntents is the read-only sweep count of intents stuck past
 	// their retry_deadline, surfaced on /healthz as the operator signal.
 	stalePostingIntents atomic.Int64
@@ -297,6 +301,7 @@ const (
 	companyDeliverTimeout        = 15 * time.Second
 	companyReceiptRetention      = 7 * 24 * time.Hour
 	companySweepInterval         = 60 * time.Second
+	companyTurnRecordPruneEvery  = time.Hour
 	companyStaleReclaimWindow    = 5 * time.Minute
 	companyRecoveryRetryInterval = 5 * time.Second
 	companyReasonParked          = "parked_no_directory_room"
@@ -972,12 +977,13 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 			// than silently queued. Advisory — a wake failure still proceeds.
 			g.wakeSession(r, td)
 		}
-		// The current-turn pointer is written atomically BEFORE the gc POST on
-		// every wake, so the Python verbs have deterministic context the
-		// instant the turn can act. A pointer-write failure is retryable: skip
+		// The immutable turn record and compatibility pointer are durable BEFORE
+		// the gc POST on every wake, so Python verbs can select this exact route
+		// the instant the turn can act. A state-write failure is retryable: skip
 		// the POST and leave the target pending for the sweep.
 		ptr := companyPointerFromTarget(r, room, td, threadRootTS, now)
-		if perr := writeCurrentTurnPointer(g.turnsDir, ptr); perr != nil {
+		ptr, perr := persistCurrentTurn(g.turnsDir, ptr)
+		if perr != nil {
 			td.Attempts++
 			td.UpdatedAt = now
 			td.Status = companyTargetPending
@@ -987,7 +993,7 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 			log.Printf("company: pointer write receipt=%s session=%s: %v", id, td.Session, perr)
 			continue
 		}
-		body := renderCompanyReminder(room, companyReminderAuthorClass(td.Kind), td.Kind, msg.Text, origin.TS, threadRootTS, hydration, r.Synthesis)
+		body := renderCompanyReminder(room, companyReminderAuthorClass(td.Kind), td.Kind, msg.Text, origin.TS, threadRootTS, hydration, r.Synthesis, &ptr)
 		disp, detail := g.postCompanyBody(td, body)
 		td.Attempts++
 		td.UpdatedAt = now
@@ -2166,6 +2172,7 @@ func (g *companyGateway) sweepOnce() {
 		return
 	}
 	now := g.now()
+	g.pruneImmutableTurnRecords(time.Now())
 	g.pruneThreadParticipants(now)
 	parked := 0
 	var eligible []*IngressReceipt
@@ -2212,6 +2219,27 @@ func (g *companyGateway) sweepOnce() {
 	// Phase 5 body-integrity gauge (missing / redacted) for /healthz, computed
 	// inside the same SweepAndPending scan — no second directory pass (m8).
 	g.bodyIntegrity.Store(&bodyCounts)
+}
+
+func (g *companyGateway) pruneImmutableTurnRecords(now time.Time) {
+	unix := now.Unix()
+	for {
+		last := g.turnRecordsPrunedAt.Load()
+		if last != 0 && unix-last < int64(companyTurnRecordPruneEvery/time.Second) {
+			return
+		}
+		if g.turnRecordsPrunedAt.CompareAndSwap(last, unix) {
+			break
+		}
+	}
+	removed, err := sweepCurrentTurnRecords(g.turnsDir, now.Add(-g.retention))
+	if err != nil {
+		log.Printf("company: immutable turn-record sweep: %v", err)
+		return
+	}
+	if removed > 0 {
+		log.Printf("company: immutable turn-record sweep removed=%d", removed)
+	}
 }
 
 // sweepEligible reports whether the sweep should redrive a non-terminal

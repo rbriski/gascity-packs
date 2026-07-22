@@ -343,7 +343,7 @@ func TestSynthesisEnvelopeRenders(t *testing.T) {
 	hy := companyHydration{RootProvenance: companyRootProvenanceUnverified, ContextStatus: companyContextUnavailable}
 
 	render := func(kind string, snap json.RawMessage) string {
-		return renderCompanyReminder(room, "company_bot", kind, "body", "1700000000.000900", humanRootTS, hy, snap)
+		return renderCompanyReminder(room, "company_bot", kind, "body", "1700000000.000900", humanRootTS, hy, snap, nil)
 	}
 	marshalSnap := func(s companySynthesisSnapshot) json.RawMessage {
 		b, err := json.Marshal(s)

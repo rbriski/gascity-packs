@@ -180,7 +180,7 @@ func TestRenderCompanyFilesSectionEmptyByteIdentical(t *testing.T) {
 	dir := testDirectory(t)
 	room, _ := dir.RoomByChannel(testTeam, testChannel)
 	hy := companyHydration{RootProvenance: companyRootProvenanceUnverified, ContextStatus: companyContextUnavailable}
-	got := renderCompanyReminder(room, "human", wakeKindAmbient, "hello", "1700000000.000500", "", hy, nil)
+	got := renderCompanyReminder(room, "human", wakeKindAmbient, "hello", "1700000000.000500", "", hy, nil, nil)
 	if strings.Contains(got, "Attached files") {
 		t.Errorf("file-free reminder leaked a files section:\n%s", got)
 	}
@@ -199,8 +199,8 @@ func TestRenderCompanyReminderInlinesFrozenFiles(t *testing.T) {
 			{Name: "main.go", Filetype: "go", Size: 20, Status: companyFileStatusIncluded, Content: "package main"},
 		},
 	}
-	a := renderCompanyReminder(room, "human", wakeKindAmbient, "", "1700000000.000500", "", hy, nil)
-	b := renderCompanyReminder(room, "human", wakeKindAmbient, "", "1700000000.000500", "", hy, nil)
+	a := renderCompanyReminder(room, "human", wakeKindAmbient, "", "1700000000.000500", "", hy, nil, nil)
+	b := renderCompanyReminder(room, "human", wakeKindAmbient, "", "1700000000.000500", "", hy, nil, nil)
 	if a != b {
 		t.Error("reminder with files not deterministic across renders")
 	}

@@ -7,12 +7,12 @@ The body is entity-escaped (`&`, `<`, `>`); the service-constructed
 `<@peer>` is the only live mention — bare `@channel` / `@here` / `#channel`
 text stays inert.
 
-Context is resolved deterministically from the company current-turn pointer
-for `$GC_SESSION_NAME` (no ID memorization): the room, team/channel, human
-root thread, and your acting agent all come from the turn the delivery
-worker just handed you. `$GC_SESSION_NAME` must be set (hard error
-otherwise). If a newer wake has overwritten the pointer, pass `--origin-ts`
-to pin the turn you mean — a mismatch is a hard error naming the ts to use.
+Context is resolved from the immutable turn record named by `--turn-ref` in
+the authenticated Slack reminder: the room, team/channel, human root thread,
+and your acting agent all come from that exact delivery even if another room
+wakes the same session while you work. `$GC_SESSION_NAME` must be set (hard
+error otherwise). Legacy pre-rollout pointers remain readable; post-rollout
+turns fail closed when `--turn-ref` is omitted.
 
 Durability and safety:
 
@@ -39,12 +39,13 @@ Flags
                        wedged tuple without waiting out the TTL).
   --origin-ts <ts>     Pin a specific turn when a newer wake overwrote the
                        pointer.
+  --turn-ref <ref>     Immutable turn reference from the Slack reminder.
 
 Examples
 --------
 
-  gc slack delegate --to riley --body "please review PR 42"
-  gc slack delegate --to riley --body-file /tmp/ask.txt
-  gc slack delegate --cancel --to riley
+  gc slack delegate --turn-ref gct-0123456789abcdef0123 --to riley --body "please review PR 42"
+  gc slack delegate --turn-ref gct-0123456789abcdef0123 --to riley --body-file /tmp/ask.txt
+  gc slack delegate --turn-ref gct-0123456789abcdef0123 --cancel --to riley
 
 Routes to: scripts/slack_company_outbound.py delegate

@@ -373,8 +373,9 @@ Synthesis replies to the human root contain no live agent mentions.
 gc slack import-company-directory --file <rooms.toml>
 gc slack bind-company-agent --room <name> --agent <name> --session <name>
 gc slack peers [--room <name>]
-gc slack delegate --to <agent> --body-file <path>
-gc slack delegate --cancel --to <agent>
+gc slack delegate --turn-ref <ref> --to <agent> --body-file <path>
+gc slack delegate --turn-ref <ref> --cancel --to <agent>
+gc slack reply-current --turn-ref <ref> --body-file <path>
 ```
 
 `import-company-directory` validates and normalizes the TOML, verifies
@@ -384,11 +385,16 @@ session binding; rebinding replaces, and ambiguity is impossible by
 construction. `peers` reports rooms, members, wake policy, bindings, and
 membership warnings.
 
-`delegate` resolves the room, Slack IDs, source app, and current named
-session from the session's current-turn pointer, written by the
-switchboard at each company delivery (`--origin-ts` pins a specific turn
-when a newer wake has moved the pointer); agents never memorize IDs or
-tokens.
+Each authenticated reminder carries the room name, team/channel id, origin
+timestamp, human thread root, receipt id, and an opaque `turn_ref`. The
+switchboard persists that turn under `company-current-turn/by-ref/` before
+waking the agent; records are create-once and retained for the same seven-day
+window as ingress receipts. The mutable per-session pointer remains only for
+pre-rollout compatibility. Post-rollout `delegate` and `reply-current` fail
+closed without the reminder's `--turn-ref`, then verify the referenced session,
+agent binding, directory room route, and turn kind before posting. Thus another
+room waking the same named session cannot redirect an in-progress reply or
+delegation; agents never memorize IDs or tokens.
 It durably persists a posting intent before the provider POST
 (prepared → posting → published, bounded attempts, TTL), then posts
 `<@target> …` as the delegating agent's identity app into the human root's
@@ -405,7 +411,8 @@ Metadata is a correlation breadcrumb only — workspace-visible and mutable;
 the durable record remains authoritative and must also match responder,
 workspace, channel, thread root, and recorded Slack `ts`.
 
-On a peer delegation, `gc slack reply-current` posts the result into the
+On a peer delegation, the reminder's exact
+`gc slack reply-current --turn-ref …` command posts the result into the
 same human-root thread, mentioning only the recorded requester. Slack has
 no nested replies, so a result cannot reference the delegation message
 directly; correlation is by durable record. A claim requires the full
@@ -418,7 +425,7 @@ delivers as ordinary peer input and consumes nothing), while authorship
 remains the trust anchor, so metadata alone can never claim. `delegate`
 enforces at most one pending delegation per `(team, channel,
 thread_root_ts, responder, requester)` under a cross-process lock, and
-`gc slack delegate --cancel` recovers a wedged tuple without waiting out
+the turn-bound `gc slack delegate --cancel` recovers a wedged tuple without waiting out
 the TTL. On a peer result, the requester is directed back to the
 verified human root without mentioning ambient or prior peer agents. An
 unmatched reply is never an implicitly trusted result — potentially

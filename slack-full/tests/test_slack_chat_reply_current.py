@@ -302,7 +302,7 @@ def _write_delegation(outbound, *, ts: str, nonce: str) -> str:
 
 
 def _write_turn(outbound, *, session: str, kind: str, agent: str,
-                ts: str, delegation_key: str = "") -> None:
+                ts: str, delegation_key: str = "", **overrides) -> dict:
     tdir = outbound.turns_dir()
     tdir.mkdir(parents=True, exist_ok=True)
     turn = {
@@ -312,7 +312,9 @@ def _write_turn(outbound, *, session: str, kind: str, agent: str,
         "thread_root_ts": "1700000000.000100", "agent": agent,
         "delegation_key": delegation_key, "delivered_at": "2026-07-17T12:00:00Z",
     }
+    turn.update(overrides)
     (tdir / f"{session}.json").write_text(json.dumps(turn))
+    return turn
 
 
 def test_company_peer_delegation_posts_result(
@@ -541,6 +543,147 @@ def test_company_ambient_targeted_posts_root_reply(
     assert p["thread_ts"] == "1700000000.000100"
     assert "<@" not in p["text"]
     assert "metadata" not in p
+
+
+def test_company_turn_ref_keeps_concurrent_room_reply_in_origin_thread(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """A later #it wake must not redirect a reply to an earlier alerts turn.
+
+    Both rooms deliberately bind the same agent session, reproducing the
+    production failure mode where the mutable room pointer is overwritten
+    while the first turn is still running.  The immutable turn reference from
+    the first reminder must continue to select its exact channel and thread.
+    """
+    rc, _common = _import_modules()
+    outbound = _import_outbound()
+    _setup_company(outbound, tmp_path)
+
+    slackdir = tmp_path / ".gc" / "slack"
+    directory = json.loads(json.dumps(_DIRECTORY))
+    directory["rooms"] = [
+        {
+            "name": "pd-alerts-internal", "team_id": "T0AAAAAAA",
+            "channel_id": "C0ALERTS00", "members": ["riley"],
+            "ambient_wake": ["riley"], "mention_wake": ["riley"],
+        },
+        {
+            "name": "it", "team_id": "T0AAAAAAA",
+            "channel_id": "C0ITROOM000", "members": ["riley"],
+            "ambient_wake": ["riley"], "mention_wake": ["riley"],
+        },
+    ]
+    bindings = {
+        "schema_version": 1,
+        "bindings": [
+            {"room": "pd-alerts-internal", "agent": "riley", "session": "riley-main"},
+            {"room": "it", "agent": "riley", "session": "riley-main"},
+        ],
+    }
+    (slackdir / "company_directory.json").write_text(json.dumps(directory))
+    (slackdir / "company_bindings.json").write_text(json.dumps(bindings))
+
+    alerts_ref = "gct-aaaaaaaaaaaaaaaaaaaa"
+    alerts_turn = _write_turn(
+        outbound, session="riley-main", kind="targeted", agent="riley",
+        ts="1700000000.000500")
+    alerts_turn.update({
+        "turn_ref": alerts_ref,
+        "receipt_id": "in-alerts",
+        "channel_id": "C0ALERTS00",
+        "room": "pd-alerts-internal",
+        "thread_root_ts": "1700000000.000100",
+    })
+    ref_dir = outbound.turns_dir() / "by-ref"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    (ref_dir / f"{alerts_ref}.json").write_text(json.dumps(alerts_turn))
+
+    # A newer #it delivery overwrites the legacy mutable pointer before Riley
+    # finishes composing the alerts response.
+    _write_turn(
+        outbound, session="riley-main", kind="targeted", agent="riley",
+        ts="1700000001.000500", turn_ref="gct-bbbbbbbbbbbbbbbbbbbb",
+        receipt_id="in-it", channel_id="C0ITROOM000", room="it",
+        thread_root_ts="1700000001.000100",
+        delivered_at="2026-07-17T12:00:01Z")
+    monkeypatch.setenv("GC_SESSION_NAME", "riley-main")
+
+    captured: list = []
+
+    def fake_post(method, token, payload, *, api_base, timeout):
+        captured.append({"token": token, "payload": payload})
+        return 200, {}, {"ok": True, "ts": "1700000002.000800"}
+    monkeypatch.setattr(outbound, "_slack_web_post", fake_post)
+
+    assert rc.main([
+        "--turn-ref", alerts_ref, "--body", "the alert is resolved",
+    ]) == 0
+    assert len(captured) == 1
+    assert captured[0]["token"] == "xoxb-riley"
+    assert captured[0]["payload"]["channel"] == "C0ALERTS00"
+    assert captured[0]["payload"]["thread_ts"] == "1700000000.000100"
+
+
+def test_company_post_rollout_pointer_without_turn_ref_fails_closed(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    rc, _common = _import_modules()
+    outbound = _import_outbound()
+    _setup_company(outbound, tmp_path)
+    turn_ref = "gct-cccccccccccccccccccc"
+    _write_turn(
+        outbound, session="riley-main", kind="targeted", agent="riley",
+        ts="1700000000.000500", turn_ref=turn_ref)
+    monkeypatch.setenv("GC_SESSION_NAME", "riley-main")
+    captured: list = []
+    monkeypatch.setattr(
+        outbound, "_slack_web_post",
+        lambda *args, **kwargs: captured.append((args, kwargs)))
+
+    with pytest.raises(SystemExit) as exc:
+        rc.main(["--body", "must not guess"])
+    assert "--turn-ref" in str(exc.value)
+    assert captured == []
+
+
+def test_company_turn_ref_rejects_cross_session_and_tampered_route(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    rc, _common = _import_modules()
+    outbound = _import_outbound()
+    _setup_company(outbound, tmp_path)
+    turn_ref = "gct-dddddddddddddddddddd"
+    turn = _write_turn(
+        outbound, session="riley-main", kind="targeted", agent="riley",
+        ts="1700000000.000500", turn_ref=turn_ref)
+    ref_dir = outbound.turns_dir() / "by-ref"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    (ref_dir / f"{turn_ref}.json").write_text(json.dumps(turn))
+    captured: list = []
+    monkeypatch.setattr(
+        outbound, "_slack_web_post",
+        lambda *args, **kwargs: captured.append((args, kwargs)))
+
+    monkeypatch.setenv("GC_SESSION_NAME", "ollie-main")
+    with pytest.raises(SystemExit) as exc:
+        rc.main(["--turn-ref", turn_ref, "--body", "cross-session"])
+    assert "spoof guard" in str(exc.value)
+
+    monkeypatch.setenv("GC_SESSION_NAME", "riley-main")
+    turn["channel_id"] = "C0TAMPERED0"
+    (ref_dir / f"{turn_ref}.json").write_text(json.dumps(turn))
+    with pytest.raises(SystemExit) as exc:
+        rc.main(["--turn-ref", turn_ref, "--body", "tampered"])
+    assert "directory route" in str(exc.value)
+    assert captured == []
+
+
+def test_company_turn_ref_requires_bound_session_env(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    rc, _common = _import_modules()
+    monkeypatch.delenv("GC_SESSION_NAME", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        rc.main([
+            "--turn-ref", "gct-eeeeeeeeeeeeeeeeeeee", "--body", "x",
+        ])
+    assert "GC_SESSION_NAME" in str(exc.value)
 
 
 # --------------------------------------------------------------------------

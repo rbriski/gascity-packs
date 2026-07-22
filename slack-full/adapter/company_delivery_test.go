@@ -120,6 +120,22 @@ func TestAcceptance3TrustedDelegationWakesResponderOnce(t *testing.T) {
 	if ptr.ThreadRootTS != humanRootTS {
 		t.Errorf("pointer thread_root_ts = %q, want %q", ptr.ThreadRootTS, humanRootTS)
 	}
+	if !validCompanyTurnReference(ptr.TurnRef) {
+		t.Fatalf("pointer turn_ref = %q, want a valid immutable reference", ptr.TurnRef)
+	}
+	if _, err := os.Stat(filepath.Join(h.turnsDir, "by-ref", ptr.TurnRef+".json")); err != nil {
+		t.Errorf("immutable turn record was not durable before delivery: %v", err)
+	}
+	for _, want := range []string{
+		"turn_ref: " + ptr.TurnRef,
+		"channel_id: " + testChannelID,
+		"thread_root_ts: " + humanRootTS,
+		"gc slack reply-current --turn-ref " + ptr.TurnRef + " --body-file <file>",
+	} {
+		if !strings.Contains(calls[0].body, want) {
+			t.Errorf("delivered reminder missing %q: %s", want, calls[0].body)
+		}
+	}
 }
 
 // TestAcceptance5ResultClaimAndClarifyAndReplay — Riley's metadata-gated result
