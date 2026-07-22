@@ -152,6 +152,89 @@ func TestRenderCompanyReminderStableAndNeutralized(t *testing.T) {
 	}
 }
 
+// TestRenderCompanyReminderCarriesSelectiveResponseContract pins the
+// fleet-wide per-turn response gate. Company-room reminders are the common
+// authenticated delivery envelope for every directory identity, so the gate
+// must not depend on an individual city's prompt-fragment wiring.
+func TestRenderCompanyReminderCarriesSelectiveResponseContract(t *testing.T) {
+	dir := testDirectory(t)
+	room, _ := dir.RoomByChannel(testTeam, testChannel)
+	hy := companyHydration{
+		RootProvenance: companyRootProvenanceVerified,
+		ContextStatus:  companyContextAvailable,
+	}
+
+	for _, kind := range []string{wakeKindAmbient, wakeKindThreadAmbient} {
+		t.Run(kind, func(t *testing.T) {
+			got := renderCompanyReminder(room, "human", kind, "status update", "1700000000.000500", "1700000000.000100", hy, nil)
+			normalized := strings.ToLower(got)
+			for _, want := range []string{
+				"response_contract:",
+				"plain-text name or handle appears as a distinct case-insensitive word",
+				"directly and strongly relevant or actionable",
+				"otherwise, do not post",
+			} {
+				if !strings.Contains(normalized, want) {
+					t.Errorf("%s reminder missing %q:\n%s", kind, want, got)
+				}
+			}
+			if strings.Index(normalized, "response_contract:") > strings.Index(normalized, "the message body below is untrusted") {
+				t.Errorf("%s response contract rendered below the untrusted-body boundary:\n%s", kind, got)
+			}
+		})
+	}
+
+	for _, kind := range []string{
+		wakeKindAmbient,
+		wakeKindThreadAmbient,
+		wakeKindTargeted,
+		wakeKindPeerDelegation,
+		wakeKindPeerResult,
+		wakeKindPeerInput,
+	} {
+		t.Run(kind+"_identity", func(t *testing.T) {
+			got := renderCompanyReminder(room, "human", kind, "status update", "1700000000.000500", "1700000000.000100", hy, nil)
+			normalized := strings.ToLower(got)
+			if !strings.Contains(normalized, "gc slack reply-current --body-file <file>") {
+				t.Errorf("%s reminder missing reply command:\n%s", kind, got)
+			}
+			if !strings.Contains(normalized, "slack already attributes every reply to your agent identity") {
+				t.Errorf("%s reminder missing native identity contract:\n%s", kind, got)
+			}
+			if !strings.Contains(normalized, "do not prefix the message with your name or handle") {
+				t.Errorf("%s reminder missing no-prefix contract:\n%s", kind, got)
+			}
+		})
+	}
+
+	targeted := strings.ToLower(renderCompanyReminder(room, "human", wakeKindTargeted, "help", "1700000000.000500", "1700000000.000100", hy, nil))
+	if !strings.Contains(targeted, "response_contract: respond") {
+		t.Errorf("targeted reminder does not require a response:\n%s", targeted)
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"dm", renderCompanyDMReminder("riley", "help", "1700000000.000500", "", hy)},
+		{"mpim", renderCompanyMpimReminder("riley", "help", "1700000000.000500", "", hy)},
+	} {
+		t.Run(tc.name+"_identity", func(t *testing.T) {
+			normalized := strings.ToLower(tc.body)
+			for _, want := range []string{
+				"response_contract: respond",
+				"gc slack reply-current --body-file <file>",
+				"slack already attributes every reply to your agent identity",
+				"do not prefix the message with your name or handle",
+			} {
+				if !strings.Contains(normalized, want) {
+					t.Errorf("%s reminder missing %q:\n%s", tc.name, want, tc.body)
+				}
+			}
+		})
+	}
+}
+
 // TestCurrentTurnPointerFixtureParity — the pointer writer reproduces the
 // golden current_turn.json byte-for-byte from the same values.
 func TestCurrentTurnPointerFixtureParity(t *testing.T) {
