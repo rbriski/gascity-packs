@@ -298,8 +298,15 @@ func (g *companyGateway) deliverMpimTargets(r *IngressReceipt, origin ReceiptOri
 	now := g.now().UTC()
 	results := make(map[string]TargetDelivery, len(r.Targets))
 	removeKeys := make(map[string]bool)
+	awaiting := make([]string, 0, len(r.Targets))
+	awaitingSleeping := make(map[string]bool)
 	for key, td := range r.Targets {
 		if td.Status != companyTargetPending || td.Session == "" {
+			continue
+		}
+		if td.RequestID != "" {
+			results[key] = td
+			awaiting = append(awaiting, key)
 			continue
 		}
 		if td.Attempts >= companyMaxDeliveryAttempts {
@@ -388,17 +395,27 @@ func (g *companyGateway) deliverMpimTargets(r *IngressReceipt, origin ReceiptOri
 			continue
 		}
 		body := renderCompanyMpimReminder(td.Agent, msg.Text, origin.TS, threadRootTS, hydration, &ptr)
-		disp, detail := g.postCompanyBody(td, body)
+		result := g.postCompanyMessage(td, body)
 		td.Attempts++
 		td.UpdatedAt = now
-		switch disp {
+		if result.disposition == postAccepted {
+			if err := g.persistCompanyMessageAcceptance(r, key, &td, result); err != nil {
+				log.Printf("company mpim: persist async acceptance receipt=%s session=%s request=%q: %v", id, td.Session, result.requestID, err)
+				return deliverError
+			}
+			results[key] = td
+			awaiting = append(awaiting, key)
+			awaitingSleeping[key] = guard.sleeping
+			continue
+		}
+		switch result.disposition {
 		case postDelivered:
 			td.Status = companyTargetDelivered
 			td.Detail = ""
 			if guard.sleeping && g.sessionAsleepNow(td.City, td.Session) {
-				// Silent-queue case: delivered (2xx) but the wake did not take — the
-				// session is still asleep. Leave it delivered (the message is queued)
-				// and surface it for observability rather than failing the target.
+				// The synchronous response or correlated event confirmed delivery, but
+				// the wake did not take and the session is still asleep. Keep the
+				// confirmed terminal result and surface the sleep state separately.
 				g.deliveredAsleep.Add(1)
 				log.Printf("company mpim: delivered to still-asleep session receipt=%s session=%s", id, td.Session)
 				// Boot escalation: the wake cleared the drain flag without starting a
@@ -409,9 +426,9 @@ func (g *companyGateway) deliverMpimTargets(r *IngressReceipt, origin ReceiptOri
 			results[key] = td
 		case postRetryable:
 			td.Status = companyTargetPending
-			td.Detail = detail
+			td.Detail = result.detail
 			g.deliveryFailures.Add(1)
-			log.Printf("company mpim: delivery pending receipt=%s session=%s attempts=%d: %s", id, td.Session, td.Attempts, detail)
+			log.Printf("company mpim: delivery pending receipt=%s session=%s attempts=%d: %s", id, td.Session, td.Attempts, result.detail)
 			results[key] = td
 		case postSessionMissing:
 			// 404: keep pending and self-heal (re-resolve stale dm_binding or
@@ -423,11 +440,29 @@ func (g *companyGateway) deliverMpimTargets(r *IngressReceipt, origin ReceiptOri
 			log.Printf("company mpim: delivery session-missing+heal receipt=%s session=%s attempts=%d detail=%s", id, heal.td.Session, heal.td.Attempts, heal.td.Detail)
 		default:
 			td.Status = companyTargetFailed
-			td.Detail = detail
+			td.Detail = result.detail
 			g.deliveryFailures.Add(1)
-			log.Printf("company mpim: delivery failed receipt=%s session=%s attempts=%d: %s", id, td.Session, td.Attempts, detail)
+			log.Printf("company mpim: delivery failed receipt=%s session=%s attempts=%d: %s", id, td.Session, td.Attempts, result.detail)
 			results[key] = td
 		}
+	}
+
+	for _, key := range awaiting {
+		td := results[key]
+		result := g.settleCompanyAsyncTarget(&td)
+		switch result.disposition {
+		case postDelivered:
+			if awaitingSleeping[key] && g.sessionAsleepNow(td.City, td.Session) {
+				g.deliveredAsleep.Add(1)
+				log.Printf("company mpim: delivered to still-asleep session receipt=%s session=%s", id, td.Session)
+				g.tryBoot(r, td)
+			}
+		case postRetryable:
+			log.Printf("company mpim: async result pending receipt=%s session=%s request=%q detail=%q", id, td.Session, td.RequestID, result.detail)
+		default:
+			log.Printf("company mpim: async delivery failed receipt=%s session=%s request=%q detail=%q", id, td.Session, td.RequestID, result.detail)
+		}
+		results[key] = td
 	}
 
 	if err := g.commitReceipt(r, func(cur *IngressReceipt) {
@@ -438,7 +473,7 @@ func (g *companyGateway) deliverMpimTargets(r *IngressReceipt, origin ReceiptOri
 			delete(cur.Targets, k)
 		}
 		for k, v := range results {
-			cur.Targets[k] = v
+			mergeCompanyTargetResult(cur.Targets, k, v)
 		}
 		status, reason := computeReceiptStatus(cur.Targets)
 		cur.Status = status

@@ -217,8 +217,8 @@ func TestDMDeliverActiveSessionNoWake(t *testing.T) {
 
 // TestDMDeliverStillAsleepIncrementsCounter: the wake POST HTTP-succeeds but the
 // drain persists (the post-delivery re-check still shows the session asleep). The
-// target stays delivered (the message is queued) and company_delivered_asleep
-// increments for the silent-queue observability.
+// target stays delivered because this legacy synchronous stub confirmed the
+// delivery; company_delivered_asleep separately records the stale sleep state.
 func TestDMDeliverStillAsleepIncrementsCounter(t *testing.T) {
 	h, _, _ := setupDM(t)
 	h.gw.verifySessions = true

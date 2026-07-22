@@ -80,7 +80,8 @@ func TestRedriveResetsSelectedTargetsPreservesIdempotencyKey(t *testing.T) {
 	r := admitTargetsReceipt(t, h, "1700000000.001000", map[string]TargetDelivery{
 		companyBoundTargetKeyPrefix + "ollie-main": {
 			Session: "ollie-main", Kind: "ambient", Status: companyTargetFailed,
-			Detail: "gc 500", Attempts: 3, IdempotencyKey: frozenKey, Agent: "ollie",
+			Detail: "message_failed: queued=false", Attempts: 3, IdempotencyKey: frozenKey, Agent: "ollie",
+			RequestID: "req-prior-failure", EventCursor: "123",
 		},
 		companyBoundTargetKeyPrefix + "riley-main": {
 			Session: "riley-main", Kind: "ambient", Status: companyTargetDelivered,
@@ -113,6 +114,8 @@ func TestRedriveResetsSelectedTargetsPreservesIdempotencyKey(t *testing.T) {
 	}
 	if td := final.Targets[companyBoundTargetKeyPrefix+"ollie-main"]; td.IdempotencyKey != frozenKey {
 		t.Errorf("reset target key mutated to %q, want %q", td.IdempotencyKey, frozenKey)
+	} else if td.RequestID != "" || td.EventCursor != "" {
+		t.Errorf("redriven target retained old async correlation: request=%q cursor=%q", td.RequestID, td.EventCursor)
 	}
 }
 

@@ -1151,6 +1151,20 @@ func TestSweepEligibleStaleReclaimBoundary(t *testing.T) {
 	if sweepEligible(notHeld, now, window) {
 		t.Error("non-guard pending target treated as guard-held (would steal live work)")
 	}
+	// An accepted async message whose stream disconnected is also not a live
+	// mutating claim: redrive only reopens the correlated event stream and can
+	// never POST again. Let the next 60s sweep recover it instead of waiting the
+	// full stale-claim window.
+	asyncPending := &IngressReceipt{
+		Status:    ingressStatusRouting,
+		UpdatedAt: now,
+		Targets: map[string]TargetDelivery{
+			"b-ollie": {Status: companyTargetPending, RequestID: "req-pending", EventCursor: "42"},
+		},
+	}
+	if !sweepEligible(asyncPending, now, window) {
+		t.Error("accepted async result wait not sweep-eligible within the stale window")
+	}
 }
 
 func TestCompanySweepReclaimsOnlyStaleRoutingClaim(t *testing.T) {

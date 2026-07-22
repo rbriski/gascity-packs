@@ -214,6 +214,11 @@ type TargetDelivery struct {
 	Attempts       int       `json:"attempts"`
 	UpdatedAt      time.Time `json:"updated_at"`
 	Detail         string    `json:"detail,omitempty"`
+	// RequestID and EventCursor durably correlate an accepted asynchronous gc
+	// session.message request with its terminal event. Once RequestID is set,
+	// recovery watches the event stream and must never POST the message again.
+	RequestID   string `json:"request_id,omitempty"`
+	EventCursor string `json:"event_cursor,omitempty"`
 	// Agent is the directory agent name for this target, recorded so the
 	// current-turn pointer can be rewritten on redrive without recomputing
 	// the route. Empty for a failed-unbound record.

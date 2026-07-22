@@ -72,6 +72,11 @@ type companyGateway struct {
 	deliveryFailures atomic.Uint64
 
 	deliverClient *http.Client
+	// eventClient has no overall HTTP timeout because an SSE body may remain
+	// open for the full asynchronous session.message window. The per-request
+	// context bounds that wait; ResponseHeaderTimeout still bounds connection
+	// setup.
+	eventClient *http.Client
 
 	// slackToken is the switchboard bot token used for bots.info author
 	// resolution and conversations.* hydration. Empty in Phase 1 / tests
@@ -182,16 +187,17 @@ type companyGateway struct {
 	targetReresolved    atomic.Uint64
 	materializeRequests atomic.Uint64
 	// bootRequests counts session-create POSTs fired by the delivered-asleep
-	// boot escalation (company_boot_requests): a target that delivered 2xx but
-	// whose post-delivery re-check still showed the session asleep, where the
-	// wake POST cleared the drain flag without starting a runtime. Distinct from
+	// boot escalation (company_boot_requests): a target whose synchronous response
+	// or correlated async event confirmed delivery but whose post-delivery re-check
+	// still showed the session asleep, where the wake POST cleared the drain flag
+	// without starting a runtime. Distinct from
 	// materializeRequests (the 404 self-heal) so the two levers are observable
 	// apart even though they share the throttle gate below.
 	bootRequests atomic.Uint64
-	// deliveredAsleep counts targets that returned a delivered 2xx but whose
-	// post-delivery GET still showed the session asleep/drained — the silent-queue
-	// case where the message queued but nothing woke to process it. The target
-	// stays delivered (the message is queued); the counter is pure observability
+	// deliveredAsleep counts targets whose synchronous response or correlated
+	// async result confirmed delivery but whose post-delivery GET still showed the
+	// session asleep/drained. The confirmed terminal result, not HTTP acceptance
+	// or the sleep state, makes the target delivered; the counter is observability
 	// (company_delivered_asleep).
 	deliveredAsleep atomic.Uint64
 	// materializeAttempts throttles auto-materialization to at most ONE POST per
@@ -233,7 +239,11 @@ type companyGateway struct {
 	retention     time.Duration
 	sweepInterval time.Duration
 	staleWindow   time.Duration
-	now           func() time.Time
+	// asyncResultTimeout bounds one correlated SSE wait. It mirrors gc's
+	// session.message async timeout and is a field so tests can exercise the
+	// timeout/recovery path without waiting minutes.
+	asyncResultTimeout time.Duration
+	now                func() time.Time
 }
 
 // sessionCacheTTL bounds a positive session-existence cache entry (Phase 4).
@@ -347,11 +357,14 @@ var companyHealthStatus atomic.Pointer[companyGateway]
 func newCompanyGateway(cfg config, dir *companyDirectoryStore, bind *companyBindingsStore, receipts *IngressReceiptStore) *companyGateway {
 	slackClient := &http.Client{Timeout: companyDeliverTimeout}
 	g := &companyGateway{
-		cfg:                 cfg,
-		dirStore:            dir,
-		bindStore:           bind,
-		ingressDir:          cfg.companyIngressDir,
-		deliverClient:       &http.Client{Timeout: companyDeliverTimeout},
+		cfg:           cfg,
+		dirStore:      dir,
+		bindStore:     bind,
+		ingressDir:    cfg.companyIngressDir,
+		deliverClient: &http.Client{Timeout: companyDeliverTimeout},
+		eventClient: &http.Client{Transport: &http.Transport{
+			ResponseHeaderTimeout: companyDeliverTimeout,
+		}},
 		slackToken:          cfg.slackBotToken,
 		slackClient:         slackClient,
 		authors:             newBotInfoResolver(cfg.slackBotToken),
@@ -370,6 +383,7 @@ func newCompanyGateway(cfg config, dir *companyDirectoryStore, bind *companyBind
 		retention:           companyReceiptRetention,
 		sweepInterval:       companySweepInterval,
 		staleWindow:         companyStaleReclaimWindow,
+		asyncResultTimeout:  companyAsyncResultTimeout,
 		now:                 time.Now,
 	}
 	// Phase 4 DM registries: loaded here (never-fatal) against the directory
@@ -932,8 +946,20 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 	now := g.now().UTC()
 	results := make(map[string]TargetDelivery, len(r.Targets))
 	removeKeys := make(map[string]bool)
+	awaiting := make([]string, 0, len(r.Targets))
+	awaitingSleeping := make(map[string]bool)
 	for key, td := range r.Targets {
 		if td.Status != companyTargetPending || td.Session == "" {
+			continue
+		}
+		// A prior pass already crossed gc's asynchronous acceptance boundary.
+		// Queue only the correlated event wait: never rerun guards, pointers, or
+		// the POST, because session.message does not expose replay idempotency. The
+		// waits start after this loop so one slow target cannot delay submission to
+		// every remaining target.
+		if td.RequestID != "" {
+			results[key] = td
+			awaiting = append(awaiting, key)
 			continue
 		}
 		if td.Attempts >= companyMaxDeliveryAttempts {
@@ -994,17 +1020,27 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 			continue
 		}
 		body := renderCompanyReminder(room, companyReminderAuthorClass(td.Kind), td.Kind, msg.Text, origin.TS, threadRootTS, hydration, r.Synthesis, &ptr)
-		disp, detail := g.postCompanyBody(td, body)
+		result := g.postCompanyMessage(td, body)
 		td.Attempts++
 		td.UpdatedAt = now
-		switch disp {
+		if result.disposition == postAccepted {
+			if err := g.persistCompanyMessageAcceptance(r, key, &td, result); err != nil {
+				log.Printf("company: persist async acceptance receipt=%s session=%s request=%q: %v", id, td.Session, result.requestID, err)
+				return deliverError
+			}
+			results[key] = td
+			awaiting = append(awaiting, key)
+			awaitingSleeping[key] = guard.sleeping
+			continue
+		}
+		switch result.disposition {
 		case postDelivered:
 			td.Status = companyTargetDelivered
 			td.Detail = ""
 			if guard.sleeping && g.sessionAsleepNow(td.City, td.Session) {
-				// Silent-queue case: delivered (2xx) but the wake did not take — the
-				// session is still asleep. Leave it delivered (the message is queued)
-				// and surface it for observability rather than failing the target.
+				// The synchronous response or correlated event confirmed delivery, but
+				// the wake did not take and the session is still asleep. Keep the
+				// confirmed terminal result and surface the sleep state separately.
 				g.deliveredAsleep.Add(1)
 				log.Printf("company: delivered to still-asleep session receipt=%s session=%s", id, td.Session)
 				// Boot escalation: the wake cleared the drain flag without starting a
@@ -1017,9 +1053,9 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 			// Timeout / connection error / 5xx / 408 / 429: leave pending for
 			// the sweep to retry with the same key.
 			td.Status = companyTargetPending
-			td.Detail = detail
+			td.Detail = result.detail
 			g.deliveryFailures.Add(1)
-			log.Printf("company: delivery pending receipt=%s session=%s attempts=%d: %s", id, td.Session, td.Attempts, detail)
+			log.Printf("company: delivery pending receipt=%s session=%s attempts=%d: %s", id, td.Session, td.Attempts, result.detail)
 			results[key] = td
 		case postSessionMissing:
 			// 404: the bound session vanished between the guard check and the POST
@@ -1034,11 +1070,32 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 			// Definitive 4xx (not 404/408/429): gc rejected the submission on its
 			// merits — mark the target failed rather than retry forever.
 			td.Status = companyTargetFailed
-			td.Detail = detail
+			td.Detail = result.detail
 			g.deliveryFailures.Add(1)
-			log.Printf("company: delivery failed receipt=%s session=%s attempts=%d: %s", id, td.Session, td.Attempts, detail)
+			log.Printf("company: delivery failed receipt=%s session=%s attempts=%d: %s", id, td.Session, td.Attempts, result.detail)
 			results[key] = td
 		}
+	}
+
+	// Every uncorrelated target has now been submitted (or classified without a
+	// POST). Only now open the per-request SSE waits. This preserves prompt
+	// fan-out even when the first accepted request takes minutes to settle.
+	for _, key := range awaiting {
+		td := results[key]
+		result := g.settleCompanyAsyncTarget(&td)
+		switch result.disposition {
+		case postDelivered:
+			if awaitingSleeping[key] && g.sessionAsleepNow(td.City, td.Session) {
+				g.deliveredAsleep.Add(1)
+				log.Printf("company: delivered to still-asleep session receipt=%s session=%s", id, td.Session)
+				g.tryBoot(r, td)
+			}
+		case postRetryable:
+			log.Printf("company: async result pending receipt=%s session=%s request=%q detail=%q", id, td.Session, td.RequestID, result.detail)
+		default:
+			log.Printf("company: async delivery failed receipt=%s session=%s request=%q detail=%q", id, td.Session, td.RequestID, result.detail)
+		}
+		results[key] = td
 	}
 
 	if err := g.commitReceipt(r, func(cur *IngressReceipt) {
@@ -1049,7 +1106,7 @@ func (g *companyGateway) deliverReceipt(origin ReceiptOrigin) deliverOutcome {
 			delete(cur.Targets, k)
 		}
 		for k, v := range results {
-			cur.Targets[k] = v
+			mergeCompanyTargetResult(cur.Targets, k, v)
 		}
 		status, reason := computeReceiptStatus(cur.Targets)
 		cur.Status = status
@@ -1424,16 +1481,18 @@ func computeReceiptStatus(targets map[string]TargetDelivery) (status, reason str
 type postDisposition int
 
 const (
-	postDelivered      postDisposition = iota // gc acknowledged 2xx
-	postRetryable                             // timeout / connection error / 5xx / 408 / 429 — retry same key
+	postDelivered      postDisposition = iota // synchronous gc 2xx, or matching async success event
+	postAccepted                              // gc accepted async work; persist correlation before waiting
+	postRetryable                             // transient POST or event-stream failure; retry/reconnect according to correlation state
 	postSessionMissing                        // 404 — the bound session does not exist (self-heal path)
 	postDefinitive                            // any other definitive 4xx / unrecoverable construction error
 )
 
-// postCompanyBody POSTs an already-rendered reminder body to the bound
-// session's gc messages endpoint with the target's Idempotency-Key. It
-// returns (disposition, detail):
-//   - postDelivered only on gc's acknowledged 2xx.
+// postCompanyMessage POSTs an already-rendered reminder body to the bound
+// session's gc messages endpoint with the target's Idempotency-Key. It returns:
+//   - postAccepted for a valid asynchronous 202 response. The caller must
+//     durably persist its request_id/event_cursor before opening the event stream.
+//   - postDelivered only for a synchronous non-202 2xx response.
 //   - postRetryable for outcomes whose success is unknown or transient —
 //     timeout, connection error, 5xx, 408, 429 — which stay pending for the
 //     sweep to retry with the same key.
@@ -1443,11 +1502,11 @@ const (
 //   - postDefinitive for any other definitive rejection: another 4xx, or an
 //     unrecoverable request-construction error. The caller marks the target
 //     failed rather than retrying forever.
-func (g *companyGateway) postCompanyBody(td TargetDelivery, body string) (postDisposition, string) {
+func (g *companyGateway) postCompanyMessage(td TargetDelivery, body string) companyPostResult {
 	payload, err := json.Marshal(gcSessionMessageRequest{Message: body})
 	if err != nil {
 		// Deterministic construction failure: retrying cannot help.
-		return postDefinitive, "marshal session-message body: " + err.Error()
+		return companyPostResult{disposition: postDefinitive, detail: "marshal session-message body: " + err.Error()}
 	}
 	// City-qualified bindings deliver to sessions in other gc cities; each
 	// city runs its own supervisor, so the target city selects both the URL
@@ -1455,21 +1514,15 @@ func (g *companyGateway) postCompanyBody(td TargetDelivery, body string) (postDi
 	// City means the adapter's own city and base. A city with no configured
 	// base is a definitive configuration failure — retrying cannot help
 	// until the operator fixes the map and redrives.
-	targetCity, apiBase := td.City, g.cfg.gcAPIBase
-	if targetCity == "" {
-		targetCity = g.cfg.cityName
-	} else if targetCity != g.cfg.cityName {
-		mapped, ok := g.cfg.companyCityAPIs[targetCity]
-		if !ok {
-			return postDefinitive, fmt.Sprintf("no SLACK_COMPANY_CITY_APIS entry for city %q", targetCity)
-		}
-		apiBase = mapped
+	targetCity, apiBase, err := g.companyTargetAPI(td)
+	if err != nil {
+		return companyPostResult{disposition: postDefinitive, detail: err.Error()}
 	}
 	target := fmt.Sprintf("%s/v0/city/%s/session/%s/messages",
 		apiBase, url.PathEscape(targetCity), url.PathEscape(td.Session))
 	req, err := http.NewRequest(http.MethodPost, target, bytes.NewReader(payload))
 	if err != nil {
-		return postDefinitive, "build request: " + err.Error()
+		return companyPostResult{disposition: postDefinitive, detail: "build request: " + err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GC-Request", companyDeliverRequestTag)
@@ -1478,11 +1531,33 @@ func (g *companyGateway) postCompanyBody(td TargetDelivery, body string) (postDi
 	resp, err := g.deliverClient.Do(req)
 	if err != nil {
 		// Timeout / connection error: outcome unknown, retry.
-		return postRetryable, "POST: " + err.Error()
+		return companyPostResult{disposition: postRetryable, detail: "POST: " + err.Error()}
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusAccepted {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, companyMaxAsyncResponseBodyBytes+1))
+		if readErr != nil {
+			return companyPostResult{disposition: postDefinitive, detail: "read async acceptance: " + readErr.Error()}
+		}
+		if len(body) > companyMaxAsyncResponseBodyBytes {
+			return companyPostResult{disposition: postDefinitive, detail: "async acceptance body too large"}
+		}
+		var accepted companyAsyncAccepted
+		if err := json.Unmarshal(body, &accepted); err != nil {
+			return companyPostResult{disposition: postDefinitive, detail: "decode async acceptance: " + err.Error()}
+		}
+		requestID, eventCursor, err := normalizeCompanyAsyncAcceptance(accepted)
+		if err != nil {
+			return companyPostResult{disposition: postDefinitive, detail: err.Error()}
+		}
+		return companyPostResult{
+			disposition: postAccepted,
+			requestID:   requestID,
+			eventCursor: eventCursor,
+		}
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return postDelivered, ""
+		return companyPostResult{disposition: postDelivered}
 	}
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, companyMaxErrorBodyBytesRead))
 	detail := fmt.Sprintf("%s: %s", resp.Status, strings.TrimSpace(string(respBody)))
@@ -1491,16 +1566,16 @@ func (g *companyGateway) postCompanyBody(td TargetDelivery, body string) (postDi
 		// 404: the bound session does not exist. Recoverable — the caller keeps
 		// the target pending and runs the self-heal pipeline (re-resolve the
 		// stale binding, or materialize the cold session) rather than failing it.
-		return postSessionMissing, detail
+		return companyPostResult{disposition: postSessionMissing, detail: detail}
 	case resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests:
 		// 408 / 429: transient, retry.
-		return postRetryable, detail
+		return companyPostResult{disposition: postRetryable, detail: detail}
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
 		// Definitive 4xx: rejected on its merits, do not retry.
-		return postDefinitive, detail
+		return companyPostResult{disposition: postDefinitive, detail: detail}
 	default:
 		// 5xx and anything else non-2xx: retry.
-		return postRetryable, detail
+		return companyPostResult{disposition: postRetryable, detail: detail}
 	}
 }
 
@@ -1695,10 +1770,11 @@ func (g *companyGateway) tryMaterialize(r *IngressReceipt, td TargetDelivery) bo
 	return g.postSessionCreate(r, td, apiBase, targetCity, name, "materialize", &g.materializeRequests)
 }
 
-// tryBoot fires the delivered-asleep boot escalation for a target that returned
-// a delivered 2xx but whose post-delivery re-check still showed the session
-// asleep/drained — the wake POST cleared the drain flag without starting a
-// runtime, so the message sits queued and unprocessed. It materializes a runtime
+// tryBoot fires the delivered-asleep boot escalation for a target whose
+// synchronous response or correlated async event confirmed delivery but whose
+// post-delivery re-check still showed the session asleep/drained — the wake POST
+// cleared the drain flag without starting a runtime, so the message sits queued
+// and unprocessed. It materializes a runtime
 // with POST /v0/city/{city}/sessions {"name": <n>, "kind": "agent"},
 // Idempotency-Key boot:<receipt>:<session>, counted as company_boot_requests and
 // throttled through the SAME per-(city,session) gate as tryMaterialize so a
@@ -2275,10 +2351,25 @@ func sweepEligible(r *IngressReceipt, now time.Time, window time.Duration) bool 
 	if guardHeldPending(r) {
 		return true
 	}
+	// A correlated async target has already completed the only mutating step
+	// (the POST). Reclaiming it merely reconnects the read-only event watcher,
+	// so it is safe and desirable on the next sweep after a disconnect.
+	if asyncResultPending(r) {
+		return true
+	}
 	if r.UpdatedAt.IsZero() {
 		return true
 	}
 	return now.Sub(r.UpdatedAt) >= window
+}
+
+func asyncResultPending(r *IngressReceipt) bool {
+	for _, td := range r.Targets {
+		if td.Status == companyTargetPending && td.RequestID != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // guardHeldPending reports whether any of a receipt's targets is pending behind

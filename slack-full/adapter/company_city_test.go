@@ -64,14 +64,14 @@ func TestDeliverCrossCityUsesMappedAPIBase(t *testing.T) {
 	ownHits, otherHits := 0, 0
 	own := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ownHits++
-		w.WriteHeader(http.StatusAccepted)
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer own.Close()
 	var otherPath string
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		otherHits++
 		otherPath = r.URL.Path
-		w.WriteHeader(http.StatusAccepted)
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer other.Close()
 
@@ -85,12 +85,12 @@ func TestDeliverCrossCityUsesMappedAPIBase(t *testing.T) {
 	}
 
 	// Cross-city target → the mapped base, city in the path.
-	disp, detail := g.postCompanyBody(TargetDelivery{
+	result := g.postCompanyMessage(TargetDelivery{
 		Session: "teams__pm", City: "platform",
 		IdempotencyKey: "ingress:x:target:teams__pm",
 	}, "body")
-	if disp != postDelivered {
-		t.Fatalf("cross-city delivery failed: disp=%v detail=%s", disp, detail)
+	if result.disposition != postDelivered {
+		t.Fatalf("cross-city delivery failed: disp=%v detail=%s", result.disposition, result.detail)
 	}
 	if otherHits != 1 || ownHits != 0 {
 		t.Fatalf("hits own=%d other=%d; want 0/1", ownHits, otherHits)
@@ -100,22 +100,22 @@ func TestDeliverCrossCityUsesMappedAPIBase(t *testing.T) {
 	}
 
 	// Own-city target (empty City) → the adapter's own base.
-	disp, detail = g.postCompanyBody(TargetDelivery{
+	result = g.postCompanyMessage(TargetDelivery{
 		Session: "s-local", IdempotencyKey: "ingress:x:target:s-local",
 	}, "body")
-	if disp != postDelivered || ownHits != 1 {
-		t.Fatalf("own-city delivery: disp=%v ownHits=%d detail=%s", disp, ownHits, detail)
+	if result.disposition != postDelivered || ownHits != 1 {
+		t.Fatalf("own-city delivery: disp=%v ownHits=%d detail=%s", result.disposition, ownHits, result.detail)
 	}
 
 	// Unmapped city → definitive failure, no HTTP call.
-	disp, detail = g.postCompanyBody(TargetDelivery{
+	result = g.postCompanyMessage(TargetDelivery{
 		Session: "s-x", City: "unmapped-city",
 		IdempotencyKey: "ingress:x:target:s-x",
 	}, "body")
-	if disp != postDefinitive {
-		t.Fatalf("unmapped city: disp=%v; want postDefinitive", disp)
+	if result.disposition != postDefinitive {
+		t.Fatalf("unmapped city: disp=%v; want postDefinitive", result.disposition)
 	}
-	if detail == "" {
+	if result.detail == "" {
 		t.Fatal("unmapped city: empty detail")
 	}
 	if ownHits != 1 || otherHits != 1 {

@@ -534,6 +534,12 @@ func (g *companyGateway) applyRedrive(r *IngressReceipt, body companyRedriveRequ
 			td.Status = companyTargetPending
 			td.Attempts = 0
 			td.Detail = "operator_redrive"
+			// The prior asynchronous request is terminal (this endpoint only
+			// selects failed targets). An explicit operator redrive authorizes a
+			// new POST, so discard the old request correlation while preserving
+			// the frozen message idempotency key and route.
+			td.RequestID = ""
+			td.EventCursor = ""
 			td.UpdatedAt = now
 			cur.Targets[key] = td
 		}
