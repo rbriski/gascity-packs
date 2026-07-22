@@ -246,6 +246,55 @@ func TestCompanyColdPoolMaterializesThenDelivers(t *testing.T) {
 	}
 }
 
+// TestCompanyExactSessionMissingDoesNotMaterializeTemplate reproduces the
+// Tessa outage: an exact session_name binding has vanished, but its supervisor
+// record still names the template it was minted from. Creating that template
+// would produce a new adhoc instance without repairing the exact binding, so
+// self-heal must leave the target pending for a rebind instead of creating an
+// orphan session.
+func TestCompanyExactSessionMissingDoesNotMaterializeTemplate(t *testing.T) {
+	h, _, _ := setupDM(t)
+
+	var mu sync.Mutex
+	getCount, materializeCount := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			mu.Lock()
+			getCount++
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(companySessionRecord{Template: "teams.lead"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sessions"):
+			mu.Lock()
+			materializeCount++
+			mu.Unlock()
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+	h.gw.cfg.gcAPIBase = srv.URL
+
+	r := &IngressReceipt{ID: "in-exact-session"}
+	td := TargetDelivery{Session: "s-tr-wisp-q9j91"}
+	if h.gw.tryMaterialize(r, td) {
+		t.Fatal("tryMaterialize fired for an exact session_name binding")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if getCount != 0 {
+		t.Errorf("supervisor template lookups = %d, want 0 for exact session_name", getCount)
+	}
+	if materializeCount != 0 {
+		t.Errorf("materialize POSTs = %d, want 0 (would create an orphan)", materializeCount)
+	}
+	if got := h.gw.materializeRequests.Load(); got != 0 {
+		t.Errorf("company_materialize_requests = %d, want 0", got)
+	}
+}
+
 // ---- item: unbound target stays failed (no self-heal) ----------------------
 
 // TestCompanyUnboundTargetStaysFailedNoSelfHeal proves an unbound receiver is a

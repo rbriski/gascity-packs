@@ -1614,12 +1614,19 @@ func recordHeal(results map[string]TargetDelivery, removeKeys map[string]bool, k
 // tryMaterialize fires at most ONE session-materialization POST per (city,
 // session) per sweep interval for a cold bound target stuck in session_missing.
 // It POSTs /v0/city/{city}/sessions {"name": <n>, "kind": "agent"} with an
-// Idempotency-Key of materialize:<receipt>:<session>, where <n> is the binding
-// session when it looks like a template/pool name, else the supervisor record's
-// template. It reports whether a POST was fired this pass (false = throttled or
-// no derivable name). Best-effort: any transport/status outcome leaves the target
+// Idempotency-Key of materialize:<receipt>:<session>, where <n> is the
+// template/pool-shaped binding session. An exact session_name is never
+// materialized from its supervisor record's former template: that would create
+// an unrelated adhoc instance and leave the stale binding broken. It reports
+// whether a POST was fired this pass (false = exact name, throttled, or no
+// derivable name). Best-effort: any transport/status outcome leaves the target
 // pending for the next sweep to re-probe — the attempts budget bounds everything.
 func (g *companyGateway) tryMaterialize(r *IngressReceipt, td TargetDelivery) bool {
+	if !looksLikeTemplateName(td.Session) {
+		log.Printf("company: materialize skip receipt=%s session=%s: exact session_name binding (materialize would create an orphan)",
+			r.ID, td.Session)
+		return false
+	}
 	targetCity := td.City
 	if targetCity == "" {
 		targetCity = g.cfg.cityName
@@ -1735,42 +1742,15 @@ func (g *companyGateway) postSessionCreate(r *IngressReceipt, td TargetDelivery,
 	return true
 }
 
-// materializeName derives the session-create "name" for a materialization POST:
-// the bound session itself when it looks like a template/pool name (config-form
-// dotted name or dunder runtime alias), else the "template" field of the
-// supervisor's session record when one exists. Empty when neither yields a name.
+// materializeName derives the session-create "name" for a materialization POST.
+// Only template/pool-shaped bindings are materializable; an exact session name
+// must be repaired by rebinding to a live stable session, never by minting an
+// unrelated instance from its former template.
 func (g *companyGateway) materializeName(apiBase, city, session string) string {
 	if looksLikeTemplateName(session) {
 		return session
 	}
-	return g.fetchSessionTemplate(apiBase, city, session)
-}
-
-// fetchSessionTemplate best-effort GETs the supervisor session record and returns
-// its template field, or "" on any error / absent record / empty template. Used
-// only when the bound session name is not itself a materializable template/pool
-// name.
-func (g *companyGateway) fetchSessionTemplate(apiBase, city, session string) string {
-	target := fmt.Sprintf("%s/v0/city/%s/session/%s", apiBase, url.PathEscape(city), url.PathEscape(session))
-	req, err := http.NewRequest(http.MethodGet, target, nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("X-GC-Request", companyDeliverRequestTag)
-	resp, err := g.deliverClient.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, companyMaxErrorBodyBytesRead))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ""
-	}
-	var rec companySessionRecord
-	if err := json.Unmarshal(body, &rec); err != nil {
-		return ""
-	}
-	return rec.Template
+	return ""
 }
 
 // companyCityBase resolves the (targetCity, apiBase) a target delivers against.
