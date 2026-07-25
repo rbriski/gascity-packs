@@ -465,14 +465,23 @@ def test_keyless_peer_input_pointer_parses(
 
 
 def _install_claimed_fixture(outbound, fixture_name: str) -> str:
-    """Copy a golden claimed record into the delegations dir under its own key."""
+    """Copy a golden claimed record into the delegations dir under its own key.
+
+    The pruner evicts terminal records keyed on ``result_claimed_at`` (falling
+    back to ``created_at``); the golden fixtures freeze both to their authoring
+    date, which ages past the retention floor. Re-stamp both to now so the
+    record survives the prune inside post_peer_synthesis and reaches the gate.
+    """
     fixtures = pathlib.Path(__file__).resolve().parent / "fixtures" / "company"
-    text = (fixtures / fixture_name).read_text()
-    data = json.loads(text)
+    data = json.loads((fixtures / fixture_name).read_text())
+    _fresh = outbound._rfc3339(outbound._now())
+    data["created_at"] = _fresh
+    if data.get("result_claimed_at"):
+        data["result_claimed_at"] = _fresh
     key = outbound.delegation_filename(data["team_id"], data["channel_id"], data["ts"])
     ddir = outbound.delegations_dir()
     ddir.mkdir(parents=True, exist_ok=True)
-    (ddir / key).write_text(text)
+    (ddir / key).write_text(json.dumps(data))
     return key
 
 

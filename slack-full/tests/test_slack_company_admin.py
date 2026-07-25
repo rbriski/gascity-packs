@@ -127,12 +127,18 @@ def test_internal_connection_socket_wins_over_tcp(monkeypatch) -> None:
 # --------------------------------------------------------------------------
 
 def _install_claimed(mod, fixture_name: str) -> str:
-    text = (FIXTURES / fixture_name).read_text()
-    data = json.loads(text)
+    # Prune evicts terminal records keyed on result_claimed_at (fallback
+    # created_at); the golden fixtures freeze both to their authoring date,
+    # which ages past the retention floor. Re-stamp both to now.
+    data = json.loads((FIXTURES / fixture_name).read_text())
+    _fresh = mod.outbound._rfc3339(mod.outbound._now())
+    data["created_at"] = _fresh
+    if data.get("result_claimed_at"):
+        data["result_claimed_at"] = _fresh
     key = mod.outbound.delegation_filename(data["team_id"], data["channel_id"], data["ts"])
     ddir = mod.outbound.delegations_dir()
     ddir.mkdir(parents=True, exist_ok=True)
-    (ddir / key).write_text(text)
+    (ddir / key).write_text(json.dumps(data))
     return key
 
 
