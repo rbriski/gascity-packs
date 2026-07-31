@@ -18,6 +18,8 @@ FILES = ("index.html", "styles.css")
 MAX_FILE_BYTES = 2_000_000
 DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+SOURCE_FILE_FLAGS = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+READ_CHUNK_BYTES = 64 * 1024
 
 
 class PublishError(RuntimeError):
@@ -135,6 +137,48 @@ def write_stage_file(stage_fd: int, name: str, content: bytes) -> None:
         raise
 
 
+def read_source_file(source_fd: int, source: Path, name: str) -> bytes:
+    """Read one required bundle file through a no-follow descriptor.
+
+    The size checks deliberately happen on the opened descriptor, rather than
+    a path that could be swapped after validation.  Reads are capped at one
+    byte beyond MAX_FILE_BYTES so an input that grows after fstat cannot cause
+    an unbounded allocation.
+    """
+    path = source / name
+    try:
+        descriptor = os.open(name, SOURCE_FILE_FLAGS, dir_fd=source_fd)
+    except OSError as exc:
+        raise PublishError(f"required report file is missing or unsafe: {path}") from exc
+    try:
+        initial = os.fstat(descriptor)
+        if not stat.S_ISREG(initial.st_mode):
+            raise PublishError(f"required report file is missing or unsafe: {path}")
+        if initial.st_size <= 0 or initial.st_size > MAX_FILE_BYTES:
+            raise PublishError(f"report file has invalid size: {path}")
+
+        content = bytearray()
+        while True:
+            remaining = MAX_FILE_BYTES + 1 - len(content)
+            if remaining == 0:
+                raise PublishError(f"report file has invalid size: {path}")
+            chunk = os.read(descriptor, min(READ_CHUNK_BYTES, remaining))
+            if not chunk:
+                break
+            content.extend(chunk)
+
+        final = os.fstat(descriptor)
+        if (
+            len(content) != initial.st_size
+            or final.st_size != initial.st_size
+            or not stat.S_ISREG(final.st_mode)
+        ):
+            raise PublishError(f"report file changed while reading: {path}")
+        return bytes(content)
+    finally:
+        os.close(descriptor)
+
+
 def publish_bundle(destination_name: str, destination_root_fd: int, payloads: dict[str, bytes]) -> None:
     """Publish a complete bundle, retaining the previous bundle on write failure."""
     stage, stage_fd = create_private_directory(destination_root_fd, f"{destination_name}.stage-")
@@ -193,18 +237,14 @@ def publish(source: Path, destination_root: Path, slug: str = "") -> Path:
     slug = slug.strip() or source.parent.name
     if not SAFE_SLUG.fullmatch(slug):
         raise PublishError(f"unsafe report slug: {slug!r}")
+    source_fd = os.open(source, DIRECTORY_FLAGS)
+    try:
+        payloads = {name: read_source_file(source_fd, source, name) for name in FILES}
+    finally:
+        os.close(source_fd)
+
     destination_root, destination_root_fd = open_destination_root(destination_root)
     destination = destination_root / slug
-
-    payloads: dict[str, bytes] = {}
-    for name in FILES:
-        path = source / name
-        if path.is_symlink() or not path.is_file():
-            raise PublishError(f"required report file is missing or unsafe: {path}")
-        content = path.read_bytes()
-        if not content or len(content) > MAX_FILE_BYTES:
-            raise PublishError(f"report file has invalid size: {path}")
-        payloads[name] = content
     try:
         publish_bundle(slug, destination_root_fd, payloads)
     finally:

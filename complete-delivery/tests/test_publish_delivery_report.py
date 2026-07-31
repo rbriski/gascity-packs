@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 import tempfile
 import unittest
@@ -60,6 +61,76 @@ class PublishDeliveryReportTests(unittest.TestCase):
             (source / "styles.css").write_text("body{}", encoding="utf-8")
             with self.assertRaises(publisher.PublishError):
                 publisher.publish(source, root / "public", "safe")
+
+    def test_rejects_non_regular_bundle_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            source.mkdir()
+            os.mkfifo(source / "index.html")
+            (source / "styles.css").write_text("body{}", encoding="utf-8")
+
+            with self.assertRaises(publisher.PublishError):
+                publisher.publish(source, root / "public", "safe")
+
+    def test_rejects_empty_bundle_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            source.mkdir()
+            (source / "index.html").write_bytes(b"")
+            (source / "styles.css").write_text("body{}", encoding="utf-8")
+
+            with self.assertRaises(publisher.PublishError):
+                publisher.publish(source, root / "public", "safe")
+
+    def test_rejects_oversized_bundle_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            source.mkdir()
+            (source / "index.html").write_bytes(b"x" * (publisher.MAX_FILE_BYTES + 1))
+            (source / "styles.css").write_text("body{}", encoding="utf-8")
+
+            with self.assertRaises(publisher.PublishError):
+                publisher.publish(source, root / "public", "safe")
+
+    def test_rejects_growth_after_fstat_without_unbounded_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            source.mkdir()
+            report = source / "index.html"
+            report.write_bytes(b"x" * publisher.MAX_FILE_BYTES)
+            (source / "styles.css").write_text("body{}", encoding="utf-8")
+            original_fstat = publisher.os.fstat
+            original_read = publisher.os.read
+            grew = False
+            bytes_read = 0
+
+            def grow_after_fstat(descriptor: int) -> os.stat_result:
+                nonlocal grew
+                result = original_fstat(descriptor)
+                if not grew:
+                    grew = True
+                    with report.open("ab") as handle:
+                        handle.write(b"y")
+                return result
+
+            def count_read(descriptor: int, size: int) -> bytes:
+                nonlocal bytes_read
+                chunk = original_read(descriptor, size)
+                bytes_read += len(chunk)
+                return chunk
+
+            with (
+                mock.patch.object(publisher.os, "fstat", side_effect=grow_after_fstat),
+                mock.patch.object(publisher.os, "read", side_effect=count_read),
+            ):
+                with self.assertRaises(publisher.PublishError):
+                    publisher.publish(source, root / "public", "safe")
+
+            self.assertLessEqual(bytes_read, publisher.MAX_FILE_BYTES + 1)
 
     def test_rejects_symlinked_source_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

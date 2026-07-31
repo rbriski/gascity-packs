@@ -6,6 +6,7 @@ import pathlib
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = (
@@ -203,6 +204,39 @@ class DeliveryReportTests(unittest.TestCase):
                 production_url="",
             )
             self.assertEqual(delivery_report.validate_final(args)["sha"], merge_sha)
+
+    def test_final_validation_requires_future_non_deploy_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = pathlib.Path(directory) / "state.json"
+            future_stage = "security-review"
+            with mock.patch.object(
+                delivery_report, "STAGES", (*delivery_report.STAGES, future_stage)
+            ):
+                delivery_report.main(
+                    ["init", "--state", str(state_path), "--title", "Safe", "--goal", "Goal"]
+                )
+                state = delivery_report.load_state(state_path)
+                for stage in delivery_report.STAGES:
+                    if stage != future_stage:
+                        state["stages"][stage] = {
+                            "status": "passed",
+                            "summary": "Verified",
+                            "evidence": [],
+                        }
+                merge_sha = "c" * 40
+                pr_url = "https://github.com/owner/repo/pull/9"
+                state.update(sha=merge_sha, pr_url=pr_url)
+                delivery_report.persist(state_path, state)
+                args = types.SimpleNamespace(
+                    state=state_path,
+                    merge_sha=merge_sha,
+                    deployed_sha=merge_sha,
+                    deploy_status="verified",
+                    pr_url=pr_url,
+                    production_url="",
+                )
+                with self.assertRaisesRegex(delivery_report.ReportError, future_stage):
+                    delivery_report.validate_final(args)
 
 
 if __name__ == "__main__":

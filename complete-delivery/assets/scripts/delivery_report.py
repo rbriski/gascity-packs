@@ -205,19 +205,10 @@ def validate_final(args: argparse.Namespace) -> dict[str, Any]:
         raise ReportError("deploy status must be verified or not_applicable")
 
     stages = state.get("stages") or {}
-    for stage in (
-        "intake",
-        "plan",
-        "implementation",
-        "local-gates",
-        "review",
-        "qa",
-        "pull-request",
-        "external-review",
-        "merge",
-        "verify",
-        "complete",
-    ):
+    # Every lifecycle stage remains mandatory unless it is the sole
+    # deployment exception handled below.  Deriving this from STAGES keeps a
+    # newly-added stage from silently bypassing final validation.
+    for stage in (stage for stage in STAGES if stage != "deploy"):
         status = (stages.get(stage) or {}).get("status")
         if status != "passed":
             raise ReportError(f"final report stage {stage!r} must be passed (got {status!r})")
