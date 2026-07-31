@@ -185,6 +185,34 @@ class DeliveryGateTests(unittest.TestCase):
 
         self.assertTrue(self.evaluate(client)["passed"])
 
+    def test_out_of_order_change_requests_keep_latest_request(self) -> None:
+        client = FakeClient()
+        client.review_items = [
+            {
+                "user": {"login": "reviewer"},
+                "commit_id": client.head,
+                "state": "CHANGES_REQUESTED",
+                "submitted_at": "2026-07-31T03:00:00Z",
+            },
+            {
+                "user": {"login": "reviewer"},
+                "commit_id": client.head,
+                "state": "CHANGES_REQUESTED",
+                "submitted_at": "2026-07-31T01:00:00Z",
+            },
+            {
+                "user": {"login": "reviewer"},
+                "commit_id": client.head,
+                "state": "APPROVED",
+                "submitted_at": "2026-07-31T02:00:00Z",
+            },
+        ]
+
+        result = self.evaluate(client)
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["human_change_requests"], ["reviewer"])
+
     def test_dismissed_human_review_does_not_block(self) -> None:
         client = FakeClient()
         client.review_items = [

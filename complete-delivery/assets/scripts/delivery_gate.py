@@ -449,7 +449,7 @@ def current_human_change_requests(
         submitted_at = str(review.get("submitted_at") or "")
         if state == "CHANGES_REQUESTED":
             current = latest_change_request.get(login)
-            if current is None or submitted_at >= current[0]:
+            if current is None or submitted_at >= current:
                 latest_change_request[login] = submitted_at
         elif state == "APPROVED":
             current = latest_approval.get(login)
