@@ -398,24 +398,32 @@ def coderabbit_completion(
 def current_human_change_requests(
     reviews: list[dict[str, Any]], head_sha: str
 ) -> list[str]:
-    latest_by_login: dict[str, dict[str, Any]] = {}
+    latest_change_request: dict[str, str] = {}
+    latest_approval: dict[str, str] = {}
     for review in reviews:
         login = nested_string(review, "user", "login")
         if not login or login.lower() in CODERABBIT_LOGINS:
             continue
         if str(review.get("commit_id") or "") != head_sha:
             continue
-        if str(review.get("state") or "") == "DISMISSED":
+        state = str(review.get("state") or "")
+        if state == "DISMISSED":
             continue
-        current = latest_by_login.get(login)
-        if current is None or str(review.get("submitted_at") or "") >= str(
-            current.get("submitted_at") or ""
-        ):
-            latest_by_login[login] = review
+
+        submitted_at = str(review.get("submitted_at") or "")
+        if state == "CHANGES_REQUESTED":
+            current = latest_change_request.get(login)
+            if current is None or submitted_at >= current[0]:
+                latest_change_request[login] = submitted_at
+        elif state == "APPROVED":
+            current = latest_approval.get(login)
+            if current is None or submitted_at >= current:
+                latest_approval[login] = submitted_at
+
     return sorted(
         login
-        for login, review in latest_by_login.items()
-        if str(review.get("state") or "") == "CHANGES_REQUESTED"
+        for login, requested_at in latest_change_request.items()
+        if latest_approval.get(login, "") <= requested_at
     )
 
 
