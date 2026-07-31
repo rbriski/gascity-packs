@@ -40,6 +40,7 @@ VERIFY_COMMAND="$(delivery_var deploy_verify_command '')"
 SMOKE_COMMAND="$(delivery_var smoke_command '')"
 NA_REASON="$(delivery_var deploy_not_applicable_reason '')"
 PRODUCTION_URL="$(delivery_var production_url '')"
+BASE_BRANCH="$(delivery_var base_branch main)"
 
 require_bool push "$PUSH"
 require_bool open_pr "$OPEN_PR"
@@ -101,6 +102,19 @@ if command -v gh >/dev/null 2>&1; then
     errors+=("gh is not authenticated")
   elif ! (cd "$DELIVERY_WORK_DIR" && gh repo view --json nameWithOwner >/dev/null 2>&1); then
     errors+=("gh cannot resolve the repository from the launcher worktree")
+  else
+    ENCODED_BRANCH="$(python3 - "$BASE_BRANCH" <<'PY'
+import sys
+from urllib.parse import quote
+
+print(quote(sys.argv[1], safe=""))
+PY
+)"
+    if ! (cd "$DELIVERY_WORK_DIR" && \
+      gh api "repos/{owner}/{repo}/branches/$ENCODED_BRANCH/protection" \
+        --silent >/dev/null 2>&1); then
+      errors+=("base branch must be protected and readable through GitHub: $BASE_BRANCH")
+    fi
   fi
 fi
 if command -v git >/dev/null 2>&1; then

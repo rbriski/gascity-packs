@@ -94,12 +94,14 @@ deploy_verify_command = "./scripts/deploy-status.sh --expect-sha \"$DELIVERY_SHA
 smoke_command = "./scripts/smoke-production.sh --expect-sha \"$DELIVERY_SHA\""
 production_url = "https://service.example.com"
 
-report_publish_command = "python3 .gc/scripts/publish_delivery_report.py --source \"$DELIVERY_REPORT_DIR\" --destination-root /srv/reports/deliveries"
+report_publish_command = "gc complete-delivery report publish --source \"$DELIVERY_REPORT_DIR\" --destination-root /srv/reports/deliveries"
 ```
 
-The early `delivery-preflight` check validates this profile, Git, and `gh`
-authentication before planning begins. A bad profile fails in minutes with a
-single list of missing settings instead of surfacing after implementation.
+The early `delivery-preflight` check validates this profile, Git, `gh`
+authentication, and readable protection on `base_branch` before planning
+begins. A bad profile fails in minutes with a single list of missing settings
+instead of surfacing after implementation. The PR gate evaluates the union of
+explicitly named checks and every check required by branch protection.
 
 Shell commands are trusted repository-owner configuration and run from the
 workflow worktree via `bash -lc`. Do not put untrusted issue or PR text in a
@@ -178,8 +180,9 @@ The workflow creates one report bundle under
 
 Milestones update after plan approval, implementation, internal review/QA,
 PR publication, every external-review pass, merge, deployment, and production
-verification. `publish_delivery_report.py` publishes only the rendered HTML
-and CSS, rejects symlinks and unsafe path slugs, and never copies state JSON.
+verification. `gc complete-delivery report publish` publishes only the
+rendered HTML and CSS, rejects symlinks and unsafe path slugs, and never copies
+state JSON.
 The report leads with live/blocker status and the next action; technical
 evidence remains available in the timeline.
 
@@ -187,7 +190,7 @@ evidence remains available in the timeline.
 
 | Variable | Default | Contract |
 | --- | --- | --- |
-| `required_checks` | `auto` | Exact comma-separated names, or branch protection with current-head fallback. |
+| `required_checks` | `auto` | Exact comma-separated names, or protected-branch discovery with current-head fallback. Branch protection is always mandatory. |
 | `coderabbit` | `required` | `required`, `optional`, or `off`; required is the intended production profile. |
 | `allow_no_ci` | `false` | Explicit exception for a repository with no CI. |
 | `setup_command` … `extra_gate_command` | empty | Ordered local profile: setup, lint, typecheck, test, build, browser, security, extra. |

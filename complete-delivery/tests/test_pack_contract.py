@@ -66,6 +66,7 @@ class PackContractTests(unittest.TestCase):
     def test_scripts_are_executable_and_compile_or_parse(self) -> None:
         scripts = [
             PACK_ROOT / "commands" / "delivery" / "start" / "run.sh",
+            PACK_ROOT / "commands" / "report" / "publish" / "run.sh",
             *sorted((PACK_ROOT / "assets" / "scripts").glob("*.py")),
             *sorted((PACK_ROOT / "assets" / "scripts" / "checks").glob("*.sh")),
         ]
@@ -269,6 +270,12 @@ class CommandContractTests(unittest.TestCase):
         result = self.run_command("fi-123", "--rig")
         self.assertEqual(result.returncode, 2)
         self.assertIn("--rig requires a value", result.stderr)
+
+    def test_report_publisher_command_uses_resolved_pack_root(self) -> None:
+        wrapper = PACK_ROOT / "commands" / "report" / "publish" / "run.sh"
+        text = wrapper.read_text(encoding="utf-8")
+        self.assertIn('"$GC_PACK_DIR/assets/scripts/publish_delivery_report.py"', text)
+        self.assertTrue((wrapper.parent / "help.md").is_file())
 
 
 if __name__ == "__main__":

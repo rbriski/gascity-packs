@@ -1,6 +1,6 @@
 Snapshot the pull request's current-head delivery gate.
 
-Run `.gc/scripts/delivery_gate.py` with workflow-root repo/PR,
+Run `{{pack_root}}/assets/scripts/delivery_gate.py` with workflow-root repo/PR,
 `required_checks`, and `coderabbit`, writing
 `<artifact_root>/delivery/pr-gate.json`. A blocked exit is expected while work
 remains: preserve the JSON and close this inspection lane with

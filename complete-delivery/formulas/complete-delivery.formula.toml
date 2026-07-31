@@ -47,7 +47,7 @@ description = "Pull-request target branch."
 default = "main"
 
 [vars.required_checks]
-description = "Comma-separated exact GitHub check names, or auto for branch-protection discovery with head-check fallback."
+description = "Comma-separated exact GitHub check names, or auto for protected-branch discovery with current-head fallback. The base branch must always be protected."
 default = "auto"
 
 [vars.coderabbit]
