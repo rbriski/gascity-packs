@@ -41,6 +41,8 @@ SMOKE_COMMAND="$(delivery_var smoke_command '')"
 NA_REASON="$(delivery_var deploy_not_applicable_reason '')"
 PRODUCTION_URL="$(delivery_var production_url '')"
 BASE_BRANCH="$(delivery_var base_branch main)"
+SOURCE_BEAD_ID="$(delivery_var source_bead_id '')"
+SOURCE_TITLE="$(delivery_var source_title '')"
 
 require_bool push "$PUSH"
 require_bool open_pr "$OPEN_PR"
@@ -50,6 +52,12 @@ require_bool allow_no_smoke "$ALLOW_NO_SMOKE"
 require_enum coderabbit "$CODERABBIT" required optional off
 require_enum merge_method "$MERGE_METHOD" squash merge rebase
 require_enum deploy_mode "$DEPLOY_MODE" command ci not-applicable
+
+[ -n "$SOURCE_BEAD_ID" ] || errors+=("source_bead_id is required; launch from a durable work bead or convoy")
+[ -n "$SOURCE_TITLE" ] || errors+=("source_title is required; resolve the durable source title before launch")
+case "$SOURCE_BEAD_ID" in
+  *[!A-Za-z0-9._-]*|"") errors+=("source_bead_id must be a valid durable bead or convoy ID") ;;
+esac
 
 [ "$PUSH" = "true" ] || errors+=("push must be true for Complete Delivery")
 [ "$OPEN_PR" = "true" ] || errors+=("open_pr must be true for Complete Delivery")
@@ -128,4 +136,4 @@ if [ "${#errors[@]}" -gt 0 ]; then
   delivery_fail "repair the rig formula_vars or named external prerequisite, then retry"
 fi
 
-echo "complete-delivery preflight passed: $LOCAL_GATE_COUNT local gate(s), CI=$REQUIRED_CHECKS, CodeRabbit=$CODERABBIT, deploy=$DEPLOY_MODE"
+echo "complete-delivery preflight passed: source=$SOURCE_BEAD_ID, $LOCAL_GATE_COUNT local gate(s), CI=$REQUIRED_CHECKS, CodeRabbit=$CODERABBIT, deploy=$DEPLOY_MODE"

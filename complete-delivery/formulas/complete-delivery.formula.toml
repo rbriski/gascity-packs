@@ -42,6 +42,14 @@ default = "true"
 description = "Owner-facing title for the living delivery report."
 default = "Complete delivery"
 
+[vars.source_bead_id]
+description = "Durable bead or convoy that supplied the requested delivery intent."
+default = ""
+
+[vars.source_title]
+description = "Validated durable source title used to identify the requested outcome."
+default = ""
+
 [vars.base_branch]
 description = "Pull-request target branch."
 default = "main"
@@ -166,6 +174,36 @@ title = "Initialize the living delivery report"
 needs = ["delivery-preflight"]
 metadata = { "gc.run_target" = "complete-delivery.report-editor" }
 description_file = "../assets/workflows/complete-delivery/report-initialize.md"
+
+[[steps]]
+id = "plan"
+title = "Draft a source-grounded delivery plan"
+needs = ["requirements"]
+metadata = { "gc.run_target" = "gstack.founder-reviewer", "gc.build.artifact_schema" = "gc.build.plan.v1", "gc.build.artifact_path_keys" = "gc.build.plan_path,gc.var.plan_path" }
+description_file = "../assets/workflows/complete-delivery/plan.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"
+
+[[steps]]
+id = "decompose"
+title = "Create source-grounded implementation convoy"
+needs = ["plan-review"]
+metadata = { "gc.run_target" = "gstack.decomposer", "gc.build.artifact_schema" = "gc.build.decomposition.v1", "gc.build.artifact_path_keys" = "gc.build.decomposition_path,gc.var.decomposition_path" }
+description_file = "../assets/workflows/complete-delivery/decompose.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"
 
 [[steps]]
 id = "report-plan"

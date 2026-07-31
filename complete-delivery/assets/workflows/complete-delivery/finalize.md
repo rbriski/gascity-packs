@@ -14,6 +14,13 @@ This is not the terminal delivery claim: say explicitly that PR, external
 review, merge, deploy, and verification still follow. Record the absolute path
 on the workflow root as `gc.build.final_report_path`.
 
+Before finalizing, read `gc.var.source_bead_id` and the durable source bead or
+convoy. Add a `Source trace` subsection that records its ID and title and links
+the approved requirements, plan, and decomposition back to the source
+acceptance criteria. This trace proves the delivered outcome is the requested
+work rather than a coincidental repository-HEAD change. Do not reproduce raw
+source notes or sensitive source text in the public living report.
+
 On repair attempts, read validator errors from `gc.attempt_log` and repair the
 artifact in place. Close with `gc.outcome=pass`; the graph's shared artifact
 validator is authoritative. Do not publish or invoke provider-native

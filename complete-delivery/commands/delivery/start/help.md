@@ -5,7 +5,10 @@ Usage:
 
 The rig's durable `formula_vars` supply its setup, lint, typecheck, test,
 build, browser, security, required-check, CodeRabbit, deploy, verification,
-smoke, and report-publication contract. You provide the work bead once.
+smoke, and report-publication contract. You provide the work bead once. Its
+durable ID and title become the delivery's source-intent record; later stages
+read that bead's title, description, acceptance criteria, and relevant notes
+before using repository state as context.
 
 Flags:
   --rig <name>          Owning rig (defaults to `$GC_RIG`).

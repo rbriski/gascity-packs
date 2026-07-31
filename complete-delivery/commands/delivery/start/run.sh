@@ -74,8 +74,39 @@ command -v gc >/dev/null 2>&1 || {
   exit 1
 }
 
+# Preserve the actual request as formula input.  The target can become a
+# workflow root after sling, so downstream stages must not infer their goal
+# from that root's title or from the repository checkout.
+SOURCE_JSON="$(gc bd show "$BEAD_ID" --json)" || {
+  echo "gc complete-delivery delivery start: cannot read source bead $BEAD_ID" >&2
+  exit 1
+}
+SOURCE_TITLE="$(printf '%s' "$SOURCE_JSON" | python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"source bead response is not valid JSON: {exc}")
+
+if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+    raise SystemExit("source bead response must contain exactly one bead")
+
+title = payload[0].get("title")
+if not isinstance(title, str) or not title.strip():
+    raise SystemExit("source bead has no usable title")
+print(title.strip())
+')" || {
+  echo "gc complete-delivery delivery start: cannot resolve source intent for $BEAD_ID" >&2
+  exit 1
+}
+
 exec gc sling "$RIG/$AGENT" "$BEAD_ID" --on complete-delivery \
   --var "artifact_root=$ARTIFACT_ROOT" \
+  --var "source_bead_id=$BEAD_ID" \
+  --var "source_title=$SOURCE_TITLE" \
+  --var "report_title=$SOURCE_TITLE" \
   --var "interaction_mode=$INTERACTION_MODE" \
   --var "review_mode=$REVIEW_MODE" \
   --var "drain_policy=$DRAIN_POLICY" \
