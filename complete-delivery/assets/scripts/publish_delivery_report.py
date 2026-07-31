@@ -4,18 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
-import shutil
+import secrets
 import stat
-import tempfile
 from pathlib import Path
 
 
 SAFE_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 FILES = ("index.html", "styles.css")
 MAX_FILE_BYTES = 2_000_000
+DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
 
 
 class PublishError(RuntimeError):
@@ -45,64 +47,139 @@ def reject_symlinked_ancestors(path: Path) -> Path:
     return path
 
 
-def atomic_bytes(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+def open_destination_root(path: Path) -> tuple[Path, int]:
+    """Create and open a destination directory without following path links.
+
+    Each component is opened relative to its already-trusted parent descriptor.
+    This deliberately avoids validating a pathname and then using it later: a
+    caller can replace the visible pathname at any point, but never redirect an
+    operation performed through the returned descriptor.
+    """
+    path = reject_symlinked_ancestors(path)
+    descriptor = os.open(path.anchor, DIRECTORY_FLAGS)
+    try:
+        for part in path.parts[1:]:
+            try:
+                child = os.open(part, DIRECTORY_FLAGS, dir_fd=descriptor)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    # Another process created it. Opening with O_NOFOLLOW is
+                    # the authoritative check that it is a real directory.
+                    pass
+                child = os.open(part, DIRECTORY_FLAGS, dir_fd=descriptor)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise PublishError(
+                        f"report destination must not have a symlinked or non-directory ancestor: {path}"
+                    ) from exc
+                raise
+            os.close(descriptor)
+            descriptor = child
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return path, descriptor
+
+
+def create_private_directory(parent_fd: int, prefix: str) -> tuple[str, int]:
+    """Create a private child directory using a trusted parent descriptor."""
+    for _ in range(100):
+        name = f".{prefix}{secrets.token_hex(16)}"
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            continue
+        try:
+            return name, os.open(name, DIRECTORY_FLAGS, dir_fd=parent_fd)
+        except BaseException:
+            try:
+                os.rmdir(name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            raise
+    raise PublishError("could not allocate private report staging directory")
+
+
+def remove_tree(name: str, parent_fd: int) -> None:
+    """Remove a publisher-owned directory tree without resolving its pathname."""
+    try:
+        descriptor = os.open(name, DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return
+    try:
+        for child in os.listdir(descriptor):
+            child_stat = os.stat(child, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(child_stat.st_mode):
+                remove_tree(child, descriptor)
+            else:
+                os.unlink(child, dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def write_stage_file(stage_fd: int, name: str, content: bytes) -> None:
+    descriptor = os.open(name, FILE_FLAGS, 0o600, dir_fd=stage_fd)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
     except BaseException:
         try:
-            os.unlink(temporary)
+            os.unlink(name, dir_fd=stage_fd)
         except FileNotFoundError:
             pass
         raise
 
 
-def publish_bundle(destination: Path, payloads: dict[str, bytes]) -> None:
+def publish_bundle(destination_name: str, destination_root_fd: int, payloads: dict[str, bytes]) -> None:
     """Publish a complete bundle, retaining the previous bundle on write failure."""
-    stage = Path(tempfile.mkdtemp(prefix=f".{destination.name}.stage-", dir=destination.parent))
+    stage, stage_fd = create_private_directory(destination_root_fd, f"{destination_name}.stage-")
     try:
         for name, content in payloads.items():
-            atomic_bytes(stage / name, content)
+            write_stage_file(stage_fd, name, content)
+        os.fsync(stage_fd)
+        os.close(stage_fd)
+        stage_fd = -1
 
-        # The staging writes can take long enough for a caller-controlled path
-        # to change. Validate the final parent and target again before swapping.
-        reject_symlinked_ancestors(destination.parent)
-        if destination.is_symlink():
-            raise PublishError(f"report destination must not be a symlink: {destination}")
-        if destination.exists() and not destination.is_dir():
-            raise PublishError(f"report destination is not a directory: {destination}")
-        if not destination.exists():
-            os.replace(stage, destination)
+        try:
+            target_stat = os.stat(
+                destination_name, dir_fd=destination_root_fd, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            target_stat = None
+        if target_stat is not None and not stat.S_ISDIR(target_stat.st_mode):
+            raise PublishError(f"report destination is not a directory: {destination_name}")
+        if target_stat is None:
+            os.rename(stage, destination_name, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
             return
 
-        backup = Path(
-            tempfile.mkdtemp(prefix=f".{destination.name}.backup-", dir=destination.parent)
-        )
-        backup.rmdir()
+        backup, backup_fd = create_private_directory(destination_root_fd, f"{destination_name}.backup-")
+        os.close(backup_fd)
+        os.rmdir(backup, dir_fd=destination_root_fd)
         try:
-            os.replace(destination, backup)
+            os.rename(destination_name, backup, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
             try:
-                os.replace(stage, destination)
+                os.rename(stage, destination_name, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
             except BaseException:
-                os.replace(backup, destination)
+                os.rename(backup, destination_name, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
                 raise
         except BaseException:
+            remove_tree(backup, destination_root_fd)
             raise
         else:
-            shutil.rmtree(backup)
+            remove_tree(backup, destination_root_fd)
     finally:
-        if stage.exists():
-            shutil.rmtree(stage)
+        if stage_fd != -1:
+            os.close(stage_fd)
+        remove_tree(stage, destination_root_fd)
 
 
 def publish(source: Path, destination_root: Path, slug: str = "") -> Path:
     source = source.expanduser()
-    destination_root = reject_symlinked_ancestors(destination_root)
     if source.is_symlink():
         raise PublishError(f"report source must not be a symlink: {source}")
     source = source.resolve()
@@ -111,14 +188,8 @@ def publish(source: Path, destination_root: Path, slug: str = "") -> Path:
     slug = slug.strip() or source.parent.name
     if not SAFE_SLUG.fullmatch(slug):
         raise PublishError(f"unsafe report slug: {slug!r}")
-    destination_root.mkdir(parents=True, exist_ok=True)
-    destination_root = reject_symlinked_ancestors(destination_root)
-    unresolved_destination = destination_root / slug
-    if unresolved_destination.is_symlink():
-        raise PublishError(f"report destination must not be a symlink: {unresolved_destination}")
-    destination = unresolved_destination
-    if destination.exists() and not destination.is_dir():
-        raise PublishError(f"report destination is not a directory: {destination}")
+    destination_root, destination_root_fd = open_destination_root(destination_root)
+    destination = destination_root / slug
 
     payloads: dict[str, bytes] = {}
     for name in FILES:
@@ -129,7 +200,10 @@ def publish(source: Path, destination_root: Path, slug: str = "") -> Path:
         if not content or len(content) > MAX_FILE_BYTES:
             raise PublishError(f"report file has invalid size: {path}")
         payloads[name] = content
-    publish_bundle(destination, payloads)
+    try:
+        publish_bundle(slug, destination_root_fd, payloads)
+    finally:
+        os.close(destination_root_fd)
     return destination
 
 

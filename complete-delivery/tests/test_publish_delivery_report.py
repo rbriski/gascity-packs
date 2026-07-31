@@ -110,17 +110,17 @@ class PublishDeliveryReportTests(unittest.TestCase):
             self.write_bundle(source, "new")
             destination = root / "public" / "safe"
             self.write_bundle(destination, "old")
-            original_atomic_bytes = publisher.atomic_bytes
+            original_write_stage_file = publisher.write_stage_file
             calls = 0
 
-            def fail_second_write(path: pathlib.Path, content: bytes) -> None:
+            def fail_second_write(stage_fd: int, name: str, content: bytes) -> None:
                 nonlocal calls
                 calls += 1
                 if calls == 2:
                     raise OSError("simulated second write failure")
-                original_atomic_bytes(path, content)
+                original_write_stage_file(stage_fd, name, content)
 
-            with mock.patch.object(publisher, "atomic_bytes", side_effect=fail_second_write):
+            with mock.patch.object(publisher, "write_stage_file", side_effect=fail_second_write):
                 with self.assertRaises(OSError):
                     publisher.publish(source, root / "public", "safe")
 
@@ -133,17 +133,17 @@ class PublishDeliveryReportTests(unittest.TestCase):
             root = pathlib.Path(directory)
             source = root / "source"
             self.write_bundle(source, "new")
-            original_atomic_bytes = publisher.atomic_bytes
+            original_write_stage_file = publisher.write_stage_file
             calls = 0
 
-            def fail_second_write(path: pathlib.Path, content: bytes) -> None:
+            def fail_second_write(stage_fd: int, name: str, content: bytes) -> None:
                 nonlocal calls
                 calls += 1
                 if calls == 2:
                     raise OSError("simulated second write failure")
-                original_atomic_bytes(path, content)
+                original_write_stage_file(stage_fd, name, content)
 
-            with mock.patch.object(publisher, "atomic_bytes", side_effect=fail_second_write):
+            with mock.patch.object(publisher, "write_stage_file", side_effect=fail_second_write):
                 with self.assertRaises(OSError):
                     publisher.publish(source, root / "public", "safe")
 
@@ -156,14 +156,14 @@ class PublishDeliveryReportTests(unittest.TestCase):
             source = root / "source"
             self.write_bundle(source, "new")
             destination = root / "public" / "safe"
-            original_replace = publisher.os.replace
+            original_rename = publisher.os.rename
 
-            def fail_staged_commit(source_path: object, destination_path: object) -> None:
-                if pathlib.Path(source_path).name.startswith(".safe.stage-"):
+            def fail_staged_commit(source_path: object, destination_path: object, **kwargs: object) -> None:
+                if str(source_path).startswith(".safe.stage-"):
                     raise OSError("simulated bundle commit failure")
-                original_replace(source_path, destination_path)
+                original_rename(source_path, destination_path, **kwargs)
 
-            with mock.patch.object(publisher.os, "replace", side_effect=fail_staged_commit):
+            with mock.patch.object(publisher.os, "rename", side_effect=fail_staged_commit):
                 with self.assertRaises(OSError):
                     publisher.publish(source, root / "public", "safe")
 
@@ -177,20 +177,84 @@ class PublishDeliveryReportTests(unittest.TestCase):
             self.write_bundle(source, "new")
             destination = root / "public" / "safe"
             self.write_bundle(destination, "old")
-            original_replace = publisher.os.replace
+            original_rename = publisher.os.rename
 
-            def fail_staged_commit(source_path: object, destination_path: object) -> None:
-                if pathlib.Path(source_path).name.startswith(".safe.stage-"):
+            def fail_staged_commit(source_path: object, destination_path: object, **kwargs: object) -> None:
+                if str(source_path).startswith(".safe.stage-"):
                     raise OSError("simulated bundle commit failure")
-                original_replace(source_path, destination_path)
+                original_rename(source_path, destination_path, **kwargs)
 
-            with mock.patch.object(publisher.os, "replace", side_effect=fail_staged_commit):
+            with mock.patch.object(publisher.os, "rename", side_effect=fail_staged_commit):
                 with self.assertRaises(OSError):
                     publisher.publish(source, root / "public", "safe")
 
             self.assertEqual((destination / "index.html").read_text(encoding="utf-8"), "<html>old</html>")
             self.assertEqual((destination / "styles.css").read_text(encoding="utf-8"), "body{old}")
             self.assertEqual(list((root / "public").glob(".safe.*")), [])
+
+    def test_destination_root_swap_before_staging_cannot_redirect_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            self.write_bundle(source, "new")
+            destination_root = root / "public"
+            destination_root.mkdir()
+            self.write_bundle(destination_root / "safe", "old")
+            outside = root / "outside"
+            outside.mkdir()
+            displaced_root = root / "displaced-public"
+            original_create = publisher.create_private_directory
+            swapped = False
+
+            def swap_before_staging(parent_fd: int, prefix: str) -> tuple[str, int]:
+                nonlocal swapped
+                if prefix == "safe.stage-" and not swapped:
+                    swapped = True
+                    destination_root.rename(displaced_root)
+                    destination_root.symlink_to(outside, target_is_directory=True)
+                return original_create(parent_fd, prefix)
+
+            with mock.patch.object(
+                publisher, "create_private_directory", side_effect=swap_before_staging
+            ):
+                publisher.publish(source, destination_root, "safe")
+
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(
+                (displaced_root / "safe" / "index.html").read_text(encoding="utf-8"),
+                "<html>new</html>",
+            )
+
+    def test_destination_root_swap_during_commit_cannot_redirect_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            self.write_bundle(source, "new")
+            destination_root = root / "public"
+            destination_root.mkdir()
+            self.write_bundle(destination_root / "safe", "old")
+            outside = root / "outside"
+            outside.mkdir()
+            displaced_root = root / "displaced-public"
+            original_rename = publisher.os.rename
+            swapped = False
+
+            def swap_during_commit(source_path: object, destination_path: object, **kwargs: object) -> None:
+                nonlocal swapped
+                if str(source_path).startswith(".safe.stage-") and not swapped:
+                    swapped = True
+                    destination_root.rename(displaced_root)
+                    destination_root.symlink_to(outside, target_is_directory=True)
+                original_rename(source_path, destination_path, **kwargs)
+
+            with mock.patch.object(publisher.os, "rename", side_effect=swap_during_commit):
+                publisher.publish(source, destination_root, "safe")
+
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(
+                (displaced_root / "safe" / "styles.css").read_text(encoding="utf-8"),
+                "body{new}",
+            )
 
 
 if __name__ == "__main__":
