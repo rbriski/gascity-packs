@@ -211,6 +211,15 @@ reviewing, and shipping the PRs your city authors.
   open a PR, self-review — into one map. It imports `pr-pipeline` for steps 2-4
   and adds the net-new `write-issue` issue-authoring discipline for step 1.
 
+### CI runner configuration
+
+The `CI`, `CodeQL`, and `Pack Release Compatibility` workflows use the
+repository variable `GASCITY_PACKS_CI_RUNNER`. It defaults to
+`blacksmith-32vcpu-ubuntu-2404` for the upstream repository. Forks without
+Blacksmith access can set the variable under **Settings → Secrets and variables
+→ Actions → Variables** to a compatible GitHub-hosted runner label, such as
+`ubuntu-latest`.
+
 ## Contributing
 
 Issues and pull requests are welcome. When a pack's surface changes, update
