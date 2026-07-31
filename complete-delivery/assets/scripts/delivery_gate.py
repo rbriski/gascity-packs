@@ -17,7 +17,7 @@ import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from urllib.parse import quote
 
 
@@ -43,6 +43,7 @@ class Check:
     url: str = ""
     actor: str = ""
     app_slug: str = ""
+    app_id: int | None = None
     updated_at: str = ""
     detail: str = ""
 
@@ -59,9 +60,22 @@ class ReviewThread:
 
 
 @dataclass(frozen=True)
+class RequiredCheck:
+    """A required check, optionally bound to the GitHub App that owns it."""
+
+    name: str
+    app_id: int | None = None
+
+
+@dataclass(frozen=True)
 class BranchProtection:
     protected: bool
-    required_contexts: tuple[str, ...]
+    required_checks: tuple[RequiredCheck, ...]
+
+    @property
+    def required_contexts(self) -> tuple[str, ...]:
+        """The legacy context-name view retained in gate output."""
+        return tuple(sorted({check.name for check in self.required_checks}))
 
 
 class GitHubClient(Protocol):
@@ -157,19 +171,46 @@ class GhClient:
             allow_not_found=True,
         )
         if not value:
-            return BranchProtection(protected=False, required_contexts=())
+            return BranchProtection(protected=False, required_checks=())
         if not isinstance(value, dict):
             raise GateError("branch-protection response was not an object")
         required = value.get("required_status_checks") or {}
         if not isinstance(required, dict):
             raise GateError("branch protection required_status_checks was not an object")
-        names = [item for item in required.get("contexts", []) if isinstance(item, str)]
+        contexts = [
+            item for item in required.get("contexts", []) if isinstance(item, str)
+        ]
+        checks: list[RequiredCheck] = []
+        check_contexts: set[str] = set()
         for item in required.get("checks", []):
             if isinstance(item, dict) and isinstance(item.get("context"), str):
-                names.append(item["context"])
+                app_id = item.get("app_id")
+                checks.append(
+                    RequiredCheck(
+                        item["context"],
+                        app_id if isinstance(app_id, int) and not isinstance(app_id, bool) else None,
+                    )
+                )
+                check_contexts.add(item["context"])
+        # Modern branch protection repeats check names in ``contexts``.  When
+        # a structured check is present, retain its app binding instead of
+        # adding an unbound duplicate that a legacy status could satisfy.
+        checks.extend(
+            RequiredCheck(context)
+            for context in contexts
+            if context not in check_contexts
+        )
         return BranchProtection(
             protected=True,
-            required_contexts=tuple(sorted(set(names))),
+            required_checks=tuple(
+                sorted(
+                    set(checks),
+                    key=lambda check: (
+                        check.name,
+                        -1 if check.app_id is None else check.app_id,
+                    ),
+                )
+            ),
         )
 
     def reviews(self, repo: str, number: int) -> list[dict[str, Any]]:
@@ -261,12 +302,30 @@ class FixtureClient:
         if not isinstance(value, dict):
             raise GateError("fixture branch_protection was not an object")
         names = value.get("required_contexts") or []
-        if not isinstance(names, list):
+        raw_checks = value.get("required_checks") or []
+        if not isinstance(names, list) or not isinstance(raw_checks, list):
             raise GateError("fixture branch protection contexts were not a list")
+        checks = [RequiredCheck(item) for item in names if isinstance(item, str)]
+        for item in raw_checks:
+            if not isinstance(item, dict) or not isinstance(item.get("context"), str):
+                continue
+            app_id = item.get("app_id")
+            checks.append(
+                RequiredCheck(
+                    item["context"],
+                    app_id if isinstance(app_id, int) and not isinstance(app_id, bool) else None,
+                )
+            )
         return BranchProtection(
             protected=bool(value.get("protected")),
-            required_contexts=tuple(
-                sorted(set(item for item in names if isinstance(item, str)))
+            required_checks=tuple(
+                sorted(
+                    set(checks),
+                    key=lambda check: (
+                        check.name,
+                        -1 if check.app_id is None else check.app_id,
+                    ),
+                )
             ),
         )
 
@@ -303,6 +362,13 @@ def normalize_check_run(run: dict[str, Any]) -> Check:
         url=str(run.get("html_url") or run.get("details_url") or ""),
         actor=nested_string(run, "app", "name"),
         app_slug=nested_string(run, "app", "slug"),
+        app_id=(
+            run.get("app", {}).get("id")
+            if isinstance(run.get("app"), dict)
+            and isinstance(run["app"].get("id"), int)
+            and not isinstance(run["app"].get("id"), bool)
+            else None
+        ),
         updated_at=str(run.get("completed_at") or run.get("started_at") or ""),
     )
 
@@ -321,17 +387,27 @@ def normalize_status(status: dict[str, Any]) -> Check:
     )
 
 
-def latest_checks(client: GitHubClient, repo: str, sha: str) -> dict[str, Check]:
+def latest_checks(client: GitHubClient, repo: str, sha: str) -> list[Check]:
     checks = [normalize_check_run(item) for item in client.check_runs(repo, sha)]
     checks.extend(normalize_status(item) for item in client.statuses(repo, sha))
-    latest: dict[str, Check] = {}
-    for check in checks:
-        if not check.name:
-            continue
-        current = latest.get(check.name)
-        if current is None or check.updated_at >= current.updated_at:
-            latest[check.name] = check
-    return latest
+    return [check for check in checks if check.name]
+
+
+def latest_check(checks: list[Check], requirement: RequiredCheck) -> Check | None:
+    """Return the newest signal that is eligible for one requirement.
+
+    App-bound requirements must be satisfied by a check run from that exact
+    app.  Legacy unbound contexts deliberately continue to accept the newest
+    same-name check run or commit status.
+    """
+    candidates = [check for check in checks if check.name == requirement.name]
+    if requirement.app_id is not None:
+        candidates = [
+            check
+            for check in candidates
+            if check.source == "check_run" and check.app_id == requirement.app_id
+        ]
+    return max(candidates, key=lambda check: check.updated_at) if candidates else None
 
 
 def parse_required_checks(raw: str) -> list[str]:
@@ -341,32 +417,46 @@ def parse_required_checks(raw: str) -> list[str]:
 def resolve_required_checks(
     protection: BranchProtection,
     configured: str,
-    checks: dict[str, Check],
-) -> tuple[list[str], str]:
+    checks: list[Check],
+) -> tuple[list[RequiredCheck], str]:
     if configured.strip().lower() != "auto":
-        configured_names = set(parse_required_checks(configured))
-        branch_names = set(protection.required_contexts)
+        configured_checks = {
+            RequiredCheck(name) for name in parse_required_checks(configured)
+        }
+        branch_checks = set(protection.required_checks)
         source = "configured"
-        if branch_names:
+        if branch_checks:
             source = "configured+branch_protection"
-        return sorted(configured_names | branch_names), source
-    if protection.required_contexts:
-        return list(protection.required_contexts), "branch_protection"
+        return (
+            sorted(
+                configured_checks | branch_checks,
+                key=lambda check: (
+                    check.name,
+                    -1 if check.app_id is None else check.app_id,
+                ),
+            ),
+            source,
+        )
+    if protection.required_checks:
+        return list(protection.required_checks), "branch_protection"
     inferred = sorted(
-        name
-        for name, check in checks.items()
-        if name not in CODERABBIT_STATUS_CONTEXTS
-        and check.app_slug != CODERABBIT_APP_SLUG
-        and check.state != "neutral"
+        {
+            RequiredCheck(check.name)
+            for check in checks
+            if check.name not in CODERABBIT_STATUS_CONTEXTS
+            and check.app_slug != CODERABBIT_APP_SLUG
+            and check.state != "neutral"
+        },
+        key=lambda check: check.name,
     )
     return inferred, "head_checks"
 
 
 def coderabbit_completion(
-    checks: dict[str, Check], reviews: list[dict[str, Any]], head_sha: str
+    checks: list[Check], reviews: list[dict[str, Any]], head_sha: str
 ) -> tuple[bool, str, str, str]:
     candidates: list[Check] = []
-    for check in checks.values():
+    for check in checks:
         trusted_status = (
             check.source == "status"
             and check.name in CODERABBIT_STATUS_CONTEXTS
@@ -431,14 +521,17 @@ def coderabbit_status_detail(description: str) -> str:
     return "review_not_completed"
 
 
-def current_human_change_requests(
-    reviews: list[dict[str, Any]], head_sha: str
+def current_change_requests(
+    reviews: list[dict[str, Any]],
+    head_sha: str,
+    *,
+    include_login: Callable[[str], bool],
 ) -> list[str]:
     latest_change_request: dict[str, str] = {}
     latest_approval: dict[str, str] = {}
     for review in reviews:
         login = nested_string(review, "user", "login")
-        if not login or login.lower() in CODERABBIT_LOGINS:
+        if not login or not include_login(login):
             continue
         if str(review.get("commit_id") or "") != head_sha:
             continue
@@ -460,6 +553,26 @@ def current_human_change_requests(
         login
         for login, requested_at in latest_change_request.items()
         if latest_approval.get(login, "") <= requested_at
+    )
+
+
+def current_human_change_requests(
+    reviews: list[dict[str, Any]], head_sha: str
+) -> list[str]:
+    return current_change_requests(
+        reviews,
+        head_sha,
+        include_login=lambda login: login.lower() not in CODERABBIT_LOGINS,
+    )
+
+
+def current_coderabbit_change_requests(
+    reviews: list[dict[str, Any]], head_sha: str
+) -> list[str]:
+    return current_change_requests(
+        reviews,
+        head_sha,
+        include_login=lambda login: login.lower() in CODERABBIT_LOGINS,
     )
 
 
@@ -493,23 +606,47 @@ def evaluate(
     blockers: list[str] = []
     if not protection.protected:
         blockers.append(f"Base branch is not protected: {base_ref}")
-    check_results: list[dict[str, str]] = []
+    check_results: list[dict[str, Any]] = []
     if not names and not allow_no_ci:
         blockers.append("No required CI checks were configured or discoverable")
-    for name in names:
-        check = checks.get(name)
+    for requirement in names:
+        check = latest_check(checks, requirement)
+        label = requirement.name
+        if requirement.app_id is not None:
+            label += f" (app {requirement.app_id})"
         if check is None:
-            check_results.append({"name": name, "state": "missing", "url": ""})
-            blockers.append(f"Required check is missing: {name}")
+            check_results.append(
+                {
+                    "name": requirement.name,
+                    "app_id": requirement.app_id,
+                    "state": "missing",
+                    "url": "",
+                }
+            )
+            blockers.append(f"Required check is missing: {label}")
         else:
-            check_results.append({"name": name, "state": check.state, "url": check.url})
+            check_results.append(
+                {
+                    "name": requirement.name,
+                    "app_id": requirement.app_id,
+                    "state": check.state,
+                    "url": check.url,
+                }
+            )
             if check.state != "success":
-                blockers.append(f"Required check is not successful: {name}={check.state}")
+                blockers.append(f"Required check is not successful: {label}={check.state}")
 
     reviews = client.reviews(repo, pr_number)
     cr_completed, cr_signal, cr_state, cr_detail = coderabbit_completion(
         checks, reviews, head_sha
     )
+    coderabbit_change_requests = current_coderabbit_change_requests(reviews, head_sha)
+    if coderabbit_change_requests:
+        # A current-head change request is authoritative review state.  Do
+        # this before considering a successful status or check run complete.
+        cr_completed = False
+        cr_state = "changes_requested"
+        cr_detail = "review_changes_requested"
     threads = client.review_threads(repo, pr_number)
     unresolved = [
         thread for thread in threads if not thread.is_resolved and not thread.is_outdated
@@ -527,6 +664,12 @@ def evaluate(
         )
     if unresolved:
         blockers.append(f"{len(unresolved)} unresolved review thread(s) remain")
+
+    if coderabbit_change_requests and coderabbit_mode != "off":
+        blockers.append(
+            "Outstanding CodeRabbit change request(s): "
+            + ", ".join(coderabbit_change_requests)
+        )
 
     change_requests = current_human_change_requests(reviews, head_sha)
     if change_requests:
@@ -556,6 +699,7 @@ def evaluate(
         "branch_protection": {
             "protected": protection.protected,
             "required_contexts": list(protection.required_contexts),
+            "required_checks": [asdict(check) for check in protection.required_checks],
         },
         "required_checks_source": required_source,
         "required_checks": check_results,
@@ -566,6 +710,7 @@ def evaluate(
             "state": cr_state,
             "detail": cr_detail,
             "unresolved_threads": len(unresolved_coderabbit),
+            "active_change_requests": coderabbit_change_requests,
         },
         "unresolved_threads": [asdict(thread) for thread in unresolved],
         "human_change_requests": change_requests,

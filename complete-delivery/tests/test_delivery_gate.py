@@ -71,7 +71,11 @@ class FakeClient:
     def branch_protection(self, repo: str, branch: str):
         return delivery_gate.BranchProtection(
             protected=self.protected,
-            required_contexts=tuple(self.required),
+            required_checks=tuple(
+                item if isinstance(item, delivery_gate.RequiredCheck)
+                else delivery_gate.RequiredCheck(item)
+                for item in self.required
+            ),
         )
 
     def reviews(self, repo: str, number: int):
@@ -297,6 +301,70 @@ class DeliveryGateTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertEqual(result["coderabbit"]["state"], "missing")
 
+    def test_coderabbit_change_request_blocks_a_successful_current_head_signal(self) -> None:
+        client = FakeClient()
+        client.review_items = [
+            {
+                "user": {"login": "coderabbitai[bot]"},
+                "commit_id": client.head,
+                "state": "CHANGES_REQUESTED",
+                "submitted_at": "2026-07-31T01:02:00Z",
+            }
+        ]
+
+        result = self.evaluate(client)
+
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["coderabbit"]["completed"])
+        self.assertEqual(
+            result["coderabbit"]["active_change_requests"], ["coderabbitai[bot]"]
+        )
+        self.assertIn(
+            "Outstanding CodeRabbit change request(s): coderabbitai[bot]",
+            result["blockers"],
+        )
+
+    def test_app_bound_required_check_accepts_only_the_matching_app_run(self) -> None:
+        client = FakeClient()
+        client.required = [delivery_gate.RequiredCheck("verify", 123)]
+        client.runs[0]["app"]["id"] = 123
+
+        result = self.evaluate(client)
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["required_checks"][0]["app_id"], 123)
+
+    def test_app_bound_required_check_rejects_status_and_wrong_app_run(self) -> None:
+        client = FakeClient()
+        client.required = [delivery_gate.RequiredCheck("verify", 123)]
+        client.runs[0]["app"]["id"] = 456
+        client.commit_statuses = [
+            {
+                "context": "verify",
+                "state": "success",
+                "updated_at": "2026-07-31T02:00:00Z",
+            }
+        ]
+
+        result = self.evaluate(client)
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["required_checks"][0]["state"], "missing")
+        self.assertIn("Required check is missing: verify (app 123)", result["blockers"])
+
+    def test_context_only_requirement_accepts_a_legacy_status(self) -> None:
+        client = FakeClient()
+        client.runs = [client.runs[1]]
+        client.commit_statuses = [
+            {
+                "context": "verify",
+                "state": "success",
+                "updated_at": "2026-07-31T02:00:00Z",
+            }
+        ]
+
+        self.assertTrue(self.evaluate(client)["passed"])
+
     def test_trusted_completed_coderabbit_status_passes(self) -> None:
         client = FakeClient()
         client.runs = client.runs[:1]
@@ -485,6 +553,36 @@ class GhClientTests(unittest.TestCase):
             )
         self.assertFalse(protection.protected)
         self.assertEqual(protection.required_contexts, ())
+
+    def test_branch_protection_preserves_required_check_app_ids(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["gh", "api"],
+            0,
+            stdout=json.dumps(
+                {
+                    "required_status_checks": {
+                        "contexts": ["verify", "legacy"],
+                        "checks": [
+                            {"context": "verify", "app_id": 123},
+                            {"context": "legacy", "app_id": None},
+                        ],
+                    }
+                }
+            ),
+            stderr="",
+        )
+        with mock.patch.object(delivery_gate.subprocess, "run", return_value=completed):
+            protection = delivery_gate.GhClient().branch_protection(
+                "owner/repo", "main"
+            )
+
+        self.assertEqual(
+            protection.required_checks,
+            (
+                delivery_gate.RequiredCheck("legacy"),
+                delivery_gate.RequiredCheck("verify", 123),
+            ),
+        )
 
 
 if __name__ == "__main__":
