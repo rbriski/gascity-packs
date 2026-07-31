@@ -1,7 +1,9 @@
 Update the existing living report after plan review.
 
-Read `delivery.report_state_path`, the approved requirements and plan
-artifacts, and plan-review verdict. Run
+Read `gc.var.source_bead_id`, `delivery.report_state_path`, the approved
+requirements and plan artifacts, and plan-review verdict. Make the
+owner-facing summary begin with the requested source title and cite the source
+ID as internal artifact evidence. Do not include raw source notes. Run
 `{{pack_root}}/assets/scripts/delivery_report.py update`
 for stage `plan` with status `passed`, a one-sentence owner-facing summary, the
 artifact paths as evidence, and the next action "Implement the approved plan."

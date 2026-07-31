@@ -197,8 +197,33 @@ class FormulaContractTests(unittest.TestCase):
             "deploy_verify_command",
             "smoke_command",
             "report_publish_command",
+            "source_bead_id",
+            "source_title",
         ):
             self.assertIn(name, variables)
+
+    def test_source_intent_is_preserved_across_the_delivery_stages(self) -> None:
+        assets = {
+            "requirements": "requirements.md",
+            "plan": "plan.md",
+            "decompose": "decompose.md",
+            "finalize": "finalize.md",
+            "report": "report-initialize.md",
+        }
+        for name, filename in assets.items():
+            text = (
+                PACK_ROOT / "assets" / "workflows" / "complete-delivery" / filename
+            ).read_text(encoding="utf-8")
+            with self.subTest(asset=name):
+                self.assertIn("gc.var.source_bead_id", text)
+        report = (
+            PACK_ROOT / "assets" / "workflows" / "complete-delivery" / "report-initialize.md"
+        ).read_text(encoding="utf-8")
+        finalize = (
+            PACK_ROOT / "assets" / "workflows" / "complete-delivery" / "finalize.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("source notes are never\npublic-report content", report)
+        self.assertIn("Source trace", finalize)
 
     def test_pack_prompts_do_not_dispatch_provider_native_subagents(self) -> None:
         text = "\n".join(
@@ -225,10 +250,20 @@ class FormulaContractTests(unittest.TestCase):
 class CommandContractTests(unittest.TestCase):
     SCRIPT = PACK_ROOT / "commands" / "delivery" / "start" / "run.sh"
 
-    def run_command(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_command(
+        self, *arguments: str, source_json: str = '[{"title":"Requested delivery"}]'
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             fake_gc = pathlib.Path(directory) / "gc"
-            fake_gc.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+            fake_gc.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "bd" ] && [ "$2" = "show" ]; then\n'
+                f"  printf '%s\\n' '{source_json}'\n"
+                "  exit 0\n"
+                "fi\n"
+                'printf "%s\\n" "$@"\n',
+                encoding="utf-8",
+            )
             fake_gc.chmod(0o755)
             environment = os.environ.copy()
             environment["GC_PACK_DIR"] = str(PACK_ROOT)
@@ -246,6 +281,9 @@ class CommandContractTests(unittest.TestCase):
         args = result.stdout.splitlines()
         self.assertEqual(args[:5], ["sling", "finance/gc.run-operator", "fi-123", "--on", "complete-delivery"])
         for value in (
+            "source_bead_id=fi-123",
+            "source_title=Requested delivery",
+            "report_title=Requested delivery",
             "interaction_mode=autonomous",
             "review_mode=agent",
             "drain_policy=separate",
@@ -260,6 +298,26 @@ class CommandContractTests(unittest.TestCase):
         args = result.stdout.splitlines()
         self.assertIn("interaction_mode=interactive", args)
         self.assertIn("review_mode=interactive", args)
+
+    def test_source_intent_is_read_before_fixture_launch(self) -> None:
+        result = self.run_command(
+            "fi-123",
+            "--rig=finance",
+            source_json='[{"title":"Reject dirty checkout"}]',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = result.stdout.splitlines()
+        self.assertIn("source_bead_id=fi-123", args)
+        self.assertIn("source_title=Reject dirty checkout", args)
+        self.assertIn("report_title=Reject dirty checkout", args)
+
+    def test_missing_or_ambiguous_source_fails_before_dispatch(self) -> None:
+        for source_json in ("[]", '[{"title":"one"},{"title":"two"}]', '[{}]'):
+            with self.subTest(source_json=source_json):
+                result = self.run_command("fi-123", "--rig=finance", source_json=source_json)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("cannot resolve source intent", result.stderr)
+                self.assertNotIn("sling", result.stdout)
 
     def test_invalid_bead_is_rejected_before_dispatch(self) -> None:
         result = self.run_command("fi-123;echo-bad", "--rig", "finance")

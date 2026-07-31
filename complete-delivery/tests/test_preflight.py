@@ -30,6 +30,8 @@ class PreflightTests(unittest.TestCase):
             "gc.var.deploy_verify_command": "/bin/true",
             "gc.var.smoke_command": "/bin/true",
             "gc.var.production_url": "https://service.example.test",
+            "gc.var.source_bead_id": "fi-123",
+            "gc.var.source_title": "Requested delivery",
         }
         values.update(overrides)
         return values
@@ -82,6 +84,15 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("CodeRabbit=required", result.stdout)
         self.assertIn("deploy=command", result.stdout)
+        self.assertIn("source=fi-123", result.stdout)
+
+    def test_missing_source_intent_fails_before_planning(self) -> None:
+        result = self.run_preflight(
+            self.metadata(**{"gc.var.source_bead_id": "", "gc.var.source_title": ""})
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("source_bead_id is required", result.stderr)
+        self.assertIn("source_title is required", result.stderr)
 
     def test_missing_deploy_and_verify_are_reported_together(self) -> None:
         result = self.run_preflight(
