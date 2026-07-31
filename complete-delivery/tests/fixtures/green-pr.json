@@ -1,0 +1,35 @@
+{
+  "pull_request": {
+    "state": "open",
+    "draft": false,
+    "head": {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "base": {"ref": "main"}
+  },
+  "branch_protection": {
+    "protected": true,
+    "required_contexts": ["verify"]
+  },
+  "check_runs": [
+    {
+      "name": "verify",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-07-31T00:00:00Z",
+      "completed_at": "2026-07-31T00:01:00Z",
+      "html_url": "https://example.test/checks/verify",
+      "app": {"slug": "github-actions", "name": "GitHub Actions"}
+    },
+    {
+      "name": "CodeRabbit",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-07-31T00:01:00Z",
+      "completed_at": "2026-07-31T00:02:00Z",
+      "html_url": "https://example.test/checks/coderabbit",
+      "app": {"slug": "coderabbitai", "name": "CodeRabbit"}
+    }
+  ],
+  "statuses": [],
+  "reviews": [],
+  "review_threads": []
+}
