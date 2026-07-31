@@ -192,6 +192,47 @@ class PublishDeliveryReportTests(unittest.TestCase):
             self.assertEqual((destination / "styles.css").read_text(encoding="utf-8"), "body{old}")
             self.assertEqual(list((root / "public").glob(".safe.*")), [])
 
+    def test_commit_and_rollback_failures_retain_recoverable_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            self.write_bundle(source, "new")
+            destination = root / "public" / "safe"
+            self.write_bundle(destination, "old")
+            prior_bundle = {
+                name: (destination / name).read_bytes() for name in publisher.FILES
+            }
+            original_rename = publisher.os.rename
+
+            def fail_commit_and_rollback(
+                source_path: object, destination_path: object, **kwargs: object
+            ) -> None:
+                if str(source_path).startswith(".safe.stage-"):
+                    raise OSError("simulated bundle commit failure")
+                if (
+                    str(source_path).startswith(".safe.backup-")
+                    and str(destination_path) == "safe"
+                ):
+                    raise OSError("simulated rollback rename failure")
+                original_rename(source_path, destination_path, **kwargs)
+
+            with mock.patch.object(publisher.os, "rename", side_effect=fail_commit_and_rollback):
+                with self.assertRaisesRegex(
+                    publisher.PublishError,
+                    r"commit and rollback failed; prior bundle retained as recoverable backup",
+                ) as raised:
+                    publisher.publish(source, root / "public", "safe")
+
+            backups = list((root / "public").glob(".safe.backup-*"))
+            self.assertFalse(destination.exists())
+            self.assertEqual(len(backups), 1)
+            self.assertIn(backups[0].name, str(raised.exception))
+            self.assertEqual(
+                {name: (backups[0] / name).read_bytes() for name in publisher.FILES},
+                prior_bundle,
+            )
+            self.assertEqual(list((root / "public").glob(".safe.stage-*")), [])
+
     def test_destination_root_swap_before_staging_cannot_redirect_writes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

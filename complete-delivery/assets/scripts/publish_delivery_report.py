@@ -160,16 +160,21 @@ def publish_bundle(destination_name: str, destination_root_fd: int, payloads: di
         backup, backup_fd = create_private_directory(destination_root_fd, f"{destination_name}.backup-")
         os.close(backup_fd)
         os.rmdir(backup, dir_fd=destination_root_fd)
+        os.rename(destination_name, backup, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
         try:
-            os.rename(destination_name, backup, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
+            os.rename(stage, destination_name, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
+        except BaseException as commit_error:
             try:
-                os.rename(stage, destination_name, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
-            except BaseException:
                 os.rename(backup, destination_name, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
-                raise
-        except BaseException:
+            except BaseException as rollback_error:
+                # The old bundle remains at this private, descriptor-relative
+                # name. Do not run cleanup: it is the sole recoverable copy.
+                raise PublishError(
+                    "report bundle commit and rollback failed; prior bundle retained "
+                    f"as recoverable backup: {backup}"
+                ) from rollback_error
             remove_tree(backup, destination_root_fd)
-            raise
+            raise commit_error
         else:
             remove_tree(backup, destination_root_fd)
     finally:
