@@ -143,6 +143,60 @@ class DeliveryGateTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertEqual(result["human_change_requests"], ["reviewer"])
 
+    def test_later_human_comment_does_not_clear_change_request(self) -> None:
+        client = FakeClient()
+        client.review_items = [
+            {
+                "user": {"login": "reviewer"},
+                "commit_id": client.head,
+                "state": "CHANGES_REQUESTED",
+                "submitted_at": "2026-07-31T01:00:00Z",
+            },
+            {
+                "user": {"login": "reviewer"},
+                "commit_id": client.head,
+                "state": "COMMENTED",
+                "submitted_at": "2026-07-31T01:01:00Z",
+            },
+        ]
+
+        result = self.evaluate(client)
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["human_change_requests"], ["reviewer"])
+
+    def test_later_human_approval_clears_change_request(self) -> None:
+        client = FakeClient()
+        client.review_items = [
+            {
+                "user": {"login": "reviewer"},
+                "commit_id": client.head,
+                "state": "CHANGES_REQUESTED",
+                "submitted_at": "2026-07-31T01:00:00Z",
+            },
+            {
+                "user": {"login": "reviewer"},
+                "commit_id": client.head,
+                "state": "APPROVED",
+                "submitted_at": "2026-07-31T01:01:00Z",
+            },
+        ]
+
+        self.assertTrue(self.evaluate(client)["passed"])
+
+    def test_dismissed_human_review_does_not_block(self) -> None:
+        client = FakeClient()
+        client.review_items = [
+            {
+                "user": {"login": "reviewer"},
+                "commit_id": client.head,
+                "state": "DISMISSED",
+                "submitted_at": "2026-07-31T01:00:00Z",
+            }
+        ]
+
+        self.assertTrue(self.evaluate(client)["passed"])
+
     def test_stale_human_change_request_does_not_block_current_head(self) -> None:
         client = FakeClient()
         client.review_items = [
