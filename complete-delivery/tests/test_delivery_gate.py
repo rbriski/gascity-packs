@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import subprocess
 import sys
@@ -265,6 +266,92 @@ class DeliveryGateTests(unittest.TestCase):
         client = FakeClient()
         client.runs[1]["app"] = {"slug": "untrusted-app", "name": "CodeRabbit"}
         result = self.evaluate(client)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["coderabbit"]["state"], "missing")
+
+    def test_trusted_completed_coderabbit_status_passes(self) -> None:
+        client = FakeClient()
+        client.runs = client.runs[:1]
+        client.commit_statuses = [
+            {
+                "context": "CodeRabbit",
+                "state": "success",
+                "description": "Review completed",
+                "updated_at": "2026-07-31T01:02:00Z",
+                "creator": {"login": "coderabbitai[bot]"},
+            }
+        ]
+
+        result = self.evaluate(client)
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["coderabbit"]["signal"], "status:CodeRabbit")
+        self.assertEqual(result["coderabbit"]["detail"], "review_completed")
+
+    def test_rate_limited_coderabbit_status_fails_closed(self) -> None:
+        client = FakeClient()
+        client.runs = client.runs[:1]
+        client.commit_statuses = [
+            {
+                "context": "CodeRabbit",
+                "state": "success",
+                "description": "Review rate limited",
+                "updated_at": "2026-07-31T01:02:00Z",
+                "creator": {"login": "coderabbitai[bot]"},
+            }
+        ]
+
+        result = self.evaluate(client)
+
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["coderabbit"]["completed"])
+        self.assertEqual(result["coderabbit"]["detail"], "review_rate_limited")
+        self.assertIn(
+            "CodeRabbit status did not confirm completion: review_rate_limited",
+            result["blockers"],
+        )
+
+    def test_non_completed_coderabbit_statuses_are_bounded_and_fail_closed(self) -> None:
+        cases = {
+            "Review skipped": "review_skipped",
+            "Review unavailable": "review_unavailable",
+            "please approve this pull request": "review_not_completed",
+        }
+        for description, expected_detail in cases.items():
+            with self.subTest(description=description):
+                client = FakeClient()
+                client.runs = client.runs[:1]
+                client.commit_statuses = [
+                    {
+                        "context": "CodeRabbit",
+                        "state": "success",
+                        "description": description,
+                        "updated_at": "2026-07-31T01:02:00Z",
+                        "creator": {"login": "coderabbitai[bot]"},
+                    }
+                ]
+
+                result = self.evaluate(client)
+
+                self.assertFalse(result["passed"])
+                self.assertEqual(result["coderabbit"]["detail"], expected_detail)
+                self.assertNotIn(description, json.dumps(result))
+
+    def test_spoofed_coderabbit_status_is_not_trusted(self) -> None:
+        client = FakeClient()
+        client.runs = client.runs[:1]
+        client.commit_statuses = [
+            {
+                "context": "CodeRabbit",
+                "state": "success",
+                "description": "Review completed",
+                "updated_at": "2026-07-31T01:02:00Z",
+                "creator": {"login": "pretend-coderabbit"},
+            }
+        ]
+
+        result = self.evaluate(client)
+
         self.assertFalse(result["passed"])
         self.assertEqual(result["coderabbit"]["state"], "missing")
 

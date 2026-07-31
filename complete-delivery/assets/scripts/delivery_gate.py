@@ -28,6 +28,7 @@ CODERABBIT_LOGINS = frozenset({"coderabbitai", "coderabbitai[bot]"})
 CODERABBIT_STATUS_CONTEXTS = frozenset({"CodeRabbit", "coderabbit.ai"})
 CODERABBIT_APP_SLUG = "coderabbitai"
 CODERABBIT_CHECK_NAME = "CodeRabbit"
+CODERABBIT_COMPLETED_STATUS_DESCRIPTION = "review completed"
 
 
 class GateError(RuntimeError):
@@ -43,6 +44,7 @@ class Check:
     actor: str = ""
     app_slug: str = ""
     updated_at: str = ""
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -315,6 +317,7 @@ def normalize_status(status: dict[str, Any]) -> Check:
         url=str(status.get("target_url") or ""),
         actor=nested_string(status, "creator", "login"),
         updated_at=str(status.get("updated_at") or status.get("created_at") or ""),
+        detail=str(status.get("description") or ""),
     )
 
 
@@ -361,7 +364,7 @@ def resolve_required_checks(
 
 def coderabbit_completion(
     checks: dict[str, Check], reviews: list[dict[str, Any]], head_sha: str
-) -> tuple[bool, str, str]:
+) -> tuple[bool, str, str, str]:
     candidates: list[Check] = []
     for check in checks.values():
         trusted_status = (
@@ -378,7 +381,20 @@ def coderabbit_completion(
             candidates.append(check)
     if candidates:
         latest = max(candidates, key=lambda item: item.updated_at)
-        return latest.state == "success", f"{latest.source}:{latest.name}", latest.state
+        if latest.source == "status":
+            detail = coderabbit_status_detail(latest.detail)
+            return (
+                latest.state == "success" and detail == "review_completed",
+                f"{latest.source}:{latest.name}",
+                latest.state,
+                detail,
+            )
+        return (
+            latest.state == "success",
+            f"{latest.source}:{latest.name}",
+            latest.state,
+            "check_run",
+        )
 
     matching_reviews = [
         review
@@ -391,8 +407,28 @@ def coderabbit_completion(
         latest_review = max(matching_reviews, key=lambda item: str(item.get("submitted_at") or ""))
         state = str(latest_review.get("state") or "")
         completed = state in {"APPROVED", "COMMENTED"}
-        return completed, "review", state.lower()
-    return False, "", "missing"
+        return completed, "review", state.lower(), f"review_{state.lower()}"
+    return False, "", "missing", "missing"
+
+
+def coderabbit_status_detail(description: str) -> str:
+    """Classify a CodeRabbit status without exposing untrusted status text.
+
+    GitHub legacy statuses are free-form strings.  A status is evidence of a
+    completed review only when CodeRabbit uses its explicit completion phrase;
+    every other description fails closed.  The returned categories are a fixed
+    vocabulary so gate output never treats arbitrary status text as evidence.
+    """
+    normalized = " ".join(description.casefold().split())
+    if normalized == CODERABBIT_COMPLETED_STATUS_DESCRIPTION:
+        return "review_completed"
+    if "rate limit" in normalized or "rate-limit" in normalized:
+        return "review_rate_limited"
+    if "skip" in normalized:
+        return "review_skipped"
+    if "unavailable" in normalized:
+        return "review_unavailable"
+    return "review_not_completed"
 
 
 def current_human_change_requests(
@@ -471,7 +507,9 @@ def evaluate(
                 blockers.append(f"Required check is not successful: {name}={check.state}")
 
     reviews = client.reviews(repo, pr_number)
-    cr_completed, cr_signal, cr_state = coderabbit_completion(checks, reviews, head_sha)
+    cr_completed, cr_signal, cr_state, cr_detail = coderabbit_completion(
+        checks, reviews, head_sha
+    )
     threads = client.review_threads(repo, pr_number)
     unresolved = [
         thread for thread in threads if not thread.is_resolved and not thread.is_outdated
@@ -481,6 +519,8 @@ def evaluate(
     ]
     if coderabbit_mode == "required" and not cr_completed:
         blockers.append(f"CodeRabbit has not completed successfully on head {head_sha}")
+        if cr_signal.startswith("status:"):
+            blockers.append(f"CodeRabbit status did not confirm completion: {cr_detail}")
     if unresolved_coderabbit and coderabbit_mode != "off":
         blockers.append(
             f"{len(unresolved_coderabbit)} unresolved CodeRabbit review thread(s) remain"
@@ -524,6 +564,7 @@ def evaluate(
             "completed": cr_completed,
             "signal": cr_signal,
             "state": cr_state,
+            "detail": cr_detail,
             "unresolved_threads": len(unresolved_coderabbit),
         },
         "unresolved_threads": [asdict(thread) for thread in unresolved],
