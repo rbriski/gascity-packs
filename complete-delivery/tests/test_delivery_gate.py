@@ -648,10 +648,10 @@ class GhClientTests(unittest.TestCase):
             0,
             stdout=json.dumps(
                 {
-                    "required_status_checks": {
+                    "required_status_checks": {"url": "https://api.github.test/protection", "strict": True,
                         "contexts": ["verify", "legacy"],
                         "checks": [
-                            {"context": "verify", "app_id": 123},
+                            {"context": "verify", "app_id": 123, "url": "https://api.github.test/checks/1"},
                             {"context": "legacy", "app_id": None},
                         ],
                     }
@@ -671,6 +671,15 @@ class GhClientTests(unittest.TestCase):
                 delivery_gate.RequiredCheck("verify", 123),
             ),
         )
+        completed.stdout = json.dumps({"required_status_checks": None})
+        with mock.patch.object(delivery_gate.subprocess, "run", return_value=completed):
+            self.assertEqual(delivery_gate.GhClient().branch_protection("owner/repo", "main").required_checks, ())
+
+    def test_branch_protection_rejects_malformed_required_checks(self) -> None:
+        cases = (({"contexts": "verify", "checks": []}, "contexts must be a list"), ({"contexts": ["verify", 7], "checks": []}, r"contexts\[1\]"), ({"contexts": [], "checks": {}}, "checks must be a list"), ({"contexts": [], "checks": ["verify"]}, r"checks\[0\] must be an object"), ({"contexts": [], "checks": [{"context": "", "app_id": None}]}, r"checks\[0\].context"), ({"contexts": [], "checks": [{"context": "bound", "app_id": "bad"}]}, r"checks\[0\].app_id"), ({"contexts": [], "checks": [{"context": "bound", "app_id": True}]}, r"checks\[0\].app_id"))
+        for required, error in cases:
+            with mock.patch.object(delivery_gate.GhClient, "_json", return_value={"required_status_checks": required}), self.assertRaisesRegex(delivery_gate.GateError, error):
+                delivery_gate.GhClient().branch_protection("owner/repo", "main")
 
 if __name__ == "__main__":
     unittest.main()

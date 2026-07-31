@@ -78,6 +78,39 @@ class BranchProtection:
         return tuple(sorted({check.name for check in self.required_checks}))
 
 
+def strict_required_checks(
+    contexts: Any, raw_checks: Any, *, source: str, context_field: str,
+    check_field: str, exact_check_fields: bool,
+) -> tuple[RequiredCheck, ...]:
+    """Parse branch-protection checks without silently weakening bindings."""
+    if not isinstance(contexts, list):
+        raise GateError(f"{source} {context_field} must be a list")
+    if not isinstance(raw_checks, list):
+        raise GateError(f"{source} {check_field} must be a list")
+    checks: list[RequiredCheck] = []
+    check_contexts: set[str] = set()
+    for index, context in enumerate(contexts):
+        if not isinstance(context, str) or not context:
+            raise GateError(f"{source} {context_field}[{index}] must be a non-empty string")
+    for index, item in enumerate(raw_checks):
+        if not isinstance(item, dict):
+            raise GateError(f"{source} {check_field}[{index}] must be an object")
+        expected = {"context", "app_id"}
+        if exact_check_fields and set(item) != expected:
+            kind = "missing" if expected - set(item) else "unexpected"
+            fields = expected - set(item) or set(item) - expected
+            raise GateError(f"{source} {check_field}[{index}] {kind} fields: " + ", ".join(sorted(fields)))
+        context, app_id = item.get("context"), item.get("app_id")
+        if not isinstance(context, str) or not context:
+            raise GateError(f"{source} {check_field}[{index}].context must be a non-empty string")
+        if "app_id" not in item or (app_id is not None and type(app_id) is not int):
+            raise GateError(f"{source} {check_field}[{index}].app_id must be an integer or null")
+        checks.append(RequiredCheck(context, app_id))
+        check_contexts.add(context)
+    checks.extend(RequiredCheck(context) for context in contexts if context not in check_contexts)
+    return tuple(sorted(set(checks), key=lambda check: (check.name, -1 if check.app_id is None else check.app_id)))
+
+
 class GitHubClient(Protocol):
     def pull_request(self, repo: str, number: int) -> dict[str, Any]: ...
 
@@ -174,42 +207,18 @@ class GhClient:
             return BranchProtection(protected=False, required_checks=())
         if not isinstance(value, dict):
             raise GateError("branch-protection response was not an object")
-        required = value.get("required_status_checks") or {}
+        required = value.get("required_status_checks")
+        if required is None:
+            return BranchProtection(protected=True, required_checks=())
         if not isinstance(required, dict):
             raise GateError("branch protection required_status_checks was not an object")
-        contexts = [
-            item for item in required.get("contexts", []) if isinstance(item, str)
-        ]
-        checks: list[RequiredCheck] = []
-        check_contexts: set[str] = set()
-        for item in required.get("checks", []):
-            if isinstance(item, dict) and isinstance(item.get("context"), str):
-                app_id = item.get("app_id")
-                checks.append(
-                    RequiredCheck(
-                        item["context"],
-                        app_id if isinstance(app_id, int) and not isinstance(app_id, bool) else None,
-                    )
-                )
-                check_contexts.add(item["context"])
-        # Modern branch protection repeats check names in ``contexts``.  When
-        # a structured check is present, retain its app binding instead of
-        # adding an unbound duplicate that a legacy status could satisfy.
-        checks.extend(
-            RequiredCheck(context)
-            for context in contexts
-            if context not in check_contexts
-        )
         return BranchProtection(
             protected=True,
-            required_checks=tuple(
-                sorted(
-                    set(checks),
-                    key=lambda check: (
-                        check.name,
-                        -1 if check.app_id is None else check.app_id,
-                    ),
-                )
+            required_checks=strict_required_checks(
+                required.get("contexts"), required.get("checks"),
+                source="branch protection required_status_checks", context_field="contexts",
+                check_field="checks",
+                exact_check_fields=False,
             ),
         )
 
@@ -323,41 +332,13 @@ class FixtureClient:
         protected, names, raw_checks = (value["protected"], value["required_contexts"], value["required_checks"])
         if type(protected) is not bool:
             raise GateError("fixture branch protection protected must be a boolean")
-        if not isinstance(names, list):
-            raise GateError("fixture branch protection required_contexts must be a list")
-        if not isinstance(raw_checks, list):
-            raise GateError("fixture branch protection required_checks must be a list")
-        checks: list[RequiredCheck] = []
-        for index, name in enumerate(names):
-            if not isinstance(name, str) or not name:
-                raise GateError(f"fixture branch protection required_contexts[{index}] must be a non-empty string")
-            checks.append(RequiredCheck(name))
-        for index, item in enumerate(raw_checks):
-            if not isinstance(item, dict):
-                raise GateError(f"fixture branch protection required_checks[{index}] must be an object")
-            expected = {"context", "app_id"}
-            actual = set(item)
-            if actual != expected:
-                kind = "missing" if expected - actual else "unexpected"
-                fields = expected - actual or actual - expected
-                raise GateError(f"fixture branch protection required_checks[{index}] {kind} fields: " + ", ".join(sorted(fields)))
-            context = item["context"]
-            app_id = item["app_id"]
-            if not isinstance(context, str) or not context:
-                raise GateError(f"fixture branch protection required_checks[{index}].context must be a non-empty string")
-            if app_id is not None and (type(app_id) is not int):
-                raise GateError(f"fixture branch protection required_checks[{index}].app_id must be an integer or null")
-            checks.append(RequiredCheck(context, app_id))
         return BranchProtection(
             protected=protected,
-            required_checks=tuple(
-                sorted(
-                    set(checks),
-                    key=lambda check: (
-                        check.name,
-                        -1 if check.app_id is None else check.app_id,
-                    ),
-                )
+            required_checks=strict_required_checks(
+                names, raw_checks,
+                source="fixture branch protection", context_field="required_contexts",
+                check_field="required_checks",
+                exact_check_fields=True,
             ),
         )
 
