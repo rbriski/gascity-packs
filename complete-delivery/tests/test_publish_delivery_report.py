@@ -126,6 +126,71 @@ class PublishDeliveryReportTests(unittest.TestCase):
 
             self.assertEqual((destination / "index.html").read_text(encoding="utf-8"), "<html>old</html>")
             self.assertEqual((destination / "styles.css").read_text(encoding="utf-8"), "body{old}")
+            self.assertEqual(list((root / "public").glob(".safe.*")), [])
+
+    def test_staging_failure_leaves_no_first_publish_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            self.write_bundle(source, "new")
+            original_atomic_bytes = publisher.atomic_bytes
+            calls = 0
+
+            def fail_second_write(path: pathlib.Path, content: bytes) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated second write failure")
+                original_atomic_bytes(path, content)
+
+            with mock.patch.object(publisher, "atomic_bytes", side_effect=fail_second_write):
+                with self.assertRaises(OSError):
+                    publisher.publish(source, root / "public", "safe")
+
+            self.assertFalse((root / "public" / "safe").exists())
+            self.assertEqual(list((root / "public").iterdir()), [])
+
+    def test_commit_failure_leaves_no_first_publish_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            self.write_bundle(source, "new")
+            destination = root / "public" / "safe"
+            original_replace = publisher.os.replace
+
+            def fail_staged_commit(source_path: object, destination_path: object) -> None:
+                if pathlib.Path(source_path).name.startswith(".safe.stage-"):
+                    raise OSError("simulated bundle commit failure")
+                original_replace(source_path, destination_path)
+
+            with mock.patch.object(publisher.os, "replace", side_effect=fail_staged_commit):
+                with self.assertRaises(OSError):
+                    publisher.publish(source, root / "public", "safe")
+
+            self.assertFalse(destination.exists())
+            self.assertEqual(list((root / "public").iterdir()), [])
+
+    def test_commit_failure_restores_existing_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            self.write_bundle(source, "new")
+            destination = root / "public" / "safe"
+            self.write_bundle(destination, "old")
+            original_replace = publisher.os.replace
+
+            def fail_staged_commit(source_path: object, destination_path: object) -> None:
+                if pathlib.Path(source_path).name.startswith(".safe.stage-"):
+                    raise OSError("simulated bundle commit failure")
+                original_replace(source_path, destination_path)
+
+            with mock.patch.object(publisher.os, "replace", side_effect=fail_staged_commit):
+                with self.assertRaises(OSError):
+                    publisher.publish(source, root / "public", "safe")
+
+            self.assertEqual((destination / "index.html").read_text(encoding="utf-8"), "<html>old</html>")
+            self.assertEqual((destination / "styles.css").read_text(encoding="utf-8"), "body{old}")
+            self.assertEqual(list((root / "public").glob(".safe.*")), [])
 
 
 if __name__ == "__main__":
