@@ -286,21 +286,36 @@ class FixtureClient:
     """Offline client for deterministic pack smoke tests."""
 
     def __init__(self, payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            raise GateError("fixture root must be an object")
         self.payload = payload
 
+    def _object(self, key: str) -> dict[str, Any]:
+        value = self.payload.get(key)
+        if not isinstance(value, dict):
+            raise GateError(f"fixture {key} must be an object")
+        return value
+
+    def _object_list(self, key: str) -> list[dict[str, Any]]:
+        value = self.payload.get(key)
+        if not isinstance(value, list):
+            raise GateError(f"fixture {key} must be a list")
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise GateError(f"fixture {key}[{index}] must be an object")
+        return value
+
     def pull_request(self, repo: str, number: int) -> dict[str, Any]:
-        return dict(self.payload.get("pull_request") or {})
+        return self._object("pull_request")
 
     def check_runs(self, repo: str, sha: str) -> list[dict[str, Any]]:
-        return list(self.payload.get("check_runs") or [])
+        return self._object_list("check_runs")
 
     def statuses(self, repo: str, sha: str) -> list[dict[str, Any]]:
-        return list(self.payload.get("statuses") or [])
+        return self._object_list("statuses")
 
     def branch_protection(self, repo: str, branch: str) -> BranchProtection:
-        value = self.payload.get("branch_protection") or {}
-        if not isinstance(value, dict):
-            raise GateError("fixture branch_protection was not an object")
+        value = self._object("branch_protection")
         names = value.get("required_contexts") or []
         raw_checks = value.get("required_checks") or []
         if not isinstance(names, list) or not isinstance(raw_checks, list):
@@ -330,10 +345,34 @@ class FixtureClient:
         )
 
     def reviews(self, repo: str, number: int) -> list[dict[str, Any]]:
-        return list(self.payload.get("reviews") or [])
+        return self._object_list("reviews")
 
     def review_threads(self, repo: str, number: int) -> list[ReviewThread]:
-        return [ReviewThread(**item) for item in self.payload.get("review_threads") or []]
+        fields = {
+            "thread_id": str,
+            "author": str,
+            "path": str,
+            "url": str,
+            "body": str,
+            "is_resolved": bool,
+            "is_outdated": bool,
+        }
+        threads: list[ReviewThread] = []
+        for index, item in enumerate(self._object_list("review_threads")):
+            for field, expected_type in fields.items():
+                if not isinstance(item.get(field), expected_type):
+                    type_name = "boolean" if expected_type is bool else "string"
+                    raise GateError(
+                        f"fixture review_threads[{index}].{field} must be a {type_name}"
+                    )
+            unexpected = set(item) - set(fields)
+            if unexpected:
+                raise GateError(
+                    f"fixture review_threads[{index}] has unexpected fields: "
+                    + ", ".join(sorted(unexpected))
+                )
+            threads.append(ReviewThread(**item))
+        return threads
 
 
 def nested_string(value: Any, *keys: str) -> str:
@@ -420,10 +459,15 @@ def resolve_required_checks(
     checks: list[Check],
 ) -> tuple[list[RequiredCheck], str]:
     if configured.strip().lower() != "auto":
-        configured_checks = {
-            RequiredCheck(name) for name in parse_required_checks(configured)
-        }
         branch_checks = set(protection.required_checks)
+        app_bound_names = {
+            check.name for check in branch_checks if check.app_id is not None
+        }
+        configured_checks = {
+            RequiredCheck(name)
+            for name in parse_required_checks(configured)
+            if name not in app_bound_names
+        }
         source = "configured"
         if branch_checks:
             source = "configured+branch_protection"
@@ -654,6 +698,9 @@ def evaluate(
     unresolved_coderabbit = [
         thread for thread in unresolved if thread.author.lower() in CODERABBIT_LOGINS
     ]
+    unresolved_human = [
+        thread for thread in unresolved if thread.author.lower() not in CODERABBIT_LOGINS
+    ]
     if coderabbit_mode == "required" and not cr_completed:
         blockers.append(f"CodeRabbit has not completed successfully on head {head_sha}")
         if cr_signal.startswith("status:"):
@@ -662,8 +709,8 @@ def evaluate(
         blockers.append(
             f"{len(unresolved_coderabbit)} unresolved CodeRabbit review thread(s) remain"
         )
-    if unresolved:
-        blockers.append(f"{len(unresolved)} unresolved review thread(s) remain")
+    if unresolved_human:
+        blockers.append(f"{len(unresolved_human)} unresolved review thread(s) remain")
 
     if coderabbit_change_requests and coderabbit_mode != "off":
         blockers.append(
@@ -712,7 +759,11 @@ def evaluate(
             "unresolved_threads": len(unresolved_coderabbit),
             "active_change_requests": coderabbit_change_requests,
         },
-        "unresolved_threads": [asdict(thread) for thread in unresolved],
+        "unresolved_threads": [
+            asdict(thread)
+            for thread in unresolved_human
+            + (unresolved_coderabbit if coderabbit_mode != "off" else [])
+        ],
         "human_change_requests": change_requests,
         "blockers": blockers,
     }

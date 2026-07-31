@@ -5,6 +5,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -87,6 +88,7 @@ class FakeClient:
 
 class DeliveryGateTests(unittest.TestCase):
     def evaluate(self, client: FakeClient, **overrides):
+        client.pull_calls = 0
         values = {
             "repo": "owner/repo",
             "pr_number": 7,
@@ -125,6 +127,31 @@ class DeliveryGateTests(unittest.TestCase):
         result = self.evaluate(client)
         self.assertFalse(result["passed"])
         self.assertEqual(result["coderabbit"]["unresolved_threads"], 1)
+        self.assertEqual(len(result["blockers"]), 1)
+
+    def test_optional_coderabbit_thread_blocks_once(self) -> None:
+        client = FakeClient()
+        client.threads = [
+            delivery_gate.ReviewThread("T1", "coderabbitai[bot]", "a", "", "", False, False)
+        ]
+
+        result = self.evaluate(client, coderabbit_mode="optional")
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["blockers"], ["1 unresolved CodeRabbit review thread(s) remain"])
+
+    def test_off_ignores_coderabbit_threads_but_blocks_human_threads(self) -> None:
+        client = FakeClient()
+        client.threads = [
+            delivery_gate.ReviewThread("T1", "coderabbitai[bot]", "a", "", "", False, False),
+            delivery_gate.ReviewThread("T2", "reviewer", "b", "", "", False, False),
+        ]
+
+        result = self.evaluate(client, coderabbit_mode="off")
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["blockers"], ["1 unresolved review thread(s) remain"])
+        self.assertEqual([thread["thread_id"] for thread in result["unresolved_threads"]], ["T2"])
 
     def test_resolved_and_outdated_threads_do_not_block(self) -> None:
         client = FakeClient()
@@ -262,8 +289,11 @@ class DeliveryGateTests(unittest.TestCase):
         client.required = []
         client.runs = [client.runs[1]]
         self.assertFalse(self.evaluate(client)["passed"])
-        client.pull_calls = 0
         self.assertTrue(self.evaluate(client, allow_no_ci=True)["passed"])
+
+    def test_invalid_coderabbit_mode_raises_gate_error(self) -> None:
+        with self.assertRaisesRegex(delivery_gate.GateError, "coderabbit mode"):
+            self.evaluate(FakeClient(), coderabbit_mode="sometimes")
 
     def test_unprotected_base_branch_fails_even_when_ci_is_green(self) -> None:
         client = FakeClient()
@@ -293,6 +323,18 @@ class DeliveryGateTests(unittest.TestCase):
             [item["name"] for item in result["required_checks"]],
             ["security", "verify"],
         )
+
+    def test_configured_unbound_check_does_not_duplicate_app_bound_requirement(self) -> None:
+        client = FakeClient()
+        client.required = [delivery_gate.RequiredCheck("verify", 123)]
+        client.runs[0]["app"]["id"] = 123
+
+        result = self.evaluate(client, required_checks="verify")
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["required_checks"], [{
+            "name": "verify", "app_id": 123, "state": "success", "url": ""
+        }])
 
     def test_spoofed_coderabbit_check_name_is_not_trusted(self) -> None:
         client = FakeClient()
@@ -507,9 +549,62 @@ class DeliveryGateTests(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
+            timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"passed": true', result.stdout)
+
+    def test_malformed_fixture_entries_are_gate_errors(self) -> None:
+        payload = {
+            "pull_request": {},
+            "branch_protection": {},
+            "check_runs": [],
+            "statuses": [],
+            "reviews": [],
+            "review_threads": [{"thread_id": "T1"}],
+        }
+        with self.assertRaisesRegex(
+            delivery_gate.GateError,
+            r"fixture review_threads\[0\].author must be a string",
+        ):
+            delivery_gate.FixtureClient(payload).review_threads("owner/repo", 1)
+
+    def test_malformed_fixture_collection_is_a_gate_error(self) -> None:
+        payload = {
+            "pull_request": {},
+            "branch_protection": {},
+            "check_runs": {},
+            "statuses": [],
+            "reviews": [],
+            "review_threads": [],
+        }
+        with self.assertRaisesRegex(
+            delivery_gate.GateError, "fixture check_runs must be a list"
+        ):
+            delivery_gate.FixtureClient(payload).check_runs("owner/repo", "a" * 40)
+
+    def test_malformed_fixture_cli_returns_error_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = pathlib.Path(directory) / "malformed.json"
+            fixture.write_text(json.dumps({"pull_request": []}), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--repo",
+                    "owner/repo",
+                    "--pr",
+                    "1",
+                    "--fixture",
+                    str(fixture),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(json.loads(result.stdout)["state"], "error")
 
 
 class GhClientTests(unittest.TestCase):
@@ -528,7 +623,7 @@ class GhClientTests(unittest.TestCase):
             return subprocess.CompletedProcess(
                 command,
                 0,
-                stdout=__import__("json").dumps({"check_runs": page}),
+                stdout=json.dumps({"check_runs": page}),
                 stderr="",
             )
 
@@ -583,7 +678,6 @@ class GhClientTests(unittest.TestCase):
                 delivery_gate.RequiredCheck("verify", 123),
             ),
         )
-
 
 if __name__ == "__main__":
     unittest.main()
