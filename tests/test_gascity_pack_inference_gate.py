@@ -9,6 +9,7 @@ import shlex
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts import gascity_pack_inference_gate
 
@@ -299,16 +300,19 @@ def test_dispatch_inference_workflow_is_manual_or_external_only() -> None:
     assert "include-hidden-files: true" in workflow
 
 
-def test_ci_workflows_use_blacksmith_runner_labels() -> None:
+def test_required_ci_workflows_support_a_repository_runner_override() -> None:
     expected = {
-        ".github/workflows/ci.yml": "runs-on: blacksmith-32vcpu-ubuntu-2404",
-        ".github/workflows/codeql.yml": "runs-on: blacksmith-32vcpu-ubuntu-2404",
-        ".github/workflows/pack-release-compatibility.yml": "runs-on: blacksmith-32vcpu-ubuntu-2404",
+        ".github/workflows/ci.yml": "check",
+        ".github/workflows/codeql.yml": "analyze",
+        ".github/workflows/pack-release-compatibility.yml": "latest-pack-releases",
     }
+    expected_runner = "${{ vars.GASCITY_PACKS_CI_RUNNER || 'blacksmith-32vcpu-ubuntu-2404' }}"
 
-    for relative_path, marker in expected.items():
-        workflow = (gascity_pack_inference_gate.REPO_ROOT / relative_path).read_text(encoding="utf-8")
-        assert marker in workflow
+    for relative_path, job_id in expected.items():
+        workflow = yaml.safe_load(
+            (gascity_pack_inference_gate.REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        )
+        assert workflow["jobs"][job_id]["runs-on"] == expected_runner
 
 
 def test_readme_includes_blacksmith_sponsor_badge() -> None:
