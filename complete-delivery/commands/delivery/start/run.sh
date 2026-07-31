@@ -102,6 +102,10 @@ print(title.strip())
   exit 1
 }
 
+# Formula checks run from the target rig. Materialize their managed assets and
+# reject an unsafe durable profile before sling can create any workflow graph.
+python3 "$GC_PACK_DIR/assets/scripts/prepare_delivery_launch.py" --rig "$RIG"
+
 exec gc sling "$RIG/$AGENT" "$BEAD_ID" --on complete-delivery \
   --var "artifact_root=$ARTIFACT_ROOT" \
   --var "source_bead_id=$BEAD_ID" \

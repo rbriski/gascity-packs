@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import stat
@@ -257,29 +258,69 @@ class CommandContractTests(unittest.TestCase):
     SCRIPT = PACK_ROOT / "commands" / "delivery" / "start" / "run.sh"
 
     def run_command(
-        self, *arguments: str, source_json: str = '[{"title":"Requested delivery"}]'
+        self,
+        *arguments: str,
+        source_json: str = '[{"title":"Requested delivery"}]',
+        profile: dict | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            rig = root / "rig"
+            rig.mkdir()
             fake_gc = pathlib.Path(directory) / "gc"
+            config = {
+                "config": {
+                    "Rigs": [{"Name": "finance", "Path": str(rig), "FormulaVars": profile or {
+                        "setup_command": "/bin/true",
+                        "deploy_mode": "not-applicable",
+                        "deploy_not_applicable_reason": "fixture",
+                    }}]
+                }
+            }
+            sink = root / "gc-args"
             fake_gc.write_text(
                 "#!/bin/sh\n"
-                'if [ "$1" = "bd" ] && [ "$2" = "show" ]; then\n'
-                f"  printf '%s\\n' '{source_json}'\n"
+                "if [ \"${1:-}\" = config ] && [ \"${2:-}\" = show ]; then\n"
+                "  printf '%s\\n' \"$FAKE_GC_CONFIG\"\n"
                 "  exit 0\n"
                 "fi\n"
-                'printf "%s\\n" "$@"\n',
+                "if [ \"${1:-}\" = bd ] && [ \"${2:-}\" = show ]; then\n"
+                "  printf '%s\\n' \"$FAKE_SOURCE_JSON\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "printf '%s\\n' \"$@\" | tee -a \"$FAKE_GC_SINK\"\n",
                 encoding="utf-8",
             )
             fake_gc.chmod(0o755)
             environment = os.environ.copy()
             environment["GC_PACK_DIR"] = str(PACK_ROOT)
             environment["PATH"] = f"{directory}:{environment['PATH']}"
-            return subprocess.run(
+            environment["FAKE_GC_CONFIG"] = json.dumps(config)
+            environment["FAKE_SOURCE_JSON"] = source_json
+            environment["FAKE_GC_SINK"] = str(sink)
+            result = subprocess.run(
                 ["sh", str(self.SCRIPT), *arguments],
                 capture_output=True,
                 text=True,
                 env=environment,
             )
+            result.rig = rig
+            result.sink = sink
+            result.slinged = sink.exists()
+            result.materialized = {
+                "delivery_preflight": (rig / ".gc/scripts/checks/delivery-preflight.sh").is_file(),
+                "build_artifact": (rig / ".gc/scripts/checks/build-artifact-valid.sh").is_file(),
+                "validator": (rig / ".gc/scripts/validate_build_artifact.py").is_file(),
+                "schema": (rig / "schemas/build/requirements.v1.yaml").is_file(),
+            }
+            result.materialized_paths = sorted(
+                str(path.relative_to(rig))
+                for root in (rig / ".gc", rig / "schemas" / "build")
+                if root.exists()
+                for path in root.rglob("*")
+                if path.is_file()
+            )
+            return result
 
     def test_one_step_command_launches_terminal_formula_with_ergonomic_defaults(self) -> None:
         result = self.run_command("fi-123", "--rig", "finance")
@@ -297,6 +338,31 @@ class CommandContractTests(unittest.TestCase):
             "open_pr=true",
         ):
             self.assertIn(value, args)
+        self.assertEqual(result.materialized, {
+            "delivery_preflight": True,
+            "build_artifact": True,
+            "validator": True,
+            "schema": True,
+        })
+        self.assertEqual(result.materialized_paths, [
+            ".gc/complete-delivery-assets.json",
+            ".gc/scripts/checks/build-artifact-valid.sh",
+            ".gc/scripts/checks/delivery-common.sh",
+            ".gc/scripts/checks/delivery-local-gates.sh",
+            ".gc/scripts/checks/delivery-merged.sh",
+            ".gc/scripts/checks/delivery-pr-approved.sh",
+            ".gc/scripts/checks/delivery-pr-open.sh",
+            ".gc/scripts/checks/delivery-preflight.sh",
+            ".gc/scripts/checks/delivery-release-verified.sh",
+            ".gc/scripts/checks/delivery-report-valid.sh",
+            ".gc/scripts/validate_build_artifact.py",
+            "schemas/build/decomposition.v1.yaml",
+            "schemas/build/final-report.v1.yaml",
+            "schemas/build/implementation-summary.v1.yaml",
+            "schemas/build/plan.v1.yaml",
+            "schemas/build/requirements.v1.yaml",
+            "schemas/build/review.v1.yaml",
+        ])
 
     def test_interactive_is_one_flag(self) -> None:
         result = self.run_command("fi-123", "--rig=finance", "--interactive")
@@ -334,6 +400,17 @@ class CommandContractTests(unittest.TestCase):
         result = self.run_command("fi-123", "--rig")
         self.assertEqual(result.returncode, 2)
         self.assertIn("--rig requires a value", result.stderr)
+
+    def test_invalid_profile_fails_before_sling(self) -> None:
+        result = self.run_command(
+            "fi-123",
+            "--rig",
+            "finance",
+            profile={"deploy_mode": "command"},
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Complete Delivery profile is invalid", result.stderr)
+        self.assertFalse(result.slinged)
 
     def test_report_publisher_command_uses_resolved_pack_root(self) -> None:
         wrapper = PACK_ROOT / "commands" / "report" / "publish" / "run.sh"
