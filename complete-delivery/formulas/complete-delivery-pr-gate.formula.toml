@@ -9,7 +9,9 @@ head with no unresolved threads or outstanding change requests.
 formula = "complete-delivery-pr-gate"
 type = "expansion"
 version = 1
-contract = "graph.v2"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [[template]]
 id = "{target}.setup-external-review"

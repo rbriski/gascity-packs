@@ -35,7 +35,7 @@ class PackContractTests(unittest.TestCase):
         self.assertEqual(pack["imports"]["gstack"]["source"], "../gstack")
         self.assertEqual(formula["formula"], "complete-delivery")
         self.assertEqual(formula["extends"], ["gstack-build"])
-        self.assertEqual(formula["contract"], "graph.v2")
+        self.assertEqual(formula["requires"]["formula_compiler"], ">=2.0.0")
         self.assertTrue(formula["target_required"])
 
     def test_agent_namespaces_and_shared_worker_binding_are_documented(self) -> None:
@@ -106,6 +106,12 @@ class FormulaContractTests(unittest.TestCase):
         cls.delivery = load_toml(FORMULA_DIR / "complete-delivery.formula.toml")
         cls.gate = load_toml(FORMULA_DIR / "complete-delivery-pr-gate.formula.toml")
         cls.steps = {step["id"]: step for step in cls.delivery["steps"]}
+
+    def test_formulas_require_supported_compiler(self) -> None:
+        for formula in (self.delivery, self.gate):
+            with self.subTest(formula=formula["formula"]):
+                self.assertEqual(formula["requires"]["formula_compiler"], ">=2.0.0")
+                self.assertNotIn("contract", formula)
 
     def test_preflight_blocks_requirements_and_reporting(self) -> None:
         self.assertEqual(self.steps["delivery-preflight"]["needs"], ["prepare"])
