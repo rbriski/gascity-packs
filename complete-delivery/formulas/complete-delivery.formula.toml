@@ -7,9 +7,11 @@ HTML/CSS living report. One launch owns the entire lifecycle.
 """
 formula = "complete-delivery"
 version = 1
-contract = "graph.v2"
 extends = ["gstack-build"]
 target_required = true
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [catalog]
 name = "complete-delivery"
