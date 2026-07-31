@@ -283,8 +283,6 @@ class GhClient:
 
 
 class FixtureClient:
-    """Offline client for deterministic pack smoke tests."""
-
     def __init__(self, payload: dict[str, Any]) -> None:
         if not isinstance(payload, dict):
             raise GateError("fixture root must be an object")
@@ -316,23 +314,42 @@ class FixtureClient:
 
     def branch_protection(self, repo: str, branch: str) -> BranchProtection:
         value = self._object("branch_protection")
-        names = value.get("required_contexts") or []
-        raw_checks = value.get("required_checks") or []
-        if not isinstance(names, list) or not isinstance(raw_checks, list):
-            raise GateError("fixture branch protection contexts were not a list")
-        checks = [RequiredCheck(item) for item in names if isinstance(item, str)]
-        for item in raw_checks:
-            if not isinstance(item, dict) or not isinstance(item.get("context"), str):
-                continue
-            app_id = item.get("app_id")
-            checks.append(
-                RequiredCheck(
-                    item["context"],
-                    app_id if isinstance(app_id, int) and not isinstance(app_id, bool) else None,
-                )
-            )
+        expected = {"protected", "required_contexts", "required_checks"}
+        actual = set(value)
+        if actual != expected:
+            kind = "missing" if expected - actual else "unexpected"
+            fields = expected - actual or actual - expected
+            raise GateError(f"fixture branch protection {kind} fields: " + ", ".join(sorted(fields)))
+        protected, names, raw_checks = (value["protected"], value["required_contexts"], value["required_checks"])
+        if type(protected) is not bool:
+            raise GateError("fixture branch protection protected must be a boolean")
+        if not isinstance(names, list):
+            raise GateError("fixture branch protection required_contexts must be a list")
+        if not isinstance(raw_checks, list):
+            raise GateError("fixture branch protection required_checks must be a list")
+        checks: list[RequiredCheck] = []
+        for index, name in enumerate(names):
+            if not isinstance(name, str) or not name:
+                raise GateError(f"fixture branch protection required_contexts[{index}] must be a non-empty string")
+            checks.append(RequiredCheck(name))
+        for index, item in enumerate(raw_checks):
+            if not isinstance(item, dict):
+                raise GateError(f"fixture branch protection required_checks[{index}] must be an object")
+            expected = {"context", "app_id"}
+            actual = set(item)
+            if actual != expected:
+                kind = "missing" if expected - actual else "unexpected"
+                fields = expected - actual or actual - expected
+                raise GateError(f"fixture branch protection required_checks[{index}] {kind} fields: " + ", ".join(sorted(fields)))
+            context = item["context"]
+            app_id = item["app_id"]
+            if not isinstance(context, str) or not context:
+                raise GateError(f"fixture branch protection required_checks[{index}].context must be a non-empty string")
+            if app_id is not None and (type(app_id) is not int):
+                raise GateError(f"fixture branch protection required_checks[{index}].app_id must be an integer or null")
+            checks.append(RequiredCheck(context, app_id))
         return BranchProtection(
-            protected=bool(value.get("protected")),
+            protected=protected,
             required_checks=tuple(
                 sorted(
                     set(checks),

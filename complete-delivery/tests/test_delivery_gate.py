@@ -554,33 +554,26 @@ class DeliveryGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"passed": true', result.stdout)
 
-    def test_malformed_fixture_entries_are_gate_errors(self) -> None:
-        payload = {
-            "pull_request": {},
-            "branch_protection": {},
-            "check_runs": [],
-            "statuses": [],
-            "reviews": [],
-            "review_threads": [{"thread_id": "T1"}],
-        }
-        with self.assertRaisesRegex(
-            delivery_gate.GateError,
-            r"fixture review_threads\[0\].author must be a string",
-        ):
+    def test_malformed_fixture_shapes_are_gate_errors(self) -> None:
+        valid = {"protected": True, "required_contexts": [], "required_checks": []}
+        cases = (
+            ("protected", 1, "protected must be a boolean"), ("extra", True, "unexpected fields: extra"),
+            ("required_contexts", "verify", "required_contexts must be a list"), ("required_contexts", ["verify", ""], r"required_contexts\[1\] must be a non-empty string"), ("required_checks", {}, "required_checks must be a list"), ("required_checks", ["verify"], r"required_checks\[0\] must be an object"), ("required_checks", [{"context": "", "app_id": None}], r"required_checks\[0\].context must be a non-empty string"), ("required_checks", [{"context": "verify", "app_id": "1"}], r"required_checks\[0\].app_id must be an integer or null"), ("required_checks", [{"context": "verify", "app_id": True}], r"required_checks\[0\].app_id must be an integer or null"),
+            ("required_checks", [{"context": "verify"}], r"required_checks\[0\] missing fields: app_id"),
+            ("required_checks", [{"context": "verify", "app_id": None, "extra": 1}], r"required_checks\[0\] unexpected fields: extra"),
+        )
+        for field, value, error in cases:
+            with self.subTest(field=field, value=value):
+                payload = {"pull_request": {}, "branch_protection": {**valid, field: value}, "check_runs": [], "statuses": [], "reviews": [], "review_threads": []}
+                with self.assertRaisesRegex(delivery_gate.GateError, error):
+                    delivery_gate.FixtureClient(payload).branch_protection("owner/repo", "main")
+        self.assertEqual(delivery_gate.FixtureClient({"branch_protection": {"protected": True, "required_contexts": [], "required_checks": [{"context": "legacy", "app_id": None}, {"context": "verify", "app_id": 7}]}}).branch_protection("owner/repo", "main").required_checks, (delivery_gate.RequiredCheck("legacy"), delivery_gate.RequiredCheck("verify", 7)))
+        payload["review_threads"] = [{"thread_id": "T1"}]
+        with self.assertRaisesRegex(delivery_gate.GateError, r"review_threads\[0\].author must be a string"):
             delivery_gate.FixtureClient(payload).review_threads("owner/repo", 1)
-
-    def test_malformed_fixture_collection_is_a_gate_error(self) -> None:
-        payload = {
-            "pull_request": {},
-            "branch_protection": {},
-            "check_runs": {},
-            "statuses": [],
-            "reviews": [],
-            "review_threads": [],
-        }
-        with self.assertRaisesRegex(
-            delivery_gate.GateError, "fixture check_runs must be a list"
-        ):
+        payload["review_threads"] = []
+        payload["check_runs"] = {}
+        with self.assertRaisesRegex(delivery_gate.GateError, "fixture check_runs must be a list"):
             delivery_gate.FixtureClient(payload).check_runs("owner/repo", "a" * 40)
 
     def test_malformed_fixture_cli_returns_error_json(self) -> None:
