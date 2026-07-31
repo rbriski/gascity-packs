@@ -1,0 +1,4 @@
+interface:
+  display_name: "Complete Delivery"
+  short_description: "Carry work safely through production"
+  default_prompt: "Use $complete-delivery to take this work through review, merge, deployment, verification, and reporting."

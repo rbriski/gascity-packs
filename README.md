@@ -108,6 +108,13 @@ All five expose the same launch variables (`interaction_mode`, `review_mode`,
 `drain_policy`, `push`, `open_pr`, …), so switching methodology is a one-word
 change to the formula name.
 
+When “done” means verified production rather than a reviewed build, use
+[complete-delivery](./complete-delivery) (`complete-delivery`). It imports
+gstack and adds repository-native gates, required current-head CI and
+CodeRabbit reconciliation, protected merge, exact-SHA deployment and smoke
+verification, and a living HTML/CSS report behind one `delivery start`
+command.
+
 ## Using a pack
 
 The canonical path is the import CLI — it writes the import, fetches the
@@ -210,6 +217,15 @@ reviewing, and shipping the PRs your city authors.
   lifecycle for `gastownhall/gascity` — write a good issue, find priority work,
   open a PR, self-review — into one map. It imports `pr-pipeline` for steps 2-4
   and adds the net-new `write-issue` issue-authoring discipline for step 1.
+
+### Delivery lifecycle packs
+
+- [complete-delivery](./complete-delivery) imports `gstack` and owns the
+  terminal path from preflighted intent through planning, implementation,
+  exact local gates, independent review, current-head CI and CodeRabbit fix
+  loops, protected merge, deployment, production revision attestation, and a
+  milestone-driven owner report. Repository-specific commands live once in
+  rig `formula_vars`; the normal launch is one command.
 
 ## Contributing
 
