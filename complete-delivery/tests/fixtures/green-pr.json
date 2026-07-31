@@ -5,7 +5,10 @@
     "head": {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
     "base": {"ref": "main"}
   },
-  "required_contexts": ["verify"],
+  "branch_protection": {
+    "protected": true,
+    "required_contexts": ["verify"]
+  },
   "check_runs": [
     {
       "name": "verify",

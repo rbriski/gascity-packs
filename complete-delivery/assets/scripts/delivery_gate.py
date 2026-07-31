@@ -22,6 +22,8 @@ from urllib.parse import quote
 
 
 GH_TIMEOUT_SECONDS = 60
+REST_PAGE_SIZE = 100
+MAX_REST_PAGES = 100
 CODERABBIT_LOGINS = frozenset({"coderabbitai", "coderabbitai[bot]"})
 CODERABBIT_STATUS_CONTEXTS = frozenset({"CodeRabbit", "coderabbit.ai"})
 CODERABBIT_APP_SLUG = "coderabbitai"
@@ -54,6 +56,12 @@ class ReviewThread:
     is_outdated: bool
 
 
+@dataclass(frozen=True)
+class BranchProtection:
+    protected: bool
+    required_contexts: tuple[str, ...]
+
+
 class GitHubClient(Protocol):
     def pull_request(self, repo: str, number: int) -> dict[str, Any]: ...
 
@@ -61,7 +69,7 @@ class GitHubClient(Protocol):
 
     def statuses(self, repo: str, sha: str) -> list[dict[str, Any]]: ...
 
-    def required_contexts(self, repo: str, branch: str) -> list[str]: ...
+    def branch_protection(self, repo: str, branch: str) -> BranchProtection: ...
 
     def reviews(self, repo: str, number: int) -> list[dict[str, Any]]: ...
 
@@ -97,6 +105,34 @@ class GhClient:
         except json.JSONDecodeError as exc:
             raise GateError(f"gh api returned invalid JSON: {exc}") from exc
 
+    @classmethod
+    def _rest_items(
+        cls, endpoint: str, *, collection_key: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Read every REST page without relying on newer ``gh --slurp`` support."""
+        items: list[dict[str, Any]] = []
+        separator = "&" if "?" in endpoint else "?"
+        for page_number in range(1, MAX_REST_PAGES + 1):
+            value = cls._json(
+                f"{endpoint}{separator}per_page={REST_PAGE_SIZE}&page={page_number}"
+            )
+            if collection_key is None:
+                page = value
+            else:
+                if not isinstance(value, dict):
+                    raise GateError(f"{collection_key} response was not an object")
+                page = value.get(collection_key)
+            if not isinstance(page, list):
+                label = collection_key or "REST page"
+                raise GateError(f"{label} response was not a list")
+            typed_page = [item for item in page if isinstance(item, dict)]
+            items.extend(typed_page)
+            if len(page) < REST_PAGE_SIZE:
+                return items
+        raise GateError(
+            f"REST pagination exceeded {MAX_REST_PAGES} pages for {endpoint}"
+        )
+
     def pull_request(self, repo: str, number: int) -> dict[str, Any]:
         value = self._json(f"repos/{repo}/pulls/{number}")
         if not isinstance(value, dict):
@@ -104,62 +140,38 @@ class GhClient:
         return value
 
     def check_runs(self, repo: str, sha: str) -> list[dict[str, Any]]:
-        value = self._json(
-            f"repos/{repo}/commits/{sha}/check-runs?per_page=100",
-            "--paginate",
-            "--slurp",
+        return self._rest_items(
+            f"repos/{repo}/commits/{sha}/check-runs",
+            collection_key="check_runs",
         )
-        if not isinstance(value, list):
-            raise GateError("check-runs response was not a page list")
-        runs: list[dict[str, Any]] = []
-        for page in value:
-            if isinstance(page, dict) and isinstance(page.get("check_runs"), list):
-                runs.extend(run for run in page["check_runs"] if isinstance(run, dict))
-        return runs
 
     def statuses(self, repo: str, sha: str) -> list[dict[str, Any]]:
-        value = self._json(
-            f"repos/{repo}/commits/{sha}/statuses?per_page=100",
-            "--paginate",
-            "--slurp",
-        )
-        if not isinstance(value, list):
-            raise GateError("commit-status response was not a page list")
-        statuses: list[dict[str, Any]] = []
-        for page in value:
-            if isinstance(page, list):
-                statuses.extend(status for status in page if isinstance(status, dict))
-        return statuses
+        return self._rest_items(f"repos/{repo}/commits/{sha}/statuses")
 
-    def required_contexts(self, repo: str, branch: str) -> list[str]:
+    def branch_protection(self, repo: str, branch: str) -> BranchProtection:
         encoded = quote(branch, safe="")
         value = self._json(
-            f"repos/{repo}/branches/{encoded}/protection/required_status_checks",
+            f"repos/{repo}/branches/{encoded}/protection",
             allow_not_found=True,
         )
         if not value:
-            return []
+            return BranchProtection(protected=False, required_contexts=())
         if not isinstance(value, dict):
-            raise GateError("required-status-checks response was not an object")
-        names = [item for item in value.get("contexts", []) if isinstance(item, str)]
-        for item in value.get("checks", []):
+            raise GateError("branch-protection response was not an object")
+        required = value.get("required_status_checks") or {}
+        if not isinstance(required, dict):
+            raise GateError("branch protection required_status_checks was not an object")
+        names = [item for item in required.get("contexts", []) if isinstance(item, str)]
+        for item in required.get("checks", []):
             if isinstance(item, dict) and isinstance(item.get("context"), str):
                 names.append(item["context"])
-        return sorted(set(names))
+        return BranchProtection(
+            protected=True,
+            required_contexts=tuple(sorted(set(names))),
+        )
 
     def reviews(self, repo: str, number: int) -> list[dict[str, Any]]:
-        value = self._json(
-            f"repos/{repo}/pulls/{number}/reviews?per_page=100",
-            "--paginate",
-            "--slurp",
-        )
-        if not isinstance(value, list):
-            raise GateError("reviews response was not a page list")
-        reviews: list[dict[str, Any]] = []
-        for page in value:
-            if isinstance(page, list):
-                reviews.extend(review for review in page if isinstance(review, dict))
-        return reviews
+        return self._rest_items(f"repos/{repo}/pulls/{number}/reviews")
 
     def review_threads(self, repo: str, number: int) -> list[ReviewThread]:
         owner, separator, name = repo.partition("/")
@@ -242,8 +254,19 @@ class FixtureClient:
     def statuses(self, repo: str, sha: str) -> list[dict[str, Any]]:
         return list(self.payload.get("statuses") or [])
 
-    def required_contexts(self, repo: str, branch: str) -> list[str]:
-        return list(self.payload.get("required_contexts") or [])
+    def branch_protection(self, repo: str, branch: str) -> BranchProtection:
+        value = self.payload.get("branch_protection") or {}
+        if not isinstance(value, dict):
+            raise GateError("fixture branch_protection was not an object")
+        names = value.get("required_contexts") or []
+        if not isinstance(names, list):
+            raise GateError("fixture branch protection contexts were not a list")
+        return BranchProtection(
+            protected=bool(value.get("protected")),
+            required_contexts=tuple(
+                sorted(set(item for item in names if isinstance(item, str)))
+            ),
+        )
 
     def reviews(self, repo: str, number: int) -> list[dict[str, Any]]:
         return list(self.payload.get("reviews") or [])
@@ -313,17 +336,19 @@ def parse_required_checks(raw: str) -> list[str]:
 
 
 def resolve_required_checks(
-    client: GitHubClient,
-    repo: str,
-    base_ref: str,
+    protection: BranchProtection,
     configured: str,
     checks: dict[str, Check],
 ) -> tuple[list[str], str]:
     if configured.strip().lower() != "auto":
-        return sorted(set(parse_required_checks(configured))), "configured"
-    protected = client.required_contexts(repo, base_ref)
-    if protected:
-        return protected, "branch_protection"
+        configured_names = set(parse_required_checks(configured))
+        branch_names = set(protection.required_contexts)
+        source = "configured"
+        if branch_names:
+            source = "configured+branch_protection"
+        return sorted(configured_names | branch_names), source
+    if protection.required_contexts:
+        return list(protection.required_contexts), "branch_protection"
     inferred = sorted(
         name
         for name, check in checks.items()
@@ -416,11 +441,14 @@ def evaluate(
     if not head_sha or not base_ref:
         raise GateError("pull request response omitted head SHA or base ref")
 
+    protection = client.branch_protection(repo, base_ref)
     checks = latest_checks(client, repo, head_sha)
     names, required_source = resolve_required_checks(
-        client, repo, base_ref, required_checks, checks
+        protection, required_checks, checks
     )
     blockers: list[str] = []
+    if not protection.protected:
+        blockers.append(f"Base branch is not protected: {base_ref}")
     check_results: list[dict[str, str]] = []
     if not names and not allow_no_ci:
         blockers.append("No required CI checks were configured or discoverable")
@@ -477,6 +505,10 @@ def evaluate(
         "pr_number": pr_number,
         "head_sha": head_sha,
         "base_ref": base_ref,
+        "branch_protection": {
+            "protected": protection.protected,
+            "required_contexts": list(protection.required_contexts),
+        },
         "required_checks_source": required_source,
         "required_checks": check_results,
         "coderabbit": {

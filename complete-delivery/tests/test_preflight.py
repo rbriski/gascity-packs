@@ -23,6 +23,7 @@ class PreflightTests(unittest.TestCase):
             "gc.var.allow_no_local_gates": "false",
             "gc.var.allow_no_smoke": "false",
             "gc.var.setup_command": "/bin/true",
+            "gc.var.base_branch": "main",
             "gc.var.merge_method": "squash",
             "gc.var.deploy_mode": "command",
             "gc.var.deploy_command": "/bin/true",
@@ -33,7 +34,9 @@ class PreflightTests(unittest.TestCase):
         values.update(overrides)
         return values
 
-    def run_preflight(self, metadata: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    def run_preflight(
+        self, metadata: dict[str, str], *, protected: bool = True
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             repository = root / "repo"
@@ -47,7 +50,15 @@ class PreflightTests(unittest.TestCase):
             gc.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_JSON"\n', encoding="utf-8")
             gc.chmod(0o755)
             gh = bin_dir / "gh"
-            gh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            gh.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = api ] && [ \"$FAKE_GH_PROTECTED\" != true ]; then\n"
+                "  printf '%s\\n' 'gh: Branch not protected (HTTP 404)' >&2\n"
+                "  exit 1\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
             gh.chmod(0o755)
             environment = os.environ.copy()
             environment.update(
@@ -55,6 +66,7 @@ class PreflightTests(unittest.TestCase):
                     "GC_BEAD_ID": "step-1",
                     "GC_WORK_DIR": str(repository),
                     "FAKE_GC_JSON": json.dumps([{"metadata": metadata}]),
+                    "FAKE_GH_PROTECTED": str(protected).lower(),
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                 }
             )
@@ -111,6 +123,11 @@ class PreflightTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("unique, nonempty exact check names", result.stderr)
+
+    def test_unprotected_base_branch_fails_preflight(self) -> None:
+        result = self.run_preflight(self.metadata(), protected=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("base branch must be protected", result.stderr)
 
 
 if __name__ == "__main__":

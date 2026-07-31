@@ -5,6 +5,7 @@ import pathlib
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = (
@@ -42,6 +43,7 @@ class FakeClient:
         ]
         self.commit_statuses = []
         self.required = ["verify"]
+        self.protected = True
         self.review_items = []
         self.threads = []
         self.draft = False
@@ -65,8 +67,11 @@ class FakeClient:
     def statuses(self, repo: str, sha: str):
         return self.commit_statuses
 
-    def required_contexts(self, repo: str, branch: str):
-        return self.required
+    def branch_protection(self, repo: str, branch: str):
+        return delivery_gate.BranchProtection(
+            protected=self.protected,
+            required_contexts=tuple(self.required),
+        )
 
     def reviews(self, repo: str, number: int):
         return self.review_items
@@ -173,6 +178,35 @@ class DeliveryGateTests(unittest.TestCase):
         client.pull_calls = 0
         self.assertTrue(self.evaluate(client, allow_no_ci=True)["passed"])
 
+    def test_unprotected_base_branch_fails_even_when_ci_is_green(self) -> None:
+        client = FakeClient()
+        client.protected = False
+        client.required = []
+        result = self.evaluate(client, required_checks="verify")
+        self.assertFalse(result["passed"])
+        self.assertIn("Base branch is not protected: main", result["blockers"])
+        self.assertFalse(result["branch_protection"]["protected"])
+
+    def test_configured_checks_include_every_branch_protected_context(self) -> None:
+        client = FakeClient()
+        client.required = ["security"]
+        client.runs.append(
+            {
+                "name": "security",
+                "status": "completed",
+                "conclusion": "success",
+                "completed_at": "2026-07-31T01:02:00Z",
+                "app": {"slug": "github-actions", "name": "GitHub Actions"},
+            }
+        )
+        result = self.evaluate(client, required_checks="verify")
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["required_checks_source"], "configured+branch_protection")
+        self.assertEqual(
+            [item["name"] for item in result["required_checks"]],
+            ["security", "verify"],
+        )
+
     def test_spoofed_coderabbit_check_name_is_not_trusted(self) -> None:
         client = FakeClient()
         client.runs[1]["app"] = {"slug": "untrusted-app", "name": "CodeRabbit"}
@@ -239,6 +273,49 @@ class DeliveryGateTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"passed": true', result.stdout)
+
+
+class GhClientTests(unittest.TestCase):
+    def test_check_run_pagination_works_without_slurp(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            endpoint = command[2]
+            page = [
+                {"name": f"check-{index}"}
+                for index in range(delivery_gate.REST_PAGE_SIZE)
+            ]
+            if "page=2" in endpoint:
+                page = [{"name": "last"}]
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=__import__("json").dumps({"check_runs": page}),
+                stderr="",
+            )
+
+        with mock.patch.object(delivery_gate.subprocess, "run", side_effect=fake_run):
+            runs = delivery_gate.GhClient().check_runs("owner/repo", "a" * 40)
+
+        self.assertEqual(len(runs), delivery_gate.REST_PAGE_SIZE + 1)
+        self.assertEqual(runs[-1]["name"], "last")
+        self.assertTrue(all("--slurp" not in call for call in calls))
+        self.assertEqual(len(calls), 2)
+
+    def test_missing_branch_protection_is_explicit(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["gh", "api"],
+            1,
+            stdout="",
+            stderr="gh: Branch not protected (HTTP 404)",
+        )
+        with mock.patch.object(delivery_gate.subprocess, "run", return_value=completed):
+            protection = delivery_gate.GhClient().branch_protection(
+                "owner/repo", "main"
+            )
+        self.assertFalse(protection.protected)
+        self.assertEqual(protection.required_contexts, ())
 
 
 if __name__ == "__main__":

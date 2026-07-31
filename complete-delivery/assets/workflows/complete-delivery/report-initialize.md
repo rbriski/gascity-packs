@@ -2,7 +2,7 @@ Initialize the one living delivery report before substantive work proceeds.
 
 Resolve the workflow root bead and its launcher work directory. Resolve
 `gc.var.artifact_root` beneath that work directory, then use
-`.gc/scripts/delivery_report.py init` to create:
+`{{pack_root}}/assets/scripts/delivery_report.py init` to create:
 
 - `<artifact_root>/delivery-report/state.json`
 - `<artifact_root>/delivery-report/index.html`
