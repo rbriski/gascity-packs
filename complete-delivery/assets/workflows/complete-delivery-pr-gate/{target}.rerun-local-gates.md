@@ -16,8 +16,10 @@ approval-gate wrappers; inspection remains mandatory for a repository-local
 wrapper with a different name. Never run such a gate before publication. Fix
 any new regression and repeat until every configured command passes. Repository
 gate configuration is trusted policy; this validation is not an adversarial
-shell sandbox. Then record `tested_commit` and the successful local-gate result
-in the same durable handoff artifact. Never push or resolve a review thread in
+shell sandbox. Then record a full-SHA `tested_commit`, matching
+`local_gates.tested_commit`, and `local_gates.status: "passed"` in the same
+durable handoff artifact. A blocked or skipped local gate is terminal evidence
+of failure, never a passing result. Never push or resolve a review thread in
 this lane. If no source changed because only remote checks are pending, still
 record that the current commit passed the local gate sequence.
 

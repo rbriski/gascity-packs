@@ -16,6 +16,9 @@ HANDOFF_PATH = "<artifact_root>/delivery/external-review-handoff.json"
 LOCAL_GATES_SCRIPT = (
     PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-local-gates.sh"
 )
+TERMINAL_GATE_SCRIPT = (
+    PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-pr-approved.sh"
+)
 
 
 class PrGateContractTests(unittest.TestCase):
@@ -58,6 +61,7 @@ class PrGateContractTests(unittest.TestCase):
 
     def test_formula_preserves_the_bounded_resolve_test_publish_handoff(self) -> None:
         loop = self.templates["{target}.external-review-loop"]
+        self.assertEqual(loop["needs"], ["{target}.setup-external-review"])
         self.assertEqual(loop["check"]["max_attempts"], 12)
         self.assertEqual(
             loop["check"]["check"]["path"],
@@ -76,6 +80,10 @@ class PrGateContractTests(unittest.TestCase):
         self.assertEqual(
             children["{target}.publish-fixes"]["needs"],
             ["{target}.rerun-local-gates"],
+        )
+        self.assertEqual(
+            children["{target}.report-external-review"]["needs"],
+            ["{target}.publish-fixes"],
         )
         for lane in (
             "{target}.resolve-findings",
@@ -234,6 +242,83 @@ class PrGateContractTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(marker.exists())
+
+    def test_local_gates_allow_benign_coderabbit_named_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = pathlib.Path(directory) / "local-gate-ran"
+            result, _ = self.run_local_gates(
+                f"mkdir tests; touch tests/test_coderabbit.py; touch {shlex.quote(str(marker))}"
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(marker.exists())
+
+    def run_terminal_gate(self, handoff: dict[str, object]) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            artifact_root = root / "artifacts"
+            handoff_path = artifact_root / "delivery" / "external-review-handoff.json"
+            handoff_path.parent.mkdir(parents=True)
+            handoff_path.write_text(json.dumps(handoff), encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gc = bin_dir / "gc"
+            metadata = {
+                "delivery.repo": "owner/repo",
+                "delivery.pr_number": "8",
+                "gc.var.artifact_root": str(artifact_root),
+            }
+            gc.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_STEP_JSON"\n',
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GC_BEAD_ID": "step-1",
+                    "FAKE_GC_STEP_JSON": json.dumps([{"metadata": metadata}]),
+                    "PATH": f"{bin_dir}:{environment['PATH']}",
+                }
+            )
+            return subprocess.run(
+                ["bash", str(TERMINAL_GATE_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+
+    def test_terminal_gate_rejects_blocked_or_skipped_local_gate_evidence(self) -> None:
+        commit = "a" * 40
+        for status in ("blocked", "skipped"):
+            with self.subTest(status=status):
+                result = self.run_terminal_gate(
+                    {
+                        "tested_commit": commit,
+                        "published_head": commit,
+                        "local_gates": {
+                            "status": status,
+                            "tested_commit": commit,
+                        },
+                    }
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("proven passing local-gate evidence", result.stderr)
+
+    def test_terminal_gate_rejects_unproven_tested_commit(self) -> None:
+        result = self.run_terminal_gate(
+            {
+                "tested_commit": "a" * 40,
+                "published_head": "b" * 40,
+                "local_gates": {
+                    "status": "passed",
+                    "tested_commit": "a" * 40,
+                },
+            }
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("proven passing local-gate evidence", result.stderr)
 
 
 if __name__ == "__main__":

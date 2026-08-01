@@ -15,6 +15,7 @@ reject_terminal_approval_command() {
   local command="$1"
   local normalized="${command,,}"
   normalized="${normalized//\\/}"
+  local forbidden_command_pattern='(^|[[:space:];|&()])([^[:space:];|&()]*/)?(delivery_gate\.py|delivery-pr-approved\.sh|coderabbit|remote-approval[^[:space:];|&()]*|remote_approval[^[:space:];|&()]*|approval-gate[^[:space:];|&()]*|approval_gate[^[:space:];|&()]*)([[:space:];|&()]|$)'
   local gh_command_pattern='(^|[[:space:];|&()])([^[:space:];|&()]*/)?gh([[:space:];|&()]|$)'
 
   # Local gates run before publication and must never decide the terminal PR
@@ -26,12 +27,12 @@ reject_terminal_approval_command() {
   # cannot cross that boundary under a shell-escaped spelling.
   # Repository gate configuration is trusted policy, not a shell sandbox.
   case "$normalized" in
-    *delivery_gate.py*|*delivery-pr-approved.sh*|*coderabbit*|*api.github.com*|*remote-approval*|*remote_approval*|*approval-gate*|*approval_gate*)
+    *api.github.com*)
       delivery_fail "local gate command invokes a terminal remote approval gate or provider command: $command"
       ;;
   esac
 
-  if [[ "$normalized" =~ $gh_command_pattern ]]; then
+  if [[ "$normalized" =~ $forbidden_command_pattern || "$normalized" =~ $gh_command_pattern ]]; then
     delivery_fail "local gate command invokes a terminal remote approval gate or provider command: $command"
   fi
 }
