@@ -3,7 +3,9 @@ Rerun the repository-native quality gates after review resolution.
 Read `<artifact_root>/delivery/external-review-handoff.json` and verify that
 `HEAD` is its exact full-SHA `candidate_commit` before testing. The resolver
 must set that candidate to `inspected_head` when no source changed, or to the
-exact fix commit otherwise. Invoke
+final committed `HEAD` after every valid source fix in the iteration otherwise;
+individual thread `fix_commit` values remain thread evidence, not the test
+candidate. Invoke
 `{{pack_root}}/assets/scripts/checks/delivery-local-gates.sh` with this claimed
 bead as `GC_BEAD_ID`. The complete nonterminal local-gate set is the configured
 `setup_command`, `lint_command`, `typecheck_command`, `test_command`,

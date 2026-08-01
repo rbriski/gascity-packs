@@ -168,8 +168,12 @@ class PrGateContractTests(unittest.TestCase):
             self.assertIn("candidate_commit", content)
             self.assertIn("inspected_head", content)
             self.assertIn("no source", content)
+            self.assertIn("final committed `HEAD`", content)
+            self.assertIn("separate `fix_commit`", content)
         self.assertIn("candidate_commit", rerun_local_gates)
         self.assertIn("tested_commit", rerun_local_gates)
+        self.assertIn("final committed `HEAD`", rerun_local_gates)
+        self.assertIn("individual thread `fix_commit`", rerun_local_gates)
         for content in (prompt, publish_fixes):
             self.assertIn("no-push iteration", content)
             self.assertIn("published_head_matches_tested_commit", content)

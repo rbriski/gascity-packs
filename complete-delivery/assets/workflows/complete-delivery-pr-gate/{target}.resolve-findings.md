@@ -8,9 +8,12 @@ superseded findings, respond with concrete evidence.
 Keep every thread open while editing and committing. Write the durable handoff
 artifact `<artifact_root>/delivery/external-review-handoff.json` before closing
 this lane. It must name a full-SHA `inspected_head`, each thread ID, its
-disposition, and the exact fix commit (or no commit for a non-actionable
-finding). It must also always name a full-SHA `candidate_commit`: use
-`inspected_head` when no source fix exists, otherwise use the exact fix commit.
+disposition, and that thread's separate `fix_commit` (or no commit for a
+non-actionable finding). It must also always name a full-SHA
+`candidate_commit`: use `inspected_head` when no source fix exists, otherwise
+use the final committed `HEAD` after every valid source fix in this iteration.
+Never use an individual thread's `fix_commit` as `candidate_commit` when later
+fixes exist.
 
 This lane must never push or resolve a thread. `rerun-local-gates` tests the
 recorded `candidate_commit` and records it as `tested_commit` in the same
