@@ -330,7 +330,16 @@ def test_required_pack_release_compatibility_runs_for_every_main_pr() -> None:
     assert pull_request["branches"] == ["main"]
     assert "paths" not in pull_request
     assert "paths-ignore" not in pull_request
-    assert workflow["on"]["push"]["paths"]
+
+    push = workflow["on"]["push"]
+    assert push["branches"] == ["main"]
+    assert push["paths"] == [
+        "registry.toml",
+        "scripts/pack_release_compat.py",
+        "tests/test_pack_release_compat.py",
+        ".github/workflows/pack-release-compatibility.yml",
+        "*/pack.toml",
+    ]
 
 
 def test_readme_includes_blacksmith_sponsor_badge() -> None:
