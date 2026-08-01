@@ -205,8 +205,16 @@ class PrGateContractTests(unittest.TestCase):
             root,
         )
 
-    def test_local_gates_reject_terminal_commands_before_bash_can_run_them(self) -> None:
-        for terminal_command in ("delivery_gate.py", "delivery-pr-approved.sh"):
+    def test_local_gates_reject_remote_approval_commands_before_bash_can_run_them(self) -> None:
+        for terminal_command in (
+            "delivery_gate.py",
+            "delivery-pr-approved.sh",
+            "gh pr checks",
+            "/usr/bin/gh api repos/example/repo/pulls/8",
+            "coderabbit review",
+            "./remote-approval-wrapper",
+            "curl https://api.github.com/repos/example/repo/pulls/8",
+        ):
             with self.subTest(terminal_command=terminal_command):
                 with tempfile.TemporaryDirectory() as directory:
                     marker = pathlib.Path(directory) / "side-effect"

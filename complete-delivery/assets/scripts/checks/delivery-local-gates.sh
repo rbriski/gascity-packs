@@ -13,15 +13,24 @@ RAN=0
 
 reject_terminal_approval_command() {
   local command="$1"
+  local normalized="${command,,}"
+  local gh_command_pattern='(^|[[:space:];|&()])([^[:space:];|&()]*/)?gh([[:space:];|&()]|$)'
 
   # Local gates run before publication and must never decide the terminal PR
-  # state.  Inspect the complete configured command before handing it to
-  # `bash -lc`, so a compound command cannot run a side effect first.
-  case "$command" in
-    *delivery_gate.py*|*delivery-pr-approved.sh*)
-      delivery_fail "local gate command invokes a terminal remote approval gate: $command"
+  # state. Inspect the complete configured command before handing it to
+  # `bash -lc`, so a compound command cannot run a side effect first. The
+  # resolver also inspects repository-specific wrappers that cannot be named
+  # centrally; this policy enforces the canonical provider/approval boundary.
+  # Repository gate configuration is trusted policy, not a shell sandbox.
+  case "$normalized" in
+    *delivery_gate.py*|*delivery-pr-approved.sh*|*coderabbit*|*api.github.com*|*remote-approval*|*remote_approval*|*approval-gate*|*approval_gate*)
+      delivery_fail "local gate command invokes a terminal remote approval gate or provider command: $command"
       ;;
   esac
+
+  if [[ "$normalized" =~ $gh_command_pattern ]]; then
+    delivery_fail "local gate command invokes a terminal remote approval gate or provider command: $command"
+  fi
 }
 
 run_gate() {

@@ -10,11 +10,15 @@ bead as `GC_BEAD_ID`. The complete nonterminal local-gate set is the configured
 inspect those configured commands. If any invokes `delivery_gate.py`,
 `delivery-pr-approved.sh`, or a remote PR, CI, CodeRabbit, or human-review
 approval gate, do not run it: record a blocker for the next terminal loop
-check. Never run such a gate before publication. Fix any new regression and
-repeat until every configured command passes, then record `tested_commit` and
-the successful local-gate result in the same durable handoff artifact. Never
-push or resolve a review thread in this lane. If no source changed because only
-remote checks are pending, still record that the current commit passed the
-local gate sequence.
+check. The script mechanically rejects the pack's terminal scripts, `gh`,
+CodeRabbit, GitHub provider-API URLs, and clearly named remote-approval or
+approval-gate wrappers; inspection remains mandatory for a repository-local
+wrapper with a different name. Never run such a gate before publication. Fix
+any new regression and repeat until every configured command passes. Repository
+gate configuration is trusted policy; this validation is not an adversarial
+shell sandbox. Then record `tested_commit` and the successful local-gate result
+in the same durable handoff artifact. Never push or resolve a review thread in
+this lane. If no source changed because only remote checks are pending, still
+record that the current commit passed the local gate sequence.
 
 Close with `gc.outcome=pass`. Do not invoke provider-native subagents.
