@@ -26,6 +26,20 @@ require_bool() {
   fi
 }
 
+is_https_url() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+value = sys.argv[1]
+try:
+    parsed = urlsplit(value)
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if parsed.scheme == "https" and parsed.netloc and not any(char.isspace() for char in value) else 1)
+PY
+}
+
 PUSH="$(delivery_var push true)"
 OPEN_PR="$(delivery_var open_pr true)"
 ALLOW_NO_CI="$(delivery_var allow_no_ci false)"
@@ -99,7 +113,7 @@ if [ "$DEPLOY_MODE" != "not-applicable" ] && [ -z "$SMOKE_COMMAND" ] && \
   [ "$ALLOW_NO_SMOKE" != "true" ]; then
   errors+=("smoke_command is required unless allow_no_smoke=true")
 fi
-if [ -n "$PRODUCTION_URL" ] && [[ ! "$PRODUCTION_URL" =~ ^https://[^[:space:]]+$ ]]; then
+if [ -n "$PRODUCTION_URL" ] && ! is_https_url "$PRODUCTION_URL"; then
   errors+=("production_url must be an https URL")
 fi
 

@@ -40,7 +40,12 @@ class PreflightTests(unittest.TestCase):
         return values
 
     def run_preflight(
-        self, metadata: dict[str, str], *, protected: bool = True
+        self,
+        metadata: dict[str, str],
+        *,
+        protected: bool = True,
+        step_json: str | None = None,
+        root_json: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -52,7 +57,15 @@ class PreflightTests(unittest.TestCase):
             bin_dir = root / "bin"
             bin_dir.mkdir()
             gc = bin_dir / "gc"
-            gc.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_JSON"\n', encoding="utf-8")
+            gc.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${3:-}\" = \"${FAKE_GC_ROOT_ID:-}\" ]; then\n"
+                "  printf '%s\\n' \"$FAKE_GC_ROOT_JSON\"\n"
+                "else\n"
+                "  printf '%s\\n' \"$FAKE_GC_STEP_JSON\"\n"
+                "fi\n",
+                encoding="utf-8",
+            )
             gc.chmod(0o755)
             gh = bin_dir / "gh"
             gh.write_text(
@@ -70,7 +83,10 @@ class PreflightTests(unittest.TestCase):
                 {
                     "GC_BEAD_ID": "step-1",
                     "GC_WORK_DIR": str(repository),
-                    "FAKE_GC_JSON": json.dumps([{"metadata": metadata}]),
+                    "FAKE_GC_STEP_JSON": step_json
+                    or json.dumps([{"metadata": metadata}]),
+                    "FAKE_GC_ROOT_ID": "root-1" if root_json is not None else "",
+                    "FAKE_GC_ROOT_JSON": root_json or "",
                     "FAKE_GH_PROTECTED": str(protected).lower(),
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                 }
@@ -130,6 +146,29 @@ class PreflightTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("production_url must be an https URL", result.stderr)
+
+    def test_production_url_without_authority_fails(self) -> None:
+        result = self.run_preflight(
+            self.metadata(**{"gc.var.production_url": "https:///release"})
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("production_url must be an https URL", result.stderr)
+
+    def test_invalid_step_or_root_json_fails_closed(self) -> None:
+        for metadata, kwargs, bead_id in (
+            (self.metadata(), {"step_json": "not json"}, "step-1"),
+            (
+                self.metadata(**{"gc.root_bead_id": "root-1"}),
+                {"root_json": "not json"},
+                "root-1",
+            ),
+        ):
+            with self.subTest(bead_id=bead_id):
+                result = self.run_preflight(metadata, **kwargs)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    f"gc bd show {bead_id} returned invalid JSON", result.stderr
+                )
 
     def test_malformed_required_check_list_fails_early(self) -> None:
         result = self.run_preflight(
