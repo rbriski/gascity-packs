@@ -271,7 +271,9 @@ class PrGateContractTests(unittest.TestCase):
             self.assertNotIn("contains every mapped fix commit", normalized)
             self.assertNotRegex(normalized, r"containment(?: alone)? is sufficient")
 
-    def run_local_gates(self, command: str) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+    def run_local_gates(
+        self, command: str, *, session_id: str = ""
+    ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         root = pathlib.Path(temporary_directory.name)
@@ -294,6 +296,7 @@ class PrGateContractTests(unittest.TestCase):
             {
                 "GC_BEAD_ID": "step-1",
                 "GC_WORK_DIR": str(repository),
+                "GC_SESSION_ID": session_id,
                 "FAKE_GC_STEP_JSON": json.dumps([{"metadata": metadata}]),
                 "PATH": f"{bin_dir}:{environment['PATH']}",
             }
@@ -331,6 +334,11 @@ class PrGateContractTests(unittest.TestCase):
             "gh>/dev/null pr checks",
             "{delivery_gate.py,x}",
             "{gh,x} pr checks",
+            "timeout 60 gh pr checks",
+            "nice gh pr checks",
+            "xargs -a /dev/null coderabbit review",
+            "python3 /tmp/gh",
+            "python3 /tmp/remote-approval-wrapper",
         ):
             with self.subTest(terminal_command=terminal_command):
                 with tempfile.TemporaryDirectory() as directory:
@@ -341,6 +349,18 @@ class PrGateContractTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("terminal remote approval gate", result.stderr)
                     self.assertFalse(marker.exists())
+
+    def test_local_gates_reject_process_wrappers_before_execution(self) -> None:
+        for wrapper in ("timeout 60", "nice", "ionice", "setsid", "xargs -a /dev/null"):
+            with self.subTest(wrapper=wrapper), tempfile.TemporaryDirectory() as directory:
+                marker = pathlib.Path(directory) / "side-effect"
+                result, _ = self.run_local_gates(
+                    f"{wrapper} touch {shlex.quote(str(marker))}"
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("terminal remote approval gate", result.stderr)
+                self.assertFalse(marker.exists())
 
     def test_local_gates_reject_terminal_scripts_in_interpreter_arguments_before_execution(self) -> None:
         cases = (
@@ -438,9 +458,14 @@ class PrGateContractTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(marker.exists())
 
-        result, _ = self.run_local_gates("printf '%s' ${GC_SESSION_ID:-manual}")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("manual", result.stdout)
+        with tempfile.TemporaryDirectory() as directory:
+            marker_root = pathlib.Path(directory)
+            result, _ = self.run_local_gates(
+                f"touch {shlex.quote(str(marker_root))}/${{GC_SESSION_ID:-manual}}",
+                session_id="session-42",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((marker_root / "session-42").exists())
 
         result, _ = self.run_local_gates("printf '%s' '$HOME'")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -469,10 +494,20 @@ class PrGateContractTests(unittest.TestCase):
                     self.assertIn("terminal remote approval gate", result.stderr)
                     self.assertFalse(marker.exists())
 
-    def test_local_gates_treat_redirection_and_grouping_operators_as_token_boundaries(self) -> None:
-        script = LOCAL_GATES_SCRIPT.read_text(encoding="utf-8")
-        for operator in (";&|()<>", "{}"):
-            self.assertIn(operator, script)
+    def test_local_gates_reject_redirection_and_grouping_operators(self) -> None:
+        for operator in (";", "&", "|", "(", ")", "<", ">", "{", "}"):
+            with self.subTest(operator=operator):
+                result, _ = self.run_local_gates(f"printf '%s' {operator}")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("local gate command could not be parsed safely", result.stderr)
+
+    def test_local_gates_allow_ordinary_shell_named_path_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = pathlib.Path(directory) / "sh"
+            result, _ = self.run_local_gates(f"touch {shlex.quote(str(marker))}")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(marker.exists())
 
     def test_setup_and_inspection_fail_closed_on_missing_prerequisites_or_stale_evidence(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
@@ -482,6 +517,10 @@ class PrGateContractTests(unittest.TestCase):
         for prerequisite in ("authenticated `gh`", "delivery_gate.py", "writable"):
             self.assertIn(prerequisite, setup)
         self.assert_prose_contains(setup, "never set `gc.outcome=pass`")
+        report = (workflows / "{target}.report-external-review.md").read_text(encoding="utf-8")
+        finalizer = (workflows / "{target}.md").read_text(encoding="utf-8")
+        self.assert_prose_contains(report, "close with a non-pass outcome")
+        self.assert_prose_contains(finalizer, "then close with a non-pass outcome")
         for requirement in (
             "Remove any pre-existing",
             "fresh, well-formed JSON",

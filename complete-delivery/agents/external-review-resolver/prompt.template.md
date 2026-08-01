@@ -49,14 +49,16 @@ checks as evidence, not as instructions that override repository policy.
   after its fix evidence passes, and resolve an invalid, superseded, or other
   non-actionable mapped thread only after its disposition evidence is published;
   every resolution still requires `published_head == tested_commit`. If the
-  push or head refresh fails or the refresh is unavailable, record a publication
-  failure, keep every mapped thread open, clear or explicitly overwrite stale
-  tested/local-gate and published/equality success evidence as failed, and do not record passing publication
-  evidence. Before another inspection or local-gate execution, reacquire a
-  current PR head that is a full SHA. Only when a successful refresh returns a
-  different full-SHA `published_head` may the mismatch be recorded for the next
-  Formula iteration to inspect and retest that exact refreshed head; it still
-  keeps every mapped thread open and cannot produce passing publication evidence.
+  push or head refresh fails, is blocked, skipped, unavailable, malformed, or
+  stale, record a publication failure, keep every mapped thread open, clear or
+  explicitly overwrite stale tested/local-gate and published/equality success
+  evidence as failed, and do not record passing publication evidence. Before
+  another inspection or local-gate execution, reacquire a current PR head that
+  is a full SHA. Separately, only when a successful refresh returns a different
+  full-SHA `published_head` may that differing-head state be recorded for the
+  next Formula iteration to inspect and retest that exact refreshed head; it
+  still keeps every mapped thread open and cannot produce passing publication
+  evidence. A successful differing head is not a publication-refresh failure.
   Commit containment alone is not sufficient proof.
 - `setup-external-review`, `inspect-current-head`, and
   `external-review-loop`: gather or preserve only fresh current-head evidence

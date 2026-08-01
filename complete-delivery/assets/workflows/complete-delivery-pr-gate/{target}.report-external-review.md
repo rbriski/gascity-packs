@@ -15,5 +15,8 @@ post-check finalizer; never claim protected merge is next from this lane. Only
 the existing post-check finalizer may mark the stage `passed` and publish the
 protected-merge next action after its final current-head confirmation.
 
-Run `report_publish_command` with `DELIVERY_REPORT_DIR` when configured. Close
-with `gc.outcome=pass`. Do not invoke provider-native subagents.
+Run `report_publish_command` with `DELIVERY_REPORT_DIR` when configured. A
+fresh valid blocked snapshot may close with `gc.outcome=pass`; close with
+`gc.outcome=pass` only after valid evidence has been recorded. If evidence is
+missing, malformed, stale, or root-head-mismatched, close with a non-pass
+outcome. Do not invoke provider-native subagents.

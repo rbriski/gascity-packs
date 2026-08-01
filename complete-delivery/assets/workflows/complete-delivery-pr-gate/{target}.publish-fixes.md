@@ -25,15 +25,16 @@ disposition evidence has been published. Every such resolution additionally
 requires that `published_head` is exactly equal to the
 artifact's `tested_commit`; only resolve when `published_head == tested_commit` and
 `published_head_matches_tested_commit` is true. If the push or head refresh
-fails, is blocked, skipped, unavailable, malformed, stale, or mismatched,
-record a publication failure, keep every mapped thread open, clear or
-explicitly overwrite every tested/local-gate and published/equality success
-field as failed, and do not record passing publication evidence. Before
-another inspection or local-gate execution, reacquire a current PR head that
-is a full SHA. Only when a successful refresh returns a different full-SHA
-`published_head` may the mismatch be recorded for the next Formula iteration
-to inspect and retest that exact refreshed head; it still keeps every mapped
-thread open and cannot produce passing publication evidence.
+fails, is blocked, skipped, unavailable, malformed, or stale, record a
+publication failure, keep every mapped thread open, clear or explicitly
+overwrite every tested/local-gate and published/equality success field as
+failed, and do not record passing publication evidence. Before another
+inspection or local-gate execution, reacquire a current PR head that is a full
+SHA. Separately, only when a successful refresh returns a different full-SHA
+`published_head` may that differing-head state be recorded for the next Formula
+iteration to inspect and retest that exact refreshed head; it still keeps every
+mapped thread open and cannot produce passing publication evidence. A
+successful differing head is not a publication-refresh failure.
 Commit
 containment alone is not sufficient to resolve a thread.
 

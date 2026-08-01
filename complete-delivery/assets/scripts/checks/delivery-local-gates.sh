@@ -26,9 +26,9 @@ import pathlib
 import sys
 
 source = sys.argv[1]
-args: list[str] = []
-word: list[str] = []
-state: str | None = None
+args = []
+word = []
+state = None
 started = False
 i = 0
 
@@ -127,11 +127,18 @@ blocked = {
     "delivery_gate.py", "env", "eval", "exec", "fish", "gh", "ksh",
     "sh", "source", "zsh", "coderabbit",
 }
-terminal_scripts = {"delivery-pr-approved.sh", "delivery_gate.py"}
+wrappers = {
+    "chronic", "chrt", "ionice", "nice", "nohup", "prlimit", "setsid",
+    "stdbuf", "sudo", "taskset", "time", "timeout", "unshare", "xargs",
+}
+provider_or_terminal = {"coderabbit", "delivery-pr-approved.sh", "delivery_gate.py", "gh"}
+argument_names = [pathlib.PurePath(argument).name.lower() for argument in args]
 if (
     executable in blocked
-    or any(pathlib.PurePath(argument).name.lower() in terminal_scripts for argument in args)
+    or executable in wrappers
+    or any(name in provider_or_terminal for name in argument_names)
     or executable.startswith(("remote-approval", "remote_approval", "approval-gate", "approval_gate"))
+    or any(name.startswith(("remote-approval", "remote_approval", "approval-gate", "approval_gate")) for name in argument_names)
     or any("api.github.com" in argument.lower() for argument in args)
 ):
     raise SystemExit(

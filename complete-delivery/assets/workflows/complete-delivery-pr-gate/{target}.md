@@ -11,7 +11,8 @@ path on the workflow root as `delivery.pr_gate_path`.
 Reject missing, malformed, stale, or root-head-mismatched gate evidence. On
 any non-success finalization path, invalidate the handoff's `tested_commit`,
 `local_gates`, `published_head`, and `published_head_matches_tested_commit`
-success evidence rather than allowing a prior attempt to authorize the report.
+success evidence rather than allowing a prior attempt to authorize the report,
+then close with a non-pass outcome.
 
 After that terminal check has passed, this post-check finalizer is the sole
 authority that may update the living report from its final current-head gate
@@ -20,5 +21,6 @@ CodeRabbit signal, zero unresolved threads, and gate path as evidence, and set
 the next action to protected merge. Run
 `report_publish_command` with `DELIVERY_REPORT_DIR` when configured.
 
-Close with `gc.outcome=pass`. Do not merge or invoke provider-native
-subagents.
+Close with `gc.outcome=pass` only after the successful terminal check and
+report update; otherwise close with a non-pass outcome. Do not merge or invoke
+provider-native subagents.
