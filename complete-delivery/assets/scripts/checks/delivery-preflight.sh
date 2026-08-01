@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=delivery-common.sh
+source "$SCRIPT_DIR/delivery-common.sh"
+delivery_initialize_context
+
+errors=()
+require_enum() {
+  local key="$1"
+  local value="$2"
+  shift 2
+  local allowed
+  for allowed in "$@"; do
+    [ "$value" = "$allowed" ] && return 0
+  done
+  errors+=("$key must be one of: $* (got ${value:-empty})")
+}
+
+require_bool() {
+  local key="$1"
+  local value="$2"
+  if [ "$value" != "true" ] && [ "$value" != "false" ]; then
+    errors+=("$key must be true or false (got ${value:-empty})")
+  fi
+}
+
+is_https_url() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+value = sys.argv[1]
+try:
+    parsed = urlsplit(value)
+    hostname = parsed.hostname
+    parsed.port
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if parsed.scheme == "https" and hostname and not any(char.isspace() for char in value) else 1)
+PY
+}
+
+PUSH="$(delivery_var push true)"
+OPEN_PR="$(delivery_var open_pr true)"
+ALLOW_NO_CI="$(delivery_var allow_no_ci false)"
+ALLOW_NO_LOCAL="$(delivery_var allow_no_local_gates false)"
+ALLOW_NO_SMOKE="$(delivery_var allow_no_smoke false)"
+CODERABBIT="$(delivery_var coderabbit required)"
+REQUIRED_CHECKS="$(delivery_var required_checks auto)"
+MERGE_METHOD="$(delivery_var merge_method squash)"
+DEPLOY_MODE="$(delivery_var deploy_mode command)"
+DEPLOY_COMMAND="$(delivery_var deploy_command '')"
+VERIFY_COMMAND="$(delivery_var deploy_verify_command '')"
+SMOKE_COMMAND="$(delivery_var smoke_command '')"
+NA_REASON="$(delivery_var deploy_not_applicable_reason '')"
+PRODUCTION_URL="$(delivery_var production_url '')"
+BASE_BRANCH="$(delivery_var base_branch main)"
+SOURCE_BEAD_ID="$(delivery_var source_bead_id '')"
+SOURCE_TITLE="$(delivery_var source_title '')"
+
+require_bool push "$PUSH"
+require_bool open_pr "$OPEN_PR"
+require_bool allow_no_ci "$ALLOW_NO_CI"
+require_bool allow_no_local_gates "$ALLOW_NO_LOCAL"
+require_bool allow_no_smoke "$ALLOW_NO_SMOKE"
+require_enum coderabbit "$CODERABBIT" required optional off
+require_enum merge_method "$MERGE_METHOD" squash merge rebase
+require_enum deploy_mode "$DEPLOY_MODE" command ci not-applicable
+
+[ -n "$SOURCE_BEAD_ID" ] || errors+=("source_bead_id is required; launch from a durable work bead or convoy")
+[ -n "$SOURCE_TITLE" ] || errors+=("source_title is required; resolve the durable source title before launch")
+case "$SOURCE_BEAD_ID" in
+  *[!A-Za-z0-9._-]*|"") errors+=("source_bead_id must be a valid durable bead or convoy ID") ;;
+esac
+
+[ "$PUSH" = "true" ] || errors+=("push must be true for Complete Delivery")
+[ "$OPEN_PR" = "true" ] || errors+=("open_pr must be true for Complete Delivery")
+[ -n "$REQUIRED_CHECKS" ] || errors+=("required_checks must be auto or an exact comma-separated list")
+if [ -n "$REQUIRED_CHECKS" ] && [ "$REQUIRED_CHECKS" != "auto" ]; then
+  if ! python3 - "$REQUIRED_CHECKS" <<'PY'
+import sys
+
+names = [part.strip() for part in sys.argv[1].split(",")]
+raise SystemExit(0 if names and all(names) and len(names) == len(set(names)) else 1)
+PY
+  then
+    errors+=("required_checks must contain unique, nonempty exact check names")
+  fi
+fi
+
+LOCAL_GATE_COUNT=0
+for key in setup_command lint_command typecheck_command test_command build_command \
+  browser_test_command security_command extra_gate_command; do
+  [ -n "$(delivery_var "$key" '')" ] && LOCAL_GATE_COUNT=$((LOCAL_GATE_COUNT + 1))
+done
+if [ "$LOCAL_GATE_COUNT" -eq 0 ] && [ "$ALLOW_NO_LOCAL" != "true" ]; then
+  errors+=("configure at least one repository gate or explicitly set allow_no_local_gates=true")
+fi
+
+case "$DEPLOY_MODE" in
+  command)
+    [ -n "$DEPLOY_COMMAND" ] || errors+=("deploy_command is required for deploy_mode=command")
+    [ -n "$VERIFY_COMMAND" ] || errors+=("deploy_verify_command is required for deploy_mode=command")
+    ;;
+  ci)
+    [ -n "$VERIFY_COMMAND" ] || errors+=("deploy_verify_command is required for deploy_mode=ci")
+    ;;
+  not-applicable)
+    [ -n "$NA_REASON" ] || errors+=("deploy_not_applicable_reason is required for deploy_mode=not-applicable")
+    ;;
+esac
+if [ "$DEPLOY_MODE" != "not-applicable" ] && [ -z "$SMOKE_COMMAND" ] && \
+  [ "$ALLOW_NO_SMOKE" != "true" ]; then
+  errors+=("smoke_command is required unless allow_no_smoke=true")
+fi
+if [ -n "$PRODUCTION_URL" ] && ! is_https_url "$PRODUCTION_URL"; then
+  errors+=("production_url must be an https URL")
+fi
+
+command -v git >/dev/null 2>&1 || errors+=("git is required on PATH")
+command -v gh >/dev/null 2>&1 || errors+=("gh is required on PATH")
+if command -v gh >/dev/null 2>&1; then
+  if ! gh auth status >/dev/null 2>&1; then
+    errors+=("gh is not authenticated")
+  elif ! (cd "$DELIVERY_WORK_DIR" && gh repo view --json nameWithOwner >/dev/null 2>&1); then
+    errors+=("gh cannot resolve the repository from the launcher worktree")
+  else
+    ENCODED_BRANCH="$(python3 - "$BASE_BRANCH" <<'PY'
+import sys
+from urllib.parse import quote
+
+print(quote(sys.argv[1], safe=""))
+PY
+)"
+    if ! (cd "$DELIVERY_WORK_DIR" && \
+      gh api "repos/{owner}/{repo}/branches/$ENCODED_BRANCH/protection" \
+        --silent >/dev/null 2>&1); then
+      errors+=("base branch must be protected and readable through GitHub: $BASE_BRANCH")
+    fi
+  fi
+fi
+if command -v git >/dev/null 2>&1; then
+  git -C "$DELIVERY_WORK_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
+    errors+=("launcher work directory is not a git worktree: $DELIVERY_WORK_DIR")
+fi
+
+if [ "${#errors[@]}" -gt 0 ]; then
+  printf 'complete-delivery preflight failed (%d issue(s)):\n' "${#errors[@]}" >&2
+  printf '  - %s\n' "${errors[@]}" >&2
+  delivery_fail "repair the rig formula_vars or named external prerequisite, then retry"
+fi
+
+echo "complete-delivery preflight passed: source=$SOURCE_BEAD_ID, $LOCAL_GATE_COUNT local gate(s), CI=$REQUIRED_CHECKS, CodeRabbit=$CODERABBIT, deploy=$DEPLOY_MODE"
