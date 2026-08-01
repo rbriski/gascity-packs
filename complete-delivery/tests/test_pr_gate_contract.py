@@ -328,6 +328,7 @@ class PrGateContractTests(unittest.TestCase):
             "`gh` pr checks",
             "delivery_gate.py</dev/null",
             "delivery_gate.py>/dev/null",
+            "gh>/dev/null pr checks",
         ):
             with self.subTest(terminal_command=terminal_command):
                 with tempfile.TemporaryDirectory() as directory:
@@ -522,7 +523,7 @@ class PrGateContractTests(unittest.TestCase):
                 "published_head_matches_tested_commit": True,
                 "local_gates": {"status": "passed", "tested_commit": commit.swapcase()},
             },
-            {"passed": True, "head_sha": commit.lower()},
+            {"passed": True, "head_sha": commit.upper()},
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)

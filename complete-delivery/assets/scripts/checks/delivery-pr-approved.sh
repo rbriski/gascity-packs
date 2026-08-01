@@ -94,12 +94,16 @@ python3 "$SCRIPT_DIR/../delivery_gate.py" "${ARGS[@]}"
 python3 - "$REPORT_PATH" "$TESTED_COMMIT" <<'PY' || \
   delivery_fail "terminal approval requires delivery_gate.py to validate the tested commit"
 import json
+import re
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
 if report.get("passed") is not True:
     raise SystemExit("delivery_gate.py did not report a passing gate")
-if report.get("head_sha") != sys.argv[2]:
+head_sha = report.get("head_sha")
+if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
+    raise SystemExit("delivery_gate.py did not report a full head SHA")
+if head_sha.lower() != sys.argv[2].lower():
     raise SystemExit("delivery_gate.py evaluated a head other than the tested commit")
 PY
