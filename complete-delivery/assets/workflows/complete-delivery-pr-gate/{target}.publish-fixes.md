@@ -6,5 +6,10 @@ empty commit or push. Refresh the PR and record its current head on the
 workflow root as `delivery.head_sha`; a new head deliberately invalidates old
 CI and CodeRabbit evidence for the next loop check.
 
+For every valid finding recorded by `resolve-findings`, confirm the refreshed
+PR head contains its fix commit before resolving that thread. Keep the thread
+open if the push or head-containment check fails, is unavailable, or does not
+prove the published head contains the fix.
+
 Close with `gc.outcome=pass`. Do not merge or invoke provider-native
 subagents.
