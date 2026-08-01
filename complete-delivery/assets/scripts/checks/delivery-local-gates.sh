@@ -11,12 +11,26 @@ cd "$DELIVERY_WORK_DIR"
 ALLOW_NONE="$(delivery_var allow_no_local_gates false)"
 RAN=0
 
+reject_terminal_approval_command() {
+  local command="$1"
+
+  # Local gates run before publication and must never decide the terminal PR
+  # state.  Inspect the complete configured command before handing it to
+  # `bash -lc`, so a compound command cannot run a side effect first.
+  case "$command" in
+    *delivery_gate.py*|*delivery-pr-approved.sh*)
+      delivery_fail "local gate command invokes a terminal remote approval gate: $command"
+      ;;
+  esac
+}
+
 run_gate() {
   local label="$1"
   local key="$2"
   local command
   command="$(delivery_var "$key" "")"
   [ -n "$command" ] || return 0
+  reject_terminal_approval_command "$command"
   RAN=$((RAN + 1))
   echo "complete-delivery local gate [$label]: $command"
   if ! bash -lc "$command"; then

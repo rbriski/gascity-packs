@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
 import pathlib
+import shlex
+import subprocess
+import tempfile
 import tomllib
 import unittest
 
@@ -8,6 +13,9 @@ import unittest
 PACK_ROOT = pathlib.Path(__file__).resolve().parents[1]
 FORMULA_PATH = PACK_ROOT / "formulas" / "complete-delivery-pr-gate.formula.toml"
 HANDOFF_PATH = "<artifact_root>/delivery/external-review-handoff.json"
+LOCAL_GATES_SCRIPT = (
+    PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-local-gates.sh"
+)
 
 
 class PrGateContractTests(unittest.TestCase):
@@ -131,7 +139,82 @@ class PrGateContractTests(unittest.TestCase):
 
         self.assertIn("`published_head` is exactly equal to the\nartifact's `tested_commit`", publish_fixes)
         self.assertIn("Commit\ncontainment alone is not sufficient", publish_fixes)
-        self.assertIn("next Formula iteration can inspect and retest that exact\n  refreshed head", prompt)
+        self.assertIn("Formula iteration must inspect and retest that exact refreshed head", prompt)
+
+    def test_every_thread_resolution_instruction_requires_exact_head_equality(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        resolver_prompt = (
+            PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md"
+        ).read_text(encoding="utf-8")
+        resolution_instructions = (
+            resolver_prompt,
+            (workflows / "{target}.resolve-findings.md").read_text(encoding="utf-8"),
+            (workflows / "{target}.publish-fixes.md").read_text(encoding="utf-8"),
+            (workflows / "{target}.external-review-loop.md").read_text(encoding="utf-8"),
+        )
+
+        for instruction in resolution_instructions:
+            self.assertIn("published_head", instruction)
+            self.assertIn("tested_commit", instruction)
+            self.assertIn("exact", instruction)
+            self.assertIn("containment", instruction)
+
+    def run_local_gates(self, command: str) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = pathlib.Path(temporary_directory.name)
+        repository = root / "repository"
+        repository.mkdir()
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        gc = bin_dir / "gc"
+        gc.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_STEP_JSON"\n',
+            encoding="utf-8",
+        )
+        gc.chmod(0o755)
+        metadata = {
+            "gc.var.allow_no_local_gates": "false",
+            "gc.var.test_command": command,
+        }
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "GC_BEAD_ID": "step-1",
+                "GC_WORK_DIR": str(repository),
+                "FAKE_GC_STEP_JSON": json.dumps([{"metadata": metadata}]),
+                "PATH": f"{bin_dir}:{environment['PATH']}",
+            }
+        )
+        return (
+            subprocess.run(
+                ["bash", str(LOCAL_GATES_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            ),
+            root,
+        )
+
+    def test_local_gates_reject_terminal_commands_before_bash_can_run_them(self) -> None:
+        for terminal_command in ("delivery_gate.py", "delivery-pr-approved.sh"):
+            with self.subTest(terminal_command=terminal_command):
+                with tempfile.TemporaryDirectory() as directory:
+                    marker = pathlib.Path(directory) / "side-effect"
+                    command = f"{terminal_command}; touch {shlex.quote(str(marker))}"
+                    result, _ = self.run_local_gates(command)
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("terminal remote approval gate", result.stderr)
+                    self.assertFalse(marker.exists())
+
+    def test_local_gates_execute_an_allowed_local_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = pathlib.Path(directory) / "local-gate-ran"
+            result, _ = self.run_local_gates(f"touch {shlex.quote(str(marker))}")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(marker.exists())
 
 
 if __name__ == "__main__":

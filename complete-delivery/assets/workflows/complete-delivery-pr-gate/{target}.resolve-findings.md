@@ -12,9 +12,10 @@ and the exact fix commit (or no commit for a non-actionable finding).
 
 This lane must never push or resolve a thread. `rerun-local-gates` tests the
 recorded exact commit and updates the same artifact; `publish-fixes` alone
-reads it, proves the pushed PR head contains every mapped fix commit, and only
-then resolves the corresponding valid threads. If publication or head
-confirmation fails, leave every mapped thread open.
+reads it, and resolves a corresponding valid thread only when its refreshed
+`published_head` is exactly equal to the artifact's `tested_commit`. Commit
+containment alone is not sufficient. If publication or exact-head confirmation
+fails, leave every mapped thread open.
 
 Do not change code merely because a bot suggested it, do not hide findings,
 and do not edit gate configuration to make the current PR pass. If nothing is
