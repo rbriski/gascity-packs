@@ -1,0 +1,76 @@
+description = """
+Bounded external-review loop for Complete Delivery.
+
+Each iteration snapshots the current PR head, applies valid GitHub and
+CodeRabbit findings, reruns repository gates, pushes fixes, and updates the
+living report. The mechanical terminal check passes only on the same green
+head with no unresolved threads or outstanding change requests.
+"""
+formula = "complete-delivery-pr-gate"
+type = "expansion"
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[template]]
+id = "{target}.setup-external-review"
+title = "Prepare external review reconciliation"
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.setup-external-review.md"
+
+[[template]]
+id = "{target}.external-review-loop"
+title = "Iterate until CI and review are green"
+needs = ["{target}.setup-external-review"]
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.external-review-loop.md"
+
+[template.check]
+max_attempts = 12
+
+[template.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/delivery-pr-approved.sh"
+timeout = "10m"
+
+[[template.children]]
+id = "{target}.inspect-current-head"
+title = "Inspect current-head CI and review evidence"
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.inspect-current-head.md"
+
+[[template.children]]
+id = "{target}.resolve-findings"
+title = "Resolve valid external findings"
+needs = ["{target}.inspect-current-head"]
+metadata = { "gc.run_target" = "complete-delivery.external-review-resolver", "gc.continuation_group" = "complete-delivery-pr-fixes" }
+description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.resolve-findings.md"
+
+[[template.children]]
+id = "{target}.rerun-local-gates"
+title = "Rerun repository-native gates"
+needs = ["{target}.resolve-findings"]
+metadata = { "gc.run_target" = "complete-delivery.external-review-resolver", "gc.continuation_group" = "complete-delivery-pr-fixes" }
+description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.rerun-local-gates.md"
+
+[[template.children]]
+id = "{target}.publish-fixes"
+title = "Publish review fixes"
+needs = ["{target}.rerun-local-gates"]
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.publish-fixes.md"
+
+[[template.children]]
+id = "{target}.report-external-review"
+title = "Update the living review status"
+needs = ["{target}.publish-fixes"]
+metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.report-external-review.md"
+
+[[template]]
+id = "{target}"
+title = "Finalize external review gate"
+needs = ["{target}.external-review-loop"]
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.md"
