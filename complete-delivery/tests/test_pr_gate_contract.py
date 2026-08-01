@@ -112,10 +112,18 @@ class PrGateContractTests(unittest.TestCase):
 
         for content in (prompt, rerun_local_gates):
             self.assertIn("complete nonterminal local-gate set", content)
+            for local_command in (
+                "build_command",
+                "browser_test_command",
+                "security_command",
+                "extra_gate_command",
+            ):
+                self.assertIn(local_command, content)
             self.assertIn("delivery_gate.py", content)
             self.assertIn("delivery-pr-approved.sh", content)
-            self.assertIn("approval gate before", content)
-            self.assertIn("publication", content)
+            self.assertIn("inspect", content)
+            self.assertIn("do not run it: record a blocker", content)
+            self.assertIn("Never run such a gate before publication", content)
 
         self.assertIn("`published_head` is exactly equal to the\nartifact's `tested_commit`", publish_fixes)
         self.assertIn("Commit\ncontainment alone is not sufficient", publish_fixes)
