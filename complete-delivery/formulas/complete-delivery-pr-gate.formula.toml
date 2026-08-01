@@ -72,5 +72,5 @@ description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.repor
 id = "{target}"
 title = "Finalize external review gate"
 needs = ["{target}.external-review-loop"]
-metadata = { "gc.run_target" = "complete-delivery.external-review-resolver" }
+metadata = { "gc.run_target" = "complete-delivery.report-editor" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.md"

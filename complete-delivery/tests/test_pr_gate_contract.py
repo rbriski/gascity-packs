@@ -40,6 +40,14 @@ class PrGateContractTests(unittest.TestCase):
         )
         self.assertTrue(run_targets <= declared_targets)
 
+    def test_formula_routes_terminal_report_update_to_report_editor(self) -> None:
+        terminal = self.templates["{target}"]
+
+        self.assertEqual(
+            terminal["metadata"]["gc.run_target"],
+            "complete-delivery.report-editor",
+        )
+
     def test_formula_preserves_the_bounded_resolve_test_publish_handoff(self) -> None:
         loop = self.templates["{target}.external-review-loop"]
         self.assertEqual(loop["check"]["max_attempts"], 12)
