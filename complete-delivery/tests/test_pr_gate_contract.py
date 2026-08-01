@@ -353,30 +353,57 @@ class PrGateContractTests(unittest.TestCase):
 
         for prerequisite in ("authenticated `gh`", "delivery_gate.py", "writable"):
             self.assertIn(prerequisite, setup)
-        self.assertIn("never set\n`gc.outcome=pass`", setup)
+        self.assert_prose_contains(setup, "never set `gc.outcome=pass`")
         for requirement in (
             "Remove any pre-existing",
             "fresh, well-formed JSON",
-            "canonical full `head_sha` exactly equals workflow-root\n`delivery.head_sha`",
-            "Never consume a\npre-existing artifact after a command failure",
+            "canonical full `head_sha` exactly equals workflow-root `delivery.head_sha`",
+            "Never consume a pre-existing artifact after a command failure",
         ):
-            self.assertIn(requirement, inspect)
+            self.assert_prose_contains(inspect, requirement)
 
     def test_every_non_success_transition_invalidates_prior_success_evidence(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
-        consumers = (
-            "{target}.setup-external-review.md",
-            "{target}.inspect-current-head.md",
-            "{target}.resolve-findings.md",
-            "{target}.rerun-local-gates.md",
-            "{target}.publish-fixes.md",
-            "{target}.report-external-review.md",
-            "{target}.external-review-loop.md",
-            "{target}.md",
-        )
-        for filename in consumers:
+        consumers = {
+            "{target}.setup-external-review.md": (
+                "If any prerequisite is failed, blocked, skipped, or unavailable, "
+                "perform the same invalidation"
+            ),
+            "{target}.inspect-current-head.md": (
+                "invalidate stale `tested_commit`, `local_gates`, `published_head`, "
+                "and `published_head_matches_tested_commit`"
+            ),
+            "{target}.resolve-findings.md": (
+                "no non-success path may retain success from an earlier attempt"
+            ),
+            "{target}.rerun-local-gates.md": (
+                "must leave all of those success fields cleared or explicitly "
+                "overwritten as failed"
+            ),
+            "{target}.publish-fixes.md": (
+                "clear or explicitly overwrite every tested/local-gate and "
+                "published/equality success field as failed"
+            ),
+            "{target}.report-external-review.md": (
+                "otherwise invalidate `tested_commit`, `local_gates`, `published_head`, "
+                "and `published_head_matches_tested_commit`"
+            ),
+            "{target}.external-review-loop.md": (
+                "Treat any failed, blocked, skipped, unavailable, stale, malformed, "
+                "or head-mismatched child evidence as fail-closed: invalidate stale "
+                "`tested_commit`, `local_gates`, `published_head`, and "
+                "`published_head_matches_tested_commit`"
+            ),
+            "{target}.md": (
+                "On any non-success finalization path, invalidate the handoff's "
+                "`tested_commit`, `local_gates`, `published_head`, and "
+                "`published_head_matches_tested_commit` success evidence"
+            ),
+        }
+        for filename, invalidation_semantics in consumers.items():
             with self.subTest(filename=filename):
                 text = (workflows / filename).read_text(encoding="utf-8")
+                self.assert_prose_contains(text, invalidation_semantics)
                 for field in (
                     "tested_commit",
                     "local_gates",
