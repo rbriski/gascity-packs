@@ -65,10 +65,17 @@ class PrGateContractTests(unittest.TestCase):
         precheck = (workflows / "{target}.report-external-review.md").read_text(
             encoding="utf-8"
         )
+        loop = (workflows / "{target}.external-review-loop.md").read_text(
+            encoding="utf-8"
+        )
         finalizer = (workflows / "{target}.md").read_text(encoding="utf-8")
 
         self.assertIn("Keep\n`external-review` `active`", precheck)
         self.assertIn("never claim protected merge is next", precheck)
+        self.assertIn("child report pre-terminal", loop)
+        self.assertIn("leave `external-review` `active`", loop)
+        self.assertIn("must not publish `passed` or a protected-merge next action", loop)
+        self.assertIn("post-check `{target}.md` finalizer", loop)
         self.assertIn("sole\nauthority", finalizer)
 
     def test_formula_preserves_the_bounded_resolve_test_publish_handoff(self) -> None:

@@ -5,6 +5,11 @@ publish fixes, and update the living report. The loop check then evaluates
 required CI, CodeRabbit completion, all live unresolved review threads, human
 change requests, PR/draft state, and head stability.
 
+Keep the child report pre-terminal: it must leave `external-review` `active`
+and must not publish `passed` or a protected-merge next action. Only this
+terminal mechanical check, followed by the post-check `{target}.md` finalizer,
+may authorize that passed report and protected-merge publication.
+
 Never weaken a gate or resolve a thread unless the durable handoff proves
 `published_head` is exactly equal to `tested_commit`; commit containment or a
 pushed fix alone is not sufficient. The mechanical check owns the terminal
