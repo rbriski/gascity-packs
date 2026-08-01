@@ -94,9 +94,32 @@ class PrGateContractTests(unittest.TestCase):
         )
 
         self.assertIn("Never push\n  or resolve a thread in this lane", prompt)
-        self.assertIn("only then resolve those valid mapped\n  threads", prompt)
+        self.assertIn("resolve valid mapped threads when `published_head == tested_commit`", prompt)
         self.assertIn("Only the Formula v2 `external-review-loop` terminal check", prompt)
         self.assertNotIn("After fixes are pushed and applicable review threads are resolved", prompt)
+
+    def test_nonterminal_lanes_only_run_local_gates_and_require_exact_published_head(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        rerun_local_gates = (workflows / "{target}.rerun-local-gates.md").read_text(
+            encoding="utf-8"
+        )
+        publish_fixes = (workflows / "{target}.publish-fixes.md").read_text(
+            encoding="utf-8"
+        )
+        prompt = (PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md").read_text(
+            encoding="utf-8"
+        )
+
+        for content in (prompt, rerun_local_gates):
+            self.assertIn("complete nonterminal local-gate set", content)
+            self.assertIn("delivery_gate.py", content)
+            self.assertIn("delivery-pr-approved.sh", content)
+            self.assertIn("approval gate before", content)
+            self.assertIn("publication", content)
+
+        self.assertIn("`published_head` is exactly equal to the\nartifact's `tested_commit`", publish_fixes)
+        self.assertIn("Commit\ncontainment alone is not sufficient", publish_fixes)
+        self.assertIn("next Formula iteration can inspect and retest that exact\n  refreshed head", prompt)
 
 
 if __name__ == "__main__":
