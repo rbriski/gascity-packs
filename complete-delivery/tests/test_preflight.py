@@ -46,6 +46,7 @@ class PreflightTests(unittest.TestCase):
         protected: bool = True,
         step_json: str | None = None,
         root_json: str | None = None,
+        transient_gc_failures: int = 0,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -59,6 +60,13 @@ class PreflightTests(unittest.TestCase):
             gc = bin_dir / "gc"
             gc.write_text(
                 "#!/bin/sh\n"
+                "if [ -n \"${FAKE_GC_FAILURES_FILE:-}\" ] && [ -f \"$FAKE_GC_FAILURES_FILE\" ]; then\n"
+                "  failures=$(cat \"$FAKE_GC_FAILURES_FILE\")\n"
+                "  if [ \"$failures\" -gt 0 ]; then\n"
+                "    printf '%s\\n' $((failures - 1)) > \"$FAKE_GC_FAILURES_FILE\"\n"
+                "    exit 1\n"
+                "  fi\n"
+                "fi\n"
                 "if [ \"${3:-}\" = \"${FAKE_GC_ROOT_ID:-}\" ]; then\n"
                 "  printf '%s\\n' \"$FAKE_GC_ROOT_JSON\"\n"
                 "else\n"
@@ -79,6 +87,8 @@ class PreflightTests(unittest.TestCase):
             )
             gh.chmod(0o755)
             environment = os.environ.copy()
+            failures_file = root / "gc-failures"
+            failures_file.write_text(str(transient_gc_failures), encoding="utf-8")
             environment.update(
                 {
                     "GC_BEAD_ID": "step-1",
@@ -88,6 +98,7 @@ class PreflightTests(unittest.TestCase):
                     "FAKE_GC_ROOT_ID": "root-1" if root_json is not None else "",
                     "FAKE_GC_ROOT_JSON": root_json or "",
                     "FAKE_GH_PROTECTED": str(protected).lower(),
+                    "FAKE_GC_FAILURES_FILE": str(failures_file),
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                 }
             )
@@ -182,6 +193,15 @@ class PreflightTests(unittest.TestCase):
                 self.assertIn(
                     f"gc bd show {bead_id} returned invalid JSON", result.stderr
                 )
+
+    def test_transient_bead_read_failure_is_retried(self) -> None:
+        result = self.run_preflight(self.metadata(), transient_gc_failures=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_persistent_bead_read_failure_fails_closed(self) -> None:
+        result = self.run_preflight(self.metadata(), transient_gc_failures=3)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("gc bd show step-1 failed", result.stderr)
 
     def test_malformed_required_check_list_fails_early(self) -> None:
         result = self.run_preflight(
