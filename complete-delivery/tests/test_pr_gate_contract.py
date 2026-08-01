@@ -455,6 +455,30 @@ class PrGateContractTests(unittest.TestCase):
                     self.assertIn("terminal remote approval gate", result.stderr)
                     self.assertFalse(marker.exists())
 
+    def test_local_gates_reject_interpreter_inline_program_forms_before_execution(self) -> None:
+        forms = (
+            "node -e", "node --eval=", "node -p", "node --print=",
+            "python3 -c", "perl -e", "perl -E", "ruby -e",
+            "awk -e", "awk --source=", "awk",
+        )
+        for form in forms:
+            with self.subTest(form=form), tempfile.TemporaryDirectory() as directory:
+                marker = pathlib.Path(directory) / "inline-ran"
+                code = shlex.quote(f"touch {marker}")
+                command = f"{form}{code}" if form.endswith("=") or form.endswith("-e") or form.endswith("-p") or form.endswith("-c") or form.endswith("-E") else f"{form} {code}"
+                result, _ = self.run_local_gates(command)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("terminal remote approval gate", result.stderr)
+                self.assertFalse(marker.exists())
+
+    def test_local_gates_allow_python_arguments_after_script_or_module_selection(self) -> None:
+        for command in ("python3 script.py -e value", "python3 -m pytest -c pyproject.toml"):
+            with self.subTest(command=command):
+                result, _ = self.run_local_gates(command)
+                self.assertNotIn("could not be parsed safely", result.stderr)
+                self.assertIn("local gate [test]", result.stdout)
+
     def test_local_gates_reject_command_substitution_before_side_effects(self) -> None:
         constructions = {
             "dollar": (

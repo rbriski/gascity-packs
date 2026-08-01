@@ -144,19 +144,57 @@ privilege_user_switch_wrappers = {
 }
 provider_or_terminal = {"coderabbit", "delivery-pr-approved.sh", "delivery_gate.py", "gh"}
 argument_names = [pathlib.PurePath(argument).name.lower() for argument in args]
-interpreter_names = {
-    "awk", "gawk", "mawk", "nawk", "node", "nodejs", "perl", "python",
-    "python3", "ruby",
-}
-inline_program_flags = {"-c", "-e", "--command", "--eval", "--execute"}
-is_known_interpreter = executable in interpreter_names or executable.startswith(
-    ("python3.", "ruby", "perl")
-)
-has_inline_program = any(
-    argument in inline_program_flags
-    or argument.startswith(("-c", "-e", "--command=", "--eval=", "--execute="))
-    for argument in args[1:]
-)
+
+def inline_program_present(executable: str, options: list[str]) -> bool:
+    """Recognize each supported interpreter's program-bearing argv forms."""
+    if executable in {"node", "nodejs"}:
+        flags = ("-e", "-p", "--eval", "--print")
+    elif executable == "python" or executable.startswith("python3"):
+        flags = ("-c",)
+    elif executable.startswith("perl"):
+        flags = ("-e", "-E")
+    elif executable.startswith("ruby"):
+        flags = ("-e",)
+    elif executable in {"awk", "gawk", "mawk", "nawk"}:
+        flags = ("-e", "--execute", "--source")
+    else:
+        return False
+
+    selected = False
+    index = 0
+    while index < len(options):
+        argument = options[index]
+        if selected and executable not in {"awk", "gawk", "mawk", "nawk"}:
+            return False
+        if argument == "--":
+            selected = True
+        elif any(argument == flag or argument.startswith(flag + "=") or (
+            flag.startswith("-") and not flag.startswith("--") and argument.startswith(flag)
+        ) for flag in flags):
+            return not selected
+        elif executable in {"awk", "gawk", "mawk", "nawk"} and (
+            argument in {"-f", "--file", "-E", "--exec"}
+            or argument.startswith(("-f", "--file=", "-E", "--exec="))
+        ):
+            selected = True
+            if argument in {"-f", "--file", "-E", "--exec"}:
+                index += 1
+        elif executable in {"awk", "gawk", "mawk", "nawk"} and not argument.startswith("-"):
+            # awk's first positional argument is its program unless -f/-E selected a file.
+            return True
+        elif executable == "python" or executable.startswith("python3"):
+            if argument == "-m" or argument.startswith("-m"):
+                selected = True
+                if argument == "-m":
+                    index += 1
+            elif not argument.startswith("-"):
+                selected = True
+        elif not argument.startswith("-"):
+            # Node, Perl, and Ruby select a script at their first positional arg.
+            selected = True
+        index += 1
+    return False
+
 if (
     executable in blocked
     or executable in wrappers
@@ -167,7 +205,7 @@ if (
     or any("api.github.com" in argument.lower() for argument in args)
     # The configured argv is trusted policy, but an inline program is a second
     # language boundary whose content cannot be meaningfully basename-scanned.
-    or (is_known_interpreter and has_inline_program)
+    or inline_program_present(executable, args[1:])
 ):
     raise SystemExit(
         "local gate command invokes a terminal remote approval gate or provider command"
