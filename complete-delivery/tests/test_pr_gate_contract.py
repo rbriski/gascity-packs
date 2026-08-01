@@ -166,7 +166,22 @@ class PrGateContractTests(unittest.TestCase):
 
         self.assertIn("`published_head` is exactly equal to the\nartifact's `tested_commit`", publish_fixes)
         self.assertIn("Commit\ncontainment alone is not sufficient", publish_fixes)
-        self.assertIn("Formula iteration must inspect and retest that exact refreshed head", prompt)
+        self.assertIn("Formula iteration to inspect and retest that exact refreshed head", prompt)
+
+    def test_publication_refresh_failure_requires_a_new_full_sha_before_more_work(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        publish_fixes = (workflows / "{target}.publish-fixes.md").read_text(encoding="utf-8")
+        prompt = (PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md").read_text(
+            encoding="utf-8"
+        )
+
+        for content in (publish_fixes, prompt):
+            normalized = " ".join(content.split())
+            self.assertIn("record a publication failure", normalized)
+            self.assertIn("keep every mapped thread open", normalized)
+            self.assertIn("do not record passing publication evidence", normalized)
+            self.assertIn("reacquire a current PR head that is a full SHA", normalized)
+            self.assertIn("successful refresh returns a different full-SHA", normalized)
 
     def test_handoff_instructions_preserve_candidate_and_no_push_head_evidence(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
@@ -300,6 +315,12 @@ class PrGateContractTests(unittest.TestCase):
             "./remote-approval-wrapper",
             "curl https://api.github.com/repos/example/repo/pulls/8",
             "delivery_gate." + "\\\n" + "py",
+            '"delivery_gate.py"',
+            "'delivery_gate.py'",
+            "`delivery_gate.py`",
+            '"gh" pr checks',
+            "'gh' pr checks",
+            "`gh` pr checks",
         ):
             with self.subTest(terminal_command=terminal_command):
                 with tempfile.TemporaryDirectory() as directory:
