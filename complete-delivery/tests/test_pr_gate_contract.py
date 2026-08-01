@@ -1,3 +1,5 @@
+"""Complete Delivery contract tests require Python 3.11+ (stdlib tomllib)."""
+
 from __future__ import annotations
 
 import json
@@ -148,7 +150,10 @@ class PrGateContractTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        for content in (prompt, rerun_local_gates):
+        for content, inspection_instruction in (
+            (prompt, "Before invoking that script, inspect the configured commands."),
+            (rerun_local_gates, "Before invoking it, inspect those configured commands."),
+        ):
             self.assertIn("complete nonterminal local-gate set", content)
             for local_command in (
                 "setup_command",
@@ -163,7 +168,7 @@ class PrGateContractTests(unittest.TestCase):
                 self.assertIn(local_command, content)
             self.assertIn("delivery_gate.py", content)
             self.assertIn("delivery-pr-approved.sh", content)
-            self.assertIn("inspect", content)
+            self.assert_prose_contains(content, inspection_instruction)
             self.assertIn("do not run it: record a blocker", content)
             self.assertIn("Never run such a gate before publication", content)
 
@@ -312,7 +317,7 @@ class PrGateContractTests(unittest.TestCase):
         )
 
     def test_local_gates_reject_remote_approval_commands_before_bash_can_run_them(self) -> None:
-        for terminal_command in (
+        policy_commands = (
             "delivery_gate.py",
             "delivery-pr-approved.sh",
             r"delivery_gat\e.py",
@@ -322,24 +327,41 @@ class PrGateContractTests(unittest.TestCase):
             "coderabbit review",
             "./remote-approval-wrapper",
             "curl https://api.github.com/repos/example/repo/pulls/8",
-            "delivery_gate." + "\\\n" + "py",
             '"delivery_gate.py"',
             "'delivery_gate.py'",
-            "`delivery_gate.py`",
             '"gh" pr checks',
             "'gh' pr checks",
-            "`gh` pr checks",
-            "delivery_gate.py</dev/null",
-            "delivery_gate.py>/dev/null",
-            "gh>/dev/null pr checks",
-            "{delivery_gate.py,x}",
-            "{gh,x} pr checks",
             "timeout 60 gh pr checks",
             "nice gh pr checks",
             "xargs -a /dev/null coderabbit review",
             "python3 /tmp/gh",
             "python3 /tmp/remote-approval-wrapper",
-        ):
+            "python3 -c \"import subprocess; subprocess.run(['gh', 'pr', 'checks'])\"",
+            "node -e \"require('child_process').execSync('gh pr checks')\"",
+            "perl -e \"system 'gh', 'pr', 'checks'\"",
+            "ruby -e \"system 'gh', 'pr', 'checks'\"",
+            "awk --execute \"system(\\\"gh pr checks\\\")\"",
+        )
+        syntax_commands = (
+            "delivery_gate." + "\\\n" + "py",
+            chr(96) + "delivery_gate.py" + chr(96),
+            "{delivery_gate.py,x}",
+            "{gh,x} pr checks",
+            "delivery_gate.py</dev/null",
+            "delivery_gate.py>/dev/null",
+            "gh>/dev/null pr checks",
+        )
+        for terminal_command in policy_commands:
+            with self.subTest(terminal_command=terminal_command):
+                result, _ = self.run_local_gates(terminal_command)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "invokes a terminal remote approval gate or provider command",
+                    result.stderr,
+                )
+
+        for terminal_command in syntax_commands:
             with self.subTest(terminal_command=terminal_command):
                 with tempfile.TemporaryDirectory() as directory:
                     marker = pathlib.Path(directory) / "side-effect"
@@ -347,7 +369,7 @@ class PrGateContractTests(unittest.TestCase):
                     result, _ = self.run_local_gates(command)
 
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("terminal remote approval gate", result.stderr)
+                    self.assertIn("local gate command could not be parsed safely", result.stderr)
                     self.assertFalse(marker.exists())
 
     def test_local_gates_reject_process_wrappers_before_execution(self) -> None:
@@ -516,6 +538,10 @@ class PrGateContractTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("parameter, arithmetic, or command expansion", result.stderr)
 
+        result, _ = self.run_local_gates(r'printf "%s" "literal\q"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(r"literal\q", result.stdout)
+
     def test_local_gates_reject_quote_split_terminal_commands_before_side_effects(self) -> None:
         for terminal_command in (
             'g"h" pr checks',
@@ -636,7 +662,7 @@ class PrGateContractTests(unittest.TestCase):
             self.assertTrue(marker.exists())
 
     def run_terminal_gate(
-        self, handoff: dict[str, object], report: dict[str, object] | None = None
+        self, handoff: dict[str, object], report: object | None = None
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -659,7 +685,9 @@ class PrGateContractTests(unittest.TestCase):
             gc.chmod(0o755)
             if report is not None:
                 report_fixture = root / "delivery-gate-report.json"
-                report_fixture.write_text(json.dumps(report), encoding="utf-8")
+                report_fixture.write_text(
+                    report if isinstance(report, str) else json.dumps(report), encoding="utf-8"
+                )
                 python = bin_dir / "python3"
                 python.write_text(
                     "#!/bin/sh\n"
@@ -667,6 +695,10 @@ class PrGateContractTests(unittest.TestCase):
                     "  shift\n"
                     "  while [ \"$#\" -gt 0 ]; do\n"
                     "    if [ \"$1\" = --output ]; then\n"
+                    "      if ! \"$REAL_PYTHON\" -c 'import json, sys; json.load(open(sys.argv[1]))' \"$GATE_REPORT_FIXTURE\"; then\n"
+                    "        printf '%s\n' 'delivery_gate.py: malformed report fixture' >&2\n"
+                    "        exit 2\n"
+                    "      fi\n"
                     "      cp \"$GATE_REPORT_FIXTURE\" \"$2\"\n"
                     "      exit 0\n"
                     "    fi\n"
@@ -825,6 +857,23 @@ class PrGateContractTests(unittest.TestCase):
 
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("delivery_gate.py", result.stderr)
+
+    def test_terminal_gate_rejects_malformed_or_missing_head_delivery_gate_report(self) -> None:
+        commit = "a" * 40
+        handoff = {
+            "candidate_commit": commit,
+            "tested_commit": commit,
+            "published_head": commit,
+            "published_head_matches_tested_commit": True,
+            "local_gates": {"status": "passed", "tested_commit": commit},
+        }
+        malformed = self.run_terminal_gate(handoff, "not-json")
+        self.assertEqual(malformed.returncode, 2, malformed.stderr)
+        self.assertIn("delivery_gate.py", malformed.stderr)
+
+        missing_head = self.run_terminal_gate(handoff, {"passed": True})
+        self.assertNotEqual(missing_head.returncode, 0)
+        self.assertIn("delivery_gate.py", missing_head.stderr)
 
 
 if __name__ == "__main__":

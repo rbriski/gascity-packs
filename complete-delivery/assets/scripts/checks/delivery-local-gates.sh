@@ -100,6 +100,10 @@ while i < len(source):
             i += 1
             if i == len(source) or source[i] in "\r\n":
                 fail("backslash line continuation")
+            # In double quotes, Bash only consumes a backslash before special
+            # escaped characters; preserve it for every other literal character.
+            if source[i] not in '$"\\' and source[i] != chr(96):
+                word.append("\\")
             word.append(source[i])
         elif character == "$" and source.startswith("$(", i):
             fail("command substitution")
@@ -140,6 +144,19 @@ privilege_user_switch_wrappers = {
 }
 provider_or_terminal = {"coderabbit", "delivery-pr-approved.sh", "delivery_gate.py", "gh"}
 argument_names = [pathlib.PurePath(argument).name.lower() for argument in args]
+interpreter_names = {
+    "awk", "gawk", "mawk", "nawk", "node", "nodejs", "perl", "python",
+    "python3", "ruby",
+}
+inline_program_flags = {"-c", "-e", "--command", "--eval", "--execute"}
+is_known_interpreter = executable in interpreter_names or executable.startswith(
+    ("python3.", "ruby", "perl")
+)
+has_inline_program = any(
+    argument in inline_program_flags
+    or argument.startswith(("-c", "-e", "--command=", "--eval=", "--execute="))
+    for argument in args[1:]
+)
 if (
     executable in blocked
     or executable in wrappers
@@ -148,6 +165,9 @@ if (
     or executable.startswith(("remote-approval", "remote_approval", "approval-gate", "approval_gate"))
     or any(name.startswith(("remote-approval", "remote_approval", "approval-gate", "approval_gate")) for name in argument_names)
     or any("api.github.com" in argument.lower() for argument in args)
+    # The configured argv is trusted policy, but an inline program is a second
+    # language boundary whose content cannot be meaningfully basename-scanned.
+    or (is_known_interpreter and has_inline_program)
 ):
     raise SystemExit(
         "local gate command invokes a terminal remote approval gate or provider command"
@@ -160,7 +180,13 @@ PY
     delivery_fail "local gate command could not be parsed safely: $command"
   fi
 
-  mapfile -d '' -t LOCAL_GATE_ARGV <"$output"
+  # Bash 3.2 supports read -d, unlike mapfile -d; retain NUL-safe argv
+  # transfer without imposing a newer Bash floor (notably on macOS).
+  LOCAL_GATE_ARGV=()
+  local argument
+  while IFS= read -r -d '' argument; do
+    LOCAL_GATE_ARGV+=("$argument")
+  done <"$output"
   rm -f "$output"
   if [ "${#LOCAL_GATE_ARGV[@]}" -eq 0 ]; then
     delivery_fail "local gate command could not be parsed safely: $command"

@@ -11,8 +11,8 @@ whose canonical full `head_sha` exactly equals workflow-root
 `delivery.head_sha`; preserve that fresh blocked snapshot and close this
 inspection lane with `gc.outcome=pass` so repair children can act.
 
-If invocation fails without fresh valid JSON, the JSON is malformed or missing,
-or its full canonical head differs from `delivery.head_sha`, invalidate stale
+If invocation fails without fresh valid JSON, the JSON is malformed, is missing
+`head_sha`, or its full canonical head differs from `delivery.head_sha`, invalidate stale
 `tested_commit`, `local_gates`, `published_head`, and
 `published_head_matches_tested_commit`, record the failure, and fail closed.
 An API/input error is not a finding. Record the inspected head SHA and concise
