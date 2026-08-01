@@ -154,6 +154,15 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("production_url must be an https URL", result.stderr)
 
+    def test_production_url_requires_hostname_and_valid_port(self) -> None:
+        for production_url in ("https://@/release", "https://:443/release"):
+            with self.subTest(production_url=production_url):
+                result = self.run_preflight(
+                    self.metadata(**{"gc.var.production_url": production_url})
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("production_url must be an https URL", result.stderr)
+
     def test_invalid_step_or_root_json_fails_closed(self) -> None:
         for metadata, kwargs, bead_id in (
             (self.metadata(), {"step_json": "not json"}, "step-1"),

@@ -34,9 +34,11 @@ from urllib.parse import urlsplit
 value = sys.argv[1]
 try:
     parsed = urlsplit(value)
+    hostname = parsed.hostname
+    parsed.port
 except ValueError:
     raise SystemExit(1)
-raise SystemExit(0 if parsed.scheme == "https" and parsed.netloc and not any(char.isspace() for char in value) else 1)
+raise SystemExit(0 if parsed.scheme == "https" and hostname and not any(char.isspace() for char in value) else 1)
 PY
 }
 
