@@ -362,6 +362,45 @@ class PrGateContractTests(unittest.TestCase):
                 self.assertIn("terminal remote approval gate", result.stderr)
                 self.assertFalse(marker.exists())
 
+    def test_local_gates_reject_privilege_user_switch_wrappers_before_execution(self) -> None:
+        direct_wrappers = (
+            "doas",
+            "pkexec",
+            "runuser",
+            "setpriv",
+            "su",
+            "sudo",
+        )
+        nested_command_wrappers = (
+            ("su -c", "gh pr checks"),
+            ("runuser -u nobody --", "delivery-pr-approved.sh"),
+        )
+
+        for wrapper in direct_wrappers:
+            with self.subTest(wrapper=wrapper), tempfile.TemporaryDirectory() as directory:
+                marker = pathlib.Path(directory) / "side-effect"
+                result, _ = self.run_local_gates(
+                    f"{wrapper} touch {shlex.quote(str(marker))}"
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("terminal remote approval gate", result.stderr)
+                self.assertFalse(marker.exists())
+
+        for wrapper, nested_command in nested_command_wrappers:
+            with (
+                self.subTest(wrapper=wrapper, nested_command=nested_command),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                marker = pathlib.Path(directory) / "side-effect"
+                result, _ = self.run_local_gates(
+                    f"{wrapper} {shlex.quote(f'{nested_command}; touch {marker}')}"
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("terminal remote approval gate", result.stderr)
+                self.assertFalse(marker.exists())
+
     def test_local_gates_reject_terminal_scripts_in_interpreter_arguments_before_execution(self) -> None:
         cases = (
             (
@@ -502,12 +541,13 @@ class PrGateContractTests(unittest.TestCase):
                 self.assertIn("local gate command could not be parsed safely", result.stderr)
 
     def test_local_gates_allow_ordinary_shell_named_path_arguments(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            marker = pathlib.Path(directory) / "sh"
-            result, _ = self.run_local_gates(f"touch {shlex.quote(str(marker))}")
+        for name in ("sh", "su"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                marker = pathlib.Path(directory) / name
+                result, _ = self.run_local_gates(f"touch {shlex.quote(str(marker))}")
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue(marker.exists())
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(marker.exists())
 
     def test_setup_and_inspection_fail_closed_on_missing_prerequisites_or_stale_evidence(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"

@@ -129,13 +129,21 @@ blocked = {
 }
 wrappers = {
     "chronic", "chrt", "ionice", "nice", "nohup", "prlimit", "setsid",
-    "stdbuf", "sudo", "taskset", "time", "timeout", "unshare", "xargs",
+    "stdbuf", "taskset", "time", "timeout", "unshare", "xargs",
+}
+# These launchers can change credentials or reinterpret a literal nested command
+# string (for example, ``su -c 'gh pr checks'``).  The restricted argv parser
+# intentionally does not parse a second shell language inside an argument, so
+# reject the bounded privilege/user-switch category before executing anything.
+privilege_user_switch_wrappers = {
+    "doas", "pkexec", "runuser", "setpriv", "su", "sudo",
 }
 provider_or_terminal = {"coderabbit", "delivery-pr-approved.sh", "delivery_gate.py", "gh"}
 argument_names = [pathlib.PurePath(argument).name.lower() for argument in args]
 if (
     executable in blocked
     or executable in wrappers
+    or executable in privilege_user_switch_wrappers
     or any(name in provider_or_terminal for name in argument_names)
     or executable.startswith(("remote-approval", "remote_approval", "approval-gate", "approval_gate"))
     or any(name.startswith(("remote-approval", "remote_approval", "approval-gate", "approval_gate")) for name in argument_names)
