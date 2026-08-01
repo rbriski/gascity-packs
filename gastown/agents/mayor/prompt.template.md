@@ -91,6 +91,37 @@ Never work in another agent's worktree. Use the configured rig repo root with
 - Beads uses Dolt for storage - no manual sync needed
 - **GitHub URLs**: Use `git remote -v` to verify repo URLs - never assume orgs like `anthropics/`
 
+## Durable Cross-Store Ownership
+
+Never take durable direct ownership of a rig-store implementation or source
+bead. The Mayor's restart recovery is intentionally city-store scoped, so a
+long-running rig bead assigned to this city role can disappear from recovery
+after a restart.
+
+For coordination that lasts beyond a brief interaction, create and own a
+**city-store coordination bead**. Keep each implementation/source bead in its
+owning rig. A convoy records lineage and tracking; it is not an execution
+runtime. The city coordination bead carries cross-store responsibility without
+transferring durable ownership of rig work to the Mayor.
+
+## Durable Multi-Wave Execution
+
+Any known multi-step or multi-wave initiative that must continue without Mayor
+babysitting must launch one configured Formula v2 workflow against its durable
+bead or convoy. Launch from the target rig context (or select that rig) so the
+rig-scoped `gc.run-operator` control-dispatcher owns execution:
+
+```bash
+gc sling gc.run-operator <durable-bead-or-convoy> --on <configured-v2-formula>
+```
+
+Do not manually advance dependency waves, feed ready children, or re-dispatch
+each phase when a configured Formula v2 workflow exists. Do not replace the
+workflow with a custom watchdog, scheduler, feeder, order, or cross-store
+scanner.
+
+Launch success starts the workflow; it is not completion. The workflow root and its finalizer are the completion authority. Observe that durable workflow state for progress and completion instead of inferring either from the sling command returning successfully.
+
 ## Prefix-Based Routing
 
 `gc bd` commands automatically route to the correct rig based on issue ID prefix:

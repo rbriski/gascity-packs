@@ -152,6 +152,30 @@ test_polecat_startup_uses_standard_hook_claim() {
         fail "polecat propulsion fragment must not regress to an unclaimed hook/work-query choice"
 }
 
+test_mayor_durable_formula_v2_contract() {
+    local prompt
+    prompt="$GASTOWN/agents/mayor/prompt.template.md"
+
+    grep -F 'Never take durable direct ownership of a rig-store implementation or source' "$prompt" >/dev/null ||
+        fail "Mayor prompt must prohibit direct rig-store ownership"
+    grep -F 'A convoy records lineage and tracking; it is not an execution' "$prompt" >/dev/null ||
+        fail "Mayor prompt must distinguish convoy tracking from runtime execution"
+    grep -F 'gc sling gc.run-operator <durable-bead-or-convoy> --on <configured-v2-formula>' "$prompt" >/dev/null ||
+        fail "Mayor prompt must provide the durable Formula v2 launch pattern"
+    grep -F 'rig-scoped `gc.run-operator` control-dispatcher owns execution' "$prompt" >/dev/null ||
+        fail "Mayor prompt must use the target rig control-dispatcher"
+    grep -F 'Do not manually advance dependency waves' "$prompt" >/dev/null ||
+        fail "Mayor prompt must forbid manual waves when Formula v2 is configured"
+    grep -F 'workflow root' "$prompt" | grep -F 'finalizer' >/dev/null ||
+        fail "Mayor prompt must assign completion authority to the workflow root and finalizer"
+    grep -F 'Launch success starts the workflow; it is not completion.' "$prompt" >/dev/null ||
+        fail "Mayor prompt must not treat a successful launch as completion"
+    [[ ! -e "$GASTOWN/orders/mayor-scope-guard.toml" ]] ||
+        fail "native Formula v2 execution must not add a custom Mayor order"
+    [[ ! -e "$GASTOWN/orders/scripts/mayor-scope-guard.sh" ]] ||
+        fail "native Formula v2 execution must not add a custom Mayor scanner"
+}
+
 test_review_leg_contract_forbids_synthetic_mutation() {
     local formula prompt
     formula="$GASTOWN/formulas/mol-review-leg.toml"
@@ -222,6 +246,7 @@ test_shutdown_dance_contracts_are_executable
 test_shutdown_dance_lifecycle_and_audit_contracts
 test_composition_is_documented
 test_polecat_startup_uses_standard_hook_claim
+test_mayor_durable_formula_v2_contract
 test_review_leg_contract_forbids_synthetic_mutation
 test_refinery_direct_merge_is_worktree_safe_and_fail_closed
 
