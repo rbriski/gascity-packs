@@ -22,6 +22,13 @@ reject_terminal_approval_command() {
     delivery_fail "local gate command contains a Bash line continuation; a terminal remote approval gate must not execute: $command"
   fi
 
+  # Command substitution can synthesize a forbidden executable only after
+  # this pre-execution scan. Reject both Bash forms rather than attempting to
+  # partially expand them, so no provider or trailing side effect can run.
+  if [[ "$command" == *'$('* || "$command" == *'`'* ]]; then
+    delivery_fail "local gate command contains command substitution; a terminal remote approval gate must not execute: $command"
+  fi
+
   normalized="${normalized//\\/}"
   # Quotes and backticks delimit shell words too. They must not become part
   # of a path/executable word in the pre-execution matcher: otherwise a

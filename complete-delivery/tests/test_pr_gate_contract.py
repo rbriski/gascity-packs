@@ -342,6 +342,31 @@ class PrGateContractTests(unittest.TestCase):
                     self.assertIn("terminal remote approval gate", result.stderr)
                     self.assertFalse(marker.exists())
 
+    def test_local_gates_reject_command_substitution_before_side_effects(self) -> None:
+        constructions = {
+            "dollar": (
+                "$(printf g; printf h) pr checks",
+                "$(printf 'delivery_'; printf 'gate.py')",
+                "$(printf 'delivery-pr-'; printf 'approved.sh')",
+            ),
+            "backtick": (
+                "`printf g; printf h` pr checks",
+                "`printf 'delivery_'; printf 'gate.py'`",
+                "`printf 'delivery-pr-'; printf 'approved.sh'`",
+            ),
+        }
+        for form, terminal_commands in constructions.items():
+            for terminal_command in terminal_commands:
+                with self.subTest(form=form, terminal_command=terminal_command):
+                    with tempfile.TemporaryDirectory() as directory:
+                        marker = pathlib.Path(directory) / "side-effect"
+                        command = f"{terminal_command}; touch {shlex.quote(str(marker))}"
+                        result, _ = self.run_local_gates(command)
+
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("command substitution", result.stderr)
+                        self.assertFalse(marker.exists())
+
     def test_local_gates_treat_redirection_and_grouping_operators_as_token_boundaries(self) -> None:
         script = LOCAL_GATES_SCRIPT.read_text(encoding="utf-8")
         self.assertIn(";,|&()<>{}", script)
