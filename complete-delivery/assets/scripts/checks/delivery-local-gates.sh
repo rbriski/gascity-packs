@@ -14,6 +14,14 @@ RAN=0
 reject_terminal_approval_command() {
   local command="$1"
   local normalized="${command,,}"
+
+  # Bash removes a backslash-newline pair before parsing words. Reject it
+  # before normalizing or invoking `bash -lc`: otherwise a forbidden command
+  # name can be split across physical lines and still run its side effects.
+  if [[ "$command" == *$'\\\n'* || "$command" == *$'\\\r\n'* ]]; then
+    delivery_fail "local gate command contains a Bash line continuation; a terminal remote approval gate must not execute: $command"
+  fi
+
   normalized="${normalized//\\/}"
   local forbidden_command_pattern='(^|[[:space:];|&()])([^[:space:];|&()]*/)?(delivery_gate\.py|delivery-pr-approved\.sh|coderabbit|remote-approval[^[:space:];|&()]*|remote_approval[^[:space:];|&()]*|approval-gate[^[:space:];|&()]*|approval_gate[^[:space:];|&()]*)([[:space:];|&()]|$)'
   local gh_command_pattern='(^|[[:space:];|&()])([^[:space:];|&()]*/)?gh([[:space:];|&()]|$)'

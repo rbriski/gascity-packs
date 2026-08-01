@@ -36,13 +36,20 @@ except (OSError, json.JSONDecodeError) as exc:
 if not isinstance(handoff, dict):
     raise SystemExit("external-review handoff must be an object")
 
+candidate_commit = handoff.get("candidate_commit")
 tested_commit = handoff.get("tested_commit")
 published_head = handoff.get("published_head")
 local_gates = handoff.get("local_gates")
+if not isinstance(candidate_commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", candidate_commit):
+    raise SystemExit("external-review handoff does not prove a full candidate_commit")
 if not isinstance(tested_commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", tested_commit):
     raise SystemExit("external-review handoff does not prove a full tested_commit")
+if candidate_commit != tested_commit:
+    raise SystemExit("external-review handoff does not prove candidate_commit == tested_commit")
 if published_head != tested_commit:
     raise SystemExit("external-review handoff does not prove published_head == tested_commit")
+if handoff.get("published_head_matches_tested_commit") is not True:
+    raise SystemExit("external-review handoff does not record published_head_matches_tested_commit")
 if not isinstance(local_gates, dict):
     raise SystemExit("external-review handoff is missing local_gates evidence")
 if local_gates.get("tested_commit") != tested_commit:

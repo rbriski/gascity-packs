@@ -1,7 +1,9 @@
 Rerun the repository-native quality gates after review resolution.
 
 Read `<artifact_root>/delivery/external-review-handoff.json` and verify that
-`HEAD` is the exact recorded fix commit before testing. Invoke
+`HEAD` is its exact full-SHA `candidate_commit` before testing. The resolver
+must set that candidate to `inspected_head` when no source changed, or to the
+exact fix commit otherwise. Invoke
 `{{pack_root}}/assets/scripts/checks/delivery-local-gates.sh` with this claimed
 bead as `GC_BEAD_ID`. The complete nonterminal local-gate set is the configured
 `setup_command`, `lint_command`, `typecheck_command`, `test_command`,
@@ -16,11 +18,11 @@ approval-gate wrappers; inspection remains mandatory for a repository-local
 wrapper with a different name. Never run such a gate before publication. Fix
 any new regression and repeat until every configured command passes. Repository
 gate configuration is trusted policy; this validation is not an adversarial
-shell sandbox. Then record a full-SHA `tested_commit`, matching
+shell sandbox. Then record `candidate_commit` as a full-SHA `tested_commit`, matching
 `local_gates.tested_commit`, and `local_gates.status: "passed"` in the same
 durable handoff artifact. A blocked or skipped local gate is terminal evidence
 of failure, never a passing result. Never push or resolve a review thread in
-this lane. If no source changed because only remote checks are pending, still
-record that the current commit passed the local gate sequence.
+this lane. If no source changed because only remote checks are pending, test
+and record the inspected-head candidate through the same local gate sequence.
 
 Close with `gc.outcome=pass`. Do not invoke provider-native subagents.

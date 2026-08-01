@@ -149,6 +149,31 @@ class PrGateContractTests(unittest.TestCase):
         self.assertIn("Commit\ncontainment alone is not sufficient", publish_fixes)
         self.assertIn("Formula iteration must inspect and retest that exact refreshed head", prompt)
 
+    def test_handoff_instructions_preserve_candidate_and_no_push_head_evidence(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        resolve_findings = (workflows / "{target}.resolve-findings.md").read_text(
+            encoding="utf-8"
+        )
+        rerun_local_gates = (workflows / "{target}.rerun-local-gates.md").read_text(
+            encoding="utf-8"
+        )
+        publish_fixes = (workflows / "{target}.publish-fixes.md").read_text(
+            encoding="utf-8"
+        )
+        prompt = (PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md").read_text(
+            encoding="utf-8"
+        )
+
+        for content in (prompt, resolve_findings):
+            self.assertIn("candidate_commit", content)
+            self.assertIn("inspected_head", content)
+            self.assertIn("no source", content)
+        self.assertIn("candidate_commit", rerun_local_gates)
+        self.assertIn("tested_commit", rerun_local_gates)
+        for content in (prompt, publish_fixes):
+            self.assertIn("no-push iteration", content)
+            self.assertIn("published_head_matches_tested_commit", content)
+
     def test_every_thread_resolution_instruction_requires_exact_head_equality(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
         resolver_prompt = (
@@ -224,6 +249,7 @@ class PrGateContractTests(unittest.TestCase):
             "coderabbit review",
             "./remote-approval-wrapper",
             "curl https://api.github.com/repos/example/repo/pulls/8",
+            "delivery_gate." + "\\\n" + "py",
         ):
             with self.subTest(terminal_command=terminal_command):
                 with tempfile.TemporaryDirectory() as directory:
@@ -294,8 +320,10 @@ class PrGateContractTests(unittest.TestCase):
             with self.subTest(status=status):
                 result = self.run_terminal_gate(
                     {
+                        "candidate_commit": commit,
                         "tested_commit": commit,
                         "published_head": commit,
+                        "published_head_matches_tested_commit": True,
                         "local_gates": {
                             "status": status,
                             "tested_commit": commit,
@@ -308,8 +336,10 @@ class PrGateContractTests(unittest.TestCase):
     def test_terminal_gate_rejects_unproven_tested_commit(self) -> None:
         result = self.run_terminal_gate(
             {
+                "candidate_commit": "a" * 40,
                 "tested_commit": "a" * 40,
                 "published_head": "b" * 40,
+                "published_head_matches_tested_commit": False,
                 "local_gates": {
                     "status": "passed",
                     "tested_commit": "a" * 40,
@@ -319,6 +349,26 @@ class PrGateContractTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("proven passing local-gate evidence", result.stderr)
+
+    def test_terminal_gate_rejects_missing_or_mismatched_candidate_commit(self) -> None:
+        commit = "a" * 40
+        for candidate_commit in (None, "b" * 40):
+            with self.subTest(candidate_commit=candidate_commit):
+                handoff: dict[str, object] = {
+                    "tested_commit": commit,
+                    "published_head": commit,
+                    "published_head_matches_tested_commit": True,
+                    "local_gates": {
+                        "status": "passed",
+                        "tested_commit": commit,
+                    },
+                }
+                if candidate_commit is not None:
+                    handoff["candidate_commit"] = candidate_commit
+                result = self.run_terminal_gate(handoff)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("proven passing local-gate evidence", result.stderr)
 
 
 if __name__ == "__main__":
