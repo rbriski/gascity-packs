@@ -29,6 +29,9 @@ class PrGateContractTests(unittest.TestCase):
             cls.formula = tomllib.load(formula_file)
         cls.templates = {template["id"]: template for template in cls.formula["template"]}
 
+    def assert_prose_contains(self, text: str, expected: str) -> None:
+        self.assertIn(" ".join(expected.split()), " ".join(text.split()))
+
     def test_formula_routes_every_lane_to_a_declared_agent(self) -> None:
         declared_targets = {
             f"complete-delivery.{manifest.parent.name}"
@@ -70,13 +73,13 @@ class PrGateContractTests(unittest.TestCase):
         )
         finalizer = (workflows / "{target}.md").read_text(encoding="utf-8")
 
-        self.assertIn("Keep\n`external-review` `active`", precheck)
+        self.assert_prose_contains(precheck, "Keep `external-review` `active`")
         self.assertIn("never claim protected merge is next", precheck)
         self.assertIn("child report pre-terminal", loop)
         self.assertIn("leave `external-review` `active`", loop)
         self.assertIn("must not publish `passed` or a protected-merge next action", loop)
         self.assertIn("post-check `{target}.md` finalizer", loop)
-        self.assertIn("sole\nauthority", finalizer)
+        self.assert_prose_contains(finalizer, "sole authority")
 
     def test_formula_preserves_the_bounded_resolve_test_publish_handoff(self) -> None:
         loop = self.templates["{target}.external-review-loop"]
@@ -128,7 +131,7 @@ class PrGateContractTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("Never push\n  or resolve a thread in this lane", prompt)
+        self.assert_prose_contains(prompt, "Never push or resolve a thread in this lane")
         self.assertIn("resolve valid mapped threads when `published_head == tested_commit`", prompt)
         self.assertIn("Only the Formula v2 `external-review-loop` terminal check", prompt)
         self.assertNotIn("After fixes are pushed and applicable review threads are resolved", prompt)
@@ -164,8 +167,10 @@ class PrGateContractTests(unittest.TestCase):
             self.assertIn("do not run it: record a blocker", content)
             self.assertIn("Never run such a gate before publication", content)
 
-        self.assertIn("`published_head` is exactly equal to the\nartifact's `tested_commit`", publish_fixes)
-        self.assertIn("Commit\ncontainment alone is not sufficient", publish_fixes)
+        self.assert_prose_contains(
+            publish_fixes, "`published_head` is exactly equal to the artifact's `tested_commit`"
+        )
+        self.assert_prose_contains(publish_fixes, "Commit containment alone is not sufficient")
         self.assertIn("Formula iteration to inspect and retest that exact refreshed head", prompt)
 
     def test_publication_refresh_failure_requires_a_new_full_sha_before_more_work(self) -> None:
@@ -235,7 +240,7 @@ class PrGateContractTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("invalid,\nsuperseded, or otherwise non-actionable", publish_fixes)
+        self.assert_prose_contains(publish_fixes, "invalid, superseded, or otherwise non-actionable")
         self.assertIn("disposition evidence has been published", publish_fixes)
         self.assertIn("published_head_matches_tested_commit` is true", publish_fixes)
 
@@ -321,6 +326,8 @@ class PrGateContractTests(unittest.TestCase):
             '"gh" pr checks',
             "'gh' pr checks",
             "`gh` pr checks",
+            "delivery_gate.py</dev/null",
+            "delivery_gate.py>/dev/null",
         ):
             with self.subTest(terminal_command=terminal_command):
                 with tempfile.TemporaryDirectory() as directory:
@@ -331,6 +338,10 @@ class PrGateContractTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("terminal remote approval gate", result.stderr)
                     self.assertFalse(marker.exists())
+
+    def test_local_gates_treat_redirection_and_grouping_operators_as_token_boundaries(self) -> None:
+        script = LOCAL_GATES_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("<>{}", script)
 
     def test_local_gates_execute_an_allowed_local_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -430,6 +441,25 @@ class PrGateContractTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("proven passing local-gate evidence", result.stderr)
 
+    def test_terminal_gate_rejects_nested_disallowed_local_gate_evidence(self) -> None:
+        commit = "a" * 40
+        result = self.run_terminal_gate(
+            {
+                "candidate_commit": commit,
+                "tested_commit": commit,
+                "published_head": commit,
+                "published_head_matches_tested_commit": True,
+                "local_gates": {
+                    "status": "passed",
+                    "tested_commit": commit,
+                    "nested": {"result": {"status": "blocked"}},
+                },
+            }
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("proven passing local-gate evidence", result.stderr)
+
     def test_terminal_gate_rejects_unproven_tested_commit(self) -> None:
         result = self.run_terminal_gate(
             {
@@ -478,6 +508,21 @@ class PrGateContractTests(unittest.TestCase):
                 "local_gates": {"status": "passed", "tested_commit": commit},
             },
             {"passed": True, "head_sha": commit},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_terminal_gate_canonicalizes_valid_full_sha_evidence_before_comparison(self) -> None:
+        commit = "aB" * 20
+        result = self.run_terminal_gate(
+            {
+                "candidate_commit": commit.swapcase(),
+                "tested_commit": commit,
+                "published_head": commit.upper(),
+                "published_head_matches_tested_commit": True,
+                "local_gates": {"status": "passed", "tested_commit": commit.swapcase()},
+            },
+            {"passed": True, "head_sha": commit.lower()},
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)

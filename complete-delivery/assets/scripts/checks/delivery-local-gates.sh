@@ -26,8 +26,8 @@ reject_terminal_approval_command() {
   # Quotes and backticks delimit shell words too. They must not become part
   # of a path/executable word in the pre-execution matcher: otherwise a
   # quoted terminal command or command substitution reaches `bash -lc`.
-  local token_boundary=$'[[:space:];|&()\'"`]'
-  local token_word=$'[^[:space:];|&()\'"`]'
+  local token_boundary=$'[[:space:];|&()<>{}\'"`]'
+  local token_word=$'[^[:space:];|&()<>{}\'"`]'
   local forbidden_command_pattern="(^|$token_boundary)($token_word*/)?(delivery_gate\\.py|delivery-pr-approved\\.sh|coderabbit|remote-approval$token_word*|remote_approval$token_word*|approval-gate$token_word*|approval_gate$token_word*)($token_boundary|$)"
   local gh_command_pattern="(^|$token_boundary)($token_word*/)?gh($token_boundary|$)"
 

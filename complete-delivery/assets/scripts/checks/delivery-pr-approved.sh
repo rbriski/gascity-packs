@@ -36,14 +36,15 @@ except (OSError, json.JSONDecodeError) as exc:
 if not isinstance(handoff, dict):
     raise SystemExit("external-review handoff must be an object")
 
-candidate_commit = handoff.get("candidate_commit")
-tested_commit = handoff.get("tested_commit")
-published_head = handoff.get("published_head")
+def canonical_full_sha(value, field):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", value):
+        raise SystemExit(f"external-review handoff does not prove a full {field}")
+    return value.lower()
+
+candidate_commit = canonical_full_sha(handoff.get("candidate_commit"), "candidate_commit")
+tested_commit = canonical_full_sha(handoff.get("tested_commit"), "tested_commit")
+published_head = canonical_full_sha(handoff.get("published_head"), "published_head")
 local_gates = handoff.get("local_gates")
-if not isinstance(candidate_commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", candidate_commit):
-    raise SystemExit("external-review handoff does not prove a full candidate_commit")
-if not isinstance(tested_commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", tested_commit):
-    raise SystemExit("external-review handoff does not prove a full tested_commit")
 if candidate_commit != tested_commit:
     raise SystemExit("external-review handoff does not prove candidate_commit == tested_commit")
 if published_head != tested_commit:
@@ -52,7 +53,10 @@ if handoff.get("published_head_matches_tested_commit") is not True:
     raise SystemExit("external-review handoff does not record published_head_matches_tested_commit")
 if not isinstance(local_gates, dict):
     raise SystemExit("external-review handoff is missing local_gates evidence")
-if local_gates.get("tested_commit") != tested_commit:
+local_gates_tested_commit = canonical_full_sha(
+    local_gates.get("tested_commit"), "local_gates.tested_commit"
+)
+if local_gates_tested_commit != tested_commit:
     raise SystemExit("local-gates evidence does not prove the recorded tested_commit")
 
 def contains_disallowed_state(value):
@@ -67,7 +71,7 @@ if contains_disallowed_state(local_gates):
 if local_gates.get("status") != "passed":
     raise SystemExit("external-review handoff does not record passed local gates")
 
-print(tested_commit.lower())
+print(tested_commit)
 PY
 }
 
