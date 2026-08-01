@@ -329,6 +329,8 @@ class PrGateContractTests(unittest.TestCase):
             "delivery_gate.py</dev/null",
             "delivery_gate.py>/dev/null",
             "gh>/dev/null pr checks",
+            "{delivery_gate.py,x}",
+            "{gh,x} pr checks",
         ):
             with self.subTest(terminal_command=terminal_command):
                 with tempfile.TemporaryDirectory() as directory:
@@ -342,7 +344,46 @@ class PrGateContractTests(unittest.TestCase):
 
     def test_local_gates_treat_redirection_and_grouping_operators_as_token_boundaries(self) -> None:
         script = LOCAL_GATES_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("<>{}", script)
+        self.assertIn(";,|&()<>{}", script)
+
+    def test_setup_and_inspection_fail_closed_on_missing_prerequisites_or_stale_evidence(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        setup = (workflows / "{target}.setup-external-review.md").read_text(encoding="utf-8")
+        inspect = (workflows / "{target}.inspect-current-head.md").read_text(encoding="utf-8")
+
+        for prerequisite in ("authenticated `gh`", "delivery_gate.py", "writable"):
+            self.assertIn(prerequisite, setup)
+        self.assertIn("never set\n`gc.outcome=pass`", setup)
+        for requirement in (
+            "Remove any pre-existing",
+            "fresh, well-formed JSON",
+            "canonical full `head_sha` exactly equals workflow-root\n`delivery.head_sha`",
+            "Never consume a\npre-existing artifact after a command failure",
+        ):
+            self.assertIn(requirement, inspect)
+
+    def test_every_non_success_transition_invalidates_prior_success_evidence(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        consumers = (
+            "{target}.setup-external-review.md",
+            "{target}.inspect-current-head.md",
+            "{target}.resolve-findings.md",
+            "{target}.rerun-local-gates.md",
+            "{target}.publish-fixes.md",
+            "{target}.report-external-review.md",
+            "{target}.external-review-loop.md",
+            "{target}.md",
+        )
+        for filename in consumers:
+            with self.subTest(filename=filename):
+                text = (workflows / filename).read_text(encoding="utf-8")
+                for field in (
+                    "tested_commit",
+                    "local_gates",
+                    "published_head",
+                    "published_head_matches_tested_commit",
+                ):
+                    self.assertIn(field, text)
 
     def test_local_gates_execute_an_allowed_local_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

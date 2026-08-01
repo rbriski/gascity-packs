@@ -13,4 +13,8 @@ may authorize that passed report and protected-merge publication.
 Never weaken a gate or resolve a thread unless the durable handoff proves
 `published_head` is exactly equal to `tested_commit`; commit containment or a
 pushed fix alone is not sufficient. The mechanical check owns the terminal
-decision. Do not invoke provider-native subagents.
+decision. Treat any failed, blocked, skipped, unavailable, stale, malformed,
+or head-mismatched child evidence as fail-closed: invalidate stale
+`tested_commit`, `local_gates`, `published_head`, and
+`published_head_matches_tested_commit` before the next child can consume it.
+Do not invoke provider-native subagents.

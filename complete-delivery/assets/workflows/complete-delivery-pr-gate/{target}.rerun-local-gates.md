@@ -1,7 +1,9 @@
 Rerun the repository-native quality gates after review resolution.
 
-Read `<artifact_root>/delivery/external-review-handoff.json` and require a
-clean checkout (`git status --porcelain` has no output) before testing. Verify
+Read `<artifact_root>/delivery/external-review-handoff.json` and, before every
+test attempt, clear prior `tested_commit`, `local_gates`, `published_head`, and
+`published_head_matches_tested_commit` success evidence. Require a clean
+checkout (`git status --porcelain` has no output) before testing. Verify
 that `HEAD` is its exact full-SHA `candidate_commit` before testing. The
 resolver must set that candidate to `inspected_head` when no source changed, or
 to the final committed `HEAD` after every valid source fix in the iteration
@@ -27,8 +29,10 @@ shell sandbox. After every configured command passes, require the checkout to
 remain clean and `HEAD` to still equal `candidate_commit`; otherwise do not
 record passing evidence. Then record `candidate_commit` as a full-SHA
 `tested_commit`, matching `local_gates.tested_commit`, and
-`local_gates.status: "passed"` in the same durable handoff artifact. A blocked
-or skipped local gate is terminal evidence of failure, never a passing result.
+`local_gates.status: "passed"` in the same durable handoff artifact. A failed,
+blocked, skipped, unavailable, or mismatched local gate must leave all of those
+success fields cleared or explicitly overwritten as failed; it is terminal
+evidence of failure, never a passing result.
 Never push or resolve a review thread in this lane. If no source changed
 because only remote checks are pending, test and record the inspected-head
 candidate through the same local gate sequence.

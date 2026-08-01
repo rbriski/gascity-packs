@@ -8,6 +8,11 @@ thread, or run a competing terminal gate. Consume the evaluator-confirmed
 `<artifact_root>/delivery/external-review-handoff.json`, then record the gate
 path on the workflow root as `delivery.pr_gate_path`.
 
+Reject missing, malformed, stale, or root-head-mismatched gate evidence. On
+any non-success finalization path, invalidate the handoff's `tested_commit`,
+`local_gates`, `published_head`, and `published_head_matches_tested_commit`
+success evidence rather than allowing a prior attempt to authorize the report.
+
 After that terminal check has passed, this post-check finalizer is the sole
 authority that may update the living report from its final current-head gate
 artifact: mark `external-review` as `passed`, name the required checks,

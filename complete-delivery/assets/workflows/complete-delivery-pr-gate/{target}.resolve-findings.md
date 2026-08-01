@@ -15,6 +15,14 @@ use the final committed `HEAD` after every valid source fix in this iteration.
 Never use an individual thread's `fix_commit` as `candidate_commit` when later
 fixes exist.
 
+Before starting a new resolution attempt, clear any prior successful
+`tested_commit`, `local_gates`, `published_head`, and
+`published_head_matches_tested_commit` evidence from that artifact. If review
+input is missing, malformed, stale, blocked, skipped, unavailable, or does not
+match the current inspected head, keep that evidence cleared (or explicitly
+overwrite it as failed) and record the blocker; no non-success path may retain
+success from an earlier attempt.
+
 This lane must never push or resolve a thread. `rerun-local-gates` tests the
 recorded `candidate_commit` and records it as `tested_commit` in the same
 artifact; `publish-fixes` alone reads the published disposition evidence and

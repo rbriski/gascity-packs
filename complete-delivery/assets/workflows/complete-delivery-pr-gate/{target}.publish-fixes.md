@@ -1,7 +1,11 @@
 Publish this iteration's verified review fixes.
 
-Read `<artifact_root>/delivery/external-review-handoff.json`; require its local
-gates to have passed for its recorded exact commit before publishing. Require a
+Read `<artifact_root>/delivery/external-review-handoff.json`; before every
+publication or no-push refresh attempt, invalidate old `published_head` and
+`published_head_matches_tested_commit` success evidence, and invalidate
+`tested_commit` and `local_gates` if their candidate is no longer the exact
+current attempt. Require its local gates to have passed for its recorded exact
+commit before publishing. Require a
 clean checkout and require `HEAD` to still exactly equal `tested_commit`; do
 not commit, amend, or otherwise mutate the tree after testing. A newly
 discovered source fix must return to `rerun-local-gates` for a fresh committed
@@ -21,8 +25,10 @@ disposition evidence has been published. Every such resolution additionally
 requires that `published_head` is exactly equal to the
 artifact's `tested_commit`; only resolve when `published_head == tested_commit` and
 `published_head_matches_tested_commit` is true. If the push or head refresh
-fails or the refresh is unavailable, record a publication failure, keep every
-mapped thread open, and do not record passing publication evidence. Before
+fails, is blocked, skipped, unavailable, malformed, stale, or mismatched,
+record a publication failure, keep every mapped thread open, clear or
+explicitly overwrite every tested/local-gate and published/equality success
+field as failed, and do not record passing publication evidence. Before
 another inspection or local-gate execution, reacquire a current PR head that
 is a full SHA. Only when a successful refresh returns a different full-SHA
 `published_head` may the mismatch be recorded for the next Formula iteration
