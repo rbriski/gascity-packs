@@ -19,13 +19,20 @@ bead as `GC_BEAD_ID`. The complete nonterminal local-gate set is the configured
 inspect those configured commands. If any invokes `delivery_gate.py`,
 `delivery-pr-approved.sh`, or a remote PR, CI, CodeRabbit, or human-review
 approval gate, do not run it: record a blocker for the next terminal loop
-check. The script mechanically rejects the pack's terminal scripts, `gh`,
-CodeRabbit, GitHub provider-API URLs, and clearly named remote-approval or
-approval-gate wrappers; inspection remains mandatory for a repository-local
+check. The script parses each configured value as a restricted, shell-free argv
+command: one executable followed by literal arguments, with ordinary quotes and
+backslash escapes resolved. It rejects control/redirection and grouping
+operators, command/process substitution, parameter or arithmetic expansion,
+globs, brace expansion, `eval`, and nested-shell wrappers before execution.
+The only interpolation is `${GC_SESSION_ID:-manual}` in a non-executable
+argument, resolved by the script as a single literal value. The parsed
+executable is checked against the canonical terminal/provider denylist (the
+pack's terminal scripts, `gh`, CodeRabbit, and approval wrappers); provider API
+URLs are rejected too. Inspection remains mandatory for a repository-local
 wrapper with a different name. Never run such a gate before publication. Fix
 any new regression and repeat until every configured command passes. Repository
-gate configuration is trusted policy; this validation is not an adversarial
-shell sandbox. After every configured command passes, require the checkout to
+gate configuration is trusted policy; the restricted argv boundary prevents it
+from being interpreted as shell source. After every configured command passes, require the checkout to
 remain clean and `HEAD` to still equal `candidate_commit`; otherwise do not
 record passing evidence. Then record `candidate_commit` as a full-SHA
 `tested_commit`, matching `local_gates.tested_commit`, and

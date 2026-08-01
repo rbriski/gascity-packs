@@ -53,21 +53,14 @@ if handoff.get("published_head_matches_tested_commit") is not True:
     raise SystemExit("external-review handoff does not record published_head_matches_tested_commit")
 if not isinstance(local_gates, dict):
     raise SystemExit("external-review handoff is missing local_gates evidence")
+if set(local_gates) != {"status", "tested_commit"}:
+    raise SystemExit("external-review handoff has malformed local_gates evidence")
 local_gates_tested_commit = canonical_full_sha(
     local_gates.get("tested_commit"), "local_gates.tested_commit"
 )
 if local_gates_tested_commit != tested_commit:
     raise SystemExit("local-gates evidence does not prove the recorded tested_commit")
 
-def contains_disallowed_state(value):
-    if isinstance(value, dict):
-        return any(contains_disallowed_state(item) for item in value.values())
-    if isinstance(value, list):
-        return any(contains_disallowed_state(item) for item in value)
-    return isinstance(value, str) and value.lower() in {"blocked", "skipped"}
-
-if contains_disallowed_state(local_gates):
-    raise SystemExit("external-review handoff records blocked or skipped local gates")
 if local_gates.get("status") != "passed":
     raise SystemExit("external-review handoff does not record passed local gates")
 

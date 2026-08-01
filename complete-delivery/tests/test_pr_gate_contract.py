@@ -367,6 +367,49 @@ class PrGateContractTests(unittest.TestCase):
                         self.assertIn("command substitution", result.stderr)
                         self.assertFalse(marker.exists())
 
+    def test_local_gates_use_a_restricted_argv_executor(self) -> None:
+        unsupported_commands = (
+            "$'g''h' pr checks",
+            "gh${GC_SESSION_ID:-manual} pr checks",
+            "touch $((1 + 1))",
+            "touch <(printf x)",
+            "touch *.tmp",
+            "{gh,x} pr checks",
+            "bash -lc 'touch should-not-run'",
+            "eval touch should-not-run",
+        )
+        for command in unsupported_commands:
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as directory:
+                    marker = pathlib.Path(directory) / "side-effect"
+                    result, _ = self.run_local_gates(
+                        f"{command}; touch {shlex.quote(str(marker))}"
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("terminal remote approval gate", result.stderr)
+                    self.assertFalse(marker.exists())
+
+    def test_local_gates_resolve_quotes_escapes_and_controlled_session_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = pathlib.Path(directory) / "quoted marker"
+            result, _ = self.run_local_gates(f"touch {shlex.quote(str(marker))}")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(marker.exists())
+
+        with tempfile.TemporaryDirectory() as directory:
+            marker = pathlib.Path(directory) / "escaped marker"
+            escaped_marker = str(marker).replace(" ", "\\ ")
+            result, _ = self.run_local_gates(f"touch {escaped_marker}")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(marker.exists())
+
+        result, _ = self.run_local_gates("printf '%s' ${GC_SESSION_ID:-manual}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("manual", result.stdout)
+
     def test_local_gates_reject_quote_split_terminal_commands_before_side_effects(self) -> None:
         for terminal_command in (
             'g"h" pr checks',
@@ -386,7 +429,8 @@ class PrGateContractTests(unittest.TestCase):
 
     def test_local_gates_treat_redirection_and_grouping_operators_as_token_boundaries(self) -> None:
         script = LOCAL_GATES_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn(";,|&()<>{}", script)
+        for operator in (";&|()<>", "{}"):
+            self.assertIn(operator, script)
 
     def test_setup_and_inspection_fail_closed_on_missing_prerequisites_or_stale_evidence(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
@@ -464,10 +508,8 @@ class PrGateContractTests(unittest.TestCase):
 
     def test_local_gates_allow_benign_coderabbit_named_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            marker = pathlib.Path(directory) / "local-gate-ran"
-            result, _ = self.run_local_gates(
-                f"mkdir tests; touch tests/test_coderabbit.py; touch {shlex.quote(str(marker))}"
-            )
+            marker = pathlib.Path(directory) / "test_coderabbit.py"
+            result, _ = self.run_local_gates(f"touch {shlex.quote(str(marker))}")
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(marker.exists())
@@ -552,24 +594,30 @@ class PrGateContractTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("proven passing local-gate evidence", result.stderr)
 
-    def test_terminal_gate_rejects_nested_disallowed_local_gate_evidence(self) -> None:
+    def test_terminal_gate_rejects_noncanonical_local_gate_evidence(self) -> None:
         commit = "a" * 40
-        result = self.run_terminal_gate(
-            {
-                "candidate_commit": commit,
-                "tested_commit": commit,
-                "published_head": commit,
-                "published_head_matches_tested_commit": True,
-                "local_gates": {
-                    "status": "passed",
-                    "tested_commit": commit,
-                    "nested": {"result": {"status": "blocked"}},
-                },
-            }
-        )
+        for extra_evidence in (
+            {"nested": {"result": {"status": "failed"}}},
+            {"availability": "unavailable"},
+            {"passed": True},
+        ):
+            with self.subTest(extra_evidence=extra_evidence):
+                result = self.run_terminal_gate(
+                    {
+                        "candidate_commit": commit,
+                        "tested_commit": commit,
+                        "published_head": commit,
+                        "published_head_matches_tested_commit": True,
+                        "local_gates": {
+                            "status": "passed",
+                            "tested_commit": commit,
+                            **extra_evidence,
+                        },
+                    }
+                )
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("proven passing local-gate evidence", result.stderr)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("proven passing local-gate evidence", result.stderr)
 
     def test_terminal_gate_rejects_unproven_tested_commit(self) -> None:
         result = self.run_terminal_gate(

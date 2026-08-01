@@ -11,55 +11,142 @@ cd "$DELIVERY_WORK_DIR"
 ALLOW_NONE="$(delivery_var allow_no_local_gates false)"
 RAN=0
 
-reject_terminal_approval_command() {
+parse_local_gate_argv() {
   local command="$1"
-  local normalized="${command,,}"
+  local output
+  output="$(mktemp "${TMPDIR:-/tmp}/delivery-local-gate.XXXXXX")" || \
+    delivery_fail "cannot allocate local-gate parser output"
 
-  # Bash removes a backslash-newline pair before parsing words. Reject it
-  # before normalizing or invoking `bash -lc`: otherwise a forbidden command
-  # name can be split across physical lines and still run its side effects.
-  if [[ "$command" == *$'\\\n'* || "$command" == *$'\\\r\n'* ]]; then
-    delivery_fail "local gate command contains a Bash line continuation; a terminal remote approval gate must not execute: $command"
+  # Configuration is policy, never shell source. The embedded parser accepts
+  # exactly one executable and literal argv values; it deliberately implements
+  # only ordinary quoting and escaping, not any shell language feature.
+  if ! python3 - "$command" >"$output" <<'PY'
+import os
+import pathlib
+import sys
+
+source = sys.argv[1]
+args: list[str] = []
+word: list[str] = []
+state: str | None = None
+started = False
+i = 0
+
+def fail(message: str) -> None:
+    raise SystemExit(
+        "local gate command is unsupported; terminal remote approval gate must not execute: "
+        + message
+    )
+
+def append_session_default() -> None:
+    word.append(os.environ.get("GC_SESSION_ID") or "manual")
+
+def finish_word() -> None:
+    global started
+    if started:
+        args.append("".join(word))
+        word.clear()
+        started = False
+
+while i < len(source):
+    character = source[i]
+    if state is None:
+        if character.isspace():
+            finish_word()
+        elif character in ";&|()<>":
+            fail(f"control or redirection operator {character!r}")
+        elif character in "{}":
+            fail(f"brace expansion or grouping {character!r}")
+        elif character in "*?[]":
+            fail(f"glob expansion {character!r}")
+        elif character == "`":
+            fail("command substitution")
+        elif character in "'\"":
+            state = character
+            started = True
+        elif character == "\\":
+            i += 1
+            if i == len(source) or source[i] in "\r\n":
+                fail("backslash line continuation")
+            word.append(source[i])
+            started = True
+        elif character == "$" and source.startswith("$(", i):
+            fail("command substitution")
+        elif character == "$":
+            if source.startswith("${GC_SESSION_ID:-manual}", i):
+                if not args:
+                    fail("session-default interpolation in executable")
+                append_session_default()
+                started = True
+                i += len("${GC_SESSION_ID:-manual}") - 1
+            else:
+                fail("parameter, arithmetic, or command expansion")
+        else:
+            word.append(character)
+            started = True
+    elif state == "'":
+        if character == "'":
+            state = None
+        elif character == "$":
+            fail("parameter expansion")
+        else:
+            word.append(character)
+    else:
+        if character == "\"":
+            state = None
+        elif character == "`":
+            fail("command substitution")
+        elif character == "\\":
+            i += 1
+            if i == len(source) or source[i] in "\r\n":
+                fail("backslash line continuation")
+            word.append(source[i])
+        elif character == "$" and source.startswith("$(", i):
+            fail("command substitution")
+        elif character == "$":
+            if source.startswith("${GC_SESSION_ID:-manual}", i):
+                if not args:
+                    fail("session-default interpolation in executable")
+                append_session_default()
+                i += len("${GC_SESSION_ID:-manual}") - 1
+            else:
+                fail("parameter, arithmetic, or command expansion")
+        else:
+            word.append(character)
+    i += 1
+
+if state is not None:
+    fail("unterminated quote")
+finish_word()
+if not args:
+    fail("empty command")
+
+executable = pathlib.PurePath(args[0]).name.lower()
+blocked = {
+    ".", "bash", "command", "dash", "delivery-pr-approved.sh",
+    "delivery_gate.py", "env", "eval", "exec", "fish", "gh", "ksh",
+    "sh", "source", "zsh", "coderabbit",
+}
+if (
+    executable in blocked
+    or executable.startswith(("remote-approval", "remote_approval", "approval-gate", "approval_gate"))
+    or any("api.github.com" in argument.lower() for argument in args)
+):
+    raise SystemExit(
+        "local gate command invokes a terminal remote approval gate or provider command"
+    )
+
+sys.stdout.buffer.write(b"\0".join(argument.encode() for argument in args) + b"\0")
+PY
+  then
+    rm -f "$output"
+    delivery_fail "local gate command could not be parsed safely: $command"
   fi
 
-  # Command substitution can synthesize a forbidden executable only after
-  # this pre-execution scan. Reject both Bash forms rather than attempting to
-  # partially expand them, so no provider or trailing side effect can run.
-  if [[ "$command" == *'$('* || "$command" == *'`'* ]]; then
-    delivery_fail "local gate command contains command substitution; a terminal remote approval gate must not execute: $command"
-  fi
-
-  normalized="${normalized//\\/}"
-  # Bash removes unescaped quote delimiters while joining adjacent fragments
-  # into one word. Mirror that join before matching so `g"h` and
-  # `delivery_"gate.py"` cannot become terminal commands only after this
-  # pre-execution guard has passed.
-  normalized="${normalized//\"/}"
-  normalized="${normalized//\'/}"
-  # Quotes and backticks delimit shell words too. They must not become part
-  # of a path/executable word in the pre-execution matcher: otherwise a
-  # quoted terminal command or command substitution reaches `bash -lc`.
-  local token_boundary=$'[[:space:];,|&()<>{}\'"`]'
-  local token_word=$'[^[:space:];,|&()<>{}\'"`]'
-  local forbidden_command_pattern="(^|$token_boundary)($token_word*/)?(delivery_gate\\.py|delivery-pr-approved\\.sh|coderabbit|remote-approval$token_word*|remote_approval$token_word*|approval-gate$token_word*|approval_gate$token_word*)($token_boundary|$)"
-  local gh_command_pattern="(^|$token_boundary)($token_word*/)?gh($token_boundary|$)"
-
-  # Local gates run before publication and must never decide the terminal PR
-  # state. Inspect the complete configured command before handing it to
-  # `bash -lc`, so a compound command cannot run a side effect first. The
-  # resolver also inspects repository-specific wrappers that cannot be named
-  # centrally; this policy enforces the canonical provider/approval boundary.
-  # Normalize Bash's simple backslash escapes so a forbidden executable name
-  # cannot cross that boundary under a shell-escaped spelling.
-  # Repository gate configuration is trusted policy, not a shell sandbox.
-  case "$normalized" in
-    *api.github.com*)
-      delivery_fail "local gate command invokes a terminal remote approval gate or provider command: $command"
-      ;;
-  esac
-
-  if [[ "$normalized" =~ $forbidden_command_pattern || "$normalized" =~ $gh_command_pattern ]]; then
-    delivery_fail "local gate command invokes a terminal remote approval gate or provider command: $command"
+  mapfile -d '' -t LOCAL_GATE_ARGV <"$output"
+  rm -f "$output"
+  if [ "${#LOCAL_GATE_ARGV[@]}" -eq 0 ]; then
+    delivery_fail "local gate command could not be parsed safely: $command"
   fi
 }
 
@@ -69,10 +156,10 @@ run_gate() {
   local command
   command="$(delivery_var "$key" "")"
   [ -n "$command" ] || return 0
-  reject_terminal_approval_command "$command"
+  parse_local_gate_argv "$command"
   RAN=$((RAN + 1))
   echo "complete-delivery local gate [$label]: $command"
-  if ! bash -lc "$command"; then
+  if ! "${LOCAL_GATE_ARGV[@]}"; then
     delivery_fail "$label command failed: $command"
   fi
 }
