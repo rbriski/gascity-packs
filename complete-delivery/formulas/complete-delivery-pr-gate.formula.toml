@@ -16,14 +16,14 @@ formula_compiler = ">=2.0.0"
 [[template]]
 id = "{target}.setup-external-review"
 title = "Prepare external review reconciliation"
-metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+metadata = { "gc.run_target" = "complete-delivery.external-review-resolver" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.setup-external-review.md"
 
 [[template]]
 id = "{target}.external-review-loop"
 title = "Iterate until CI and review are green"
 needs = ["{target}.setup-external-review"]
-metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+metadata = { "gc.run_target" = "complete-delivery.external-review-resolver" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.external-review-loop.md"
 
 [template.check]
@@ -37,7 +37,7 @@ timeout = "10m"
 [[template.children]]
 id = "{target}.inspect-current-head"
 title = "Inspect current-head CI and review evidence"
-metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+metadata = { "gc.run_target" = "complete-delivery.external-review-resolver" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.inspect-current-head.md"
 
 [[template.children]]
@@ -58,7 +58,7 @@ description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.rerun
 id = "{target}.publish-fixes"
 title = "Publish review fixes"
 needs = ["{target}.rerun-local-gates"]
-metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+metadata = { "gc.run_target" = "complete-delivery.external-review-resolver", "gc.continuation_group" = "complete-delivery-pr-fixes" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.publish-fixes.md"
 
 [[template.children]]
@@ -72,5 +72,5 @@ description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.repor
 id = "{target}"
 title = "Finalize external review gate"
 needs = ["{target}.external-review-loop"]
-metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+metadata = { "gc.run_target" = "complete-delivery.external-review-resolver" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.md"
