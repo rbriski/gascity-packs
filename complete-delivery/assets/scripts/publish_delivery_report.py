@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import errno
 import json
 import os
@@ -20,10 +21,43 @@ DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_N
 FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
 SOURCE_FILE_FLAGS = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
 READ_CHUNK_BYTES = 64 * 1024
+RENAME_EXCHANGE = 0x2
+_LIBC = ctypes.CDLL(None, use_errno=True)
 
 
 class PublishError(RuntimeError):
     pass
+
+
+def rename_exchange(parent_fd: int, left: str, right: str) -> None:
+    """Atomically exchange two names below one trusted directory descriptor.
+
+    Replacement needs exchange semantics rather than two ordinary renames: the
+    latter leaves the published name absent between moving the old bundle out
+    of the way and moving the staged bundle in.  Do not emulate this operation
+    when the platform lacks it; retaining the live bundle is safer than a
+    non-atomic publish.
+    """
+    try:
+        operation = _LIBC.renameat2
+    except AttributeError as exc:
+        raise PublishError("atomic report bundle replacement is unsupported") from exc
+
+    operation.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    operation.restype = ctypes.c_int
+    if operation(parent_fd, os.fsencode(left), parent_fd, os.fsencode(right), RENAME_EXCHANGE) == 0:
+        return
+
+    error_number = ctypes.get_errno()
+    if error_number in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+        raise PublishError("atomic report bundle replacement is unsupported")
+    raise OSError(error_number, os.strerror(error_number))
 
 
 def reject_symlinked_ancestors(path: Path) -> Path:
@@ -182,6 +216,7 @@ def read_source_file(source_fd: int, source: Path, name: str) -> bytes:
 def publish_bundle(destination_name: str, destination_root_fd: int, payloads: dict[str, bytes]) -> None:
     """Publish a complete bundle, retaining the previous bundle on write failure."""
     stage, stage_fd = create_private_directory(destination_root_fd, f"{destination_name}.stage-")
+    preserve_stage = False
     try:
         for name, content in payloads.items():
             write_stage_file(stage_fd, name, content)
@@ -199,32 +234,37 @@ def publish_bundle(destination_name: str, destination_root_fd: int, payloads: di
             raise PublishError(f"report destination is not a directory: {destination_name}")
         if target_stat is None:
             os.rename(stage, destination_name, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
+            os.fsync(destination_root_fd)
             return
 
-        backup, backup_fd = create_private_directory(destination_root_fd, f"{destination_name}.backup-")
-        os.close(backup_fd)
-        os.rmdir(backup, dir_fd=destination_root_fd)
-        os.rename(destination_name, backup, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
+        # This is a single namespace operation: pathname readers see either
+        # the complete previous bundle or the complete staged bundle, never
+        # an absent canonical name.  The old bundle is now at ``stage``.
+        rename_exchange(destination_root_fd, stage, destination_name)
         try:
-            os.rename(stage, destination_name, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
-        except BaseException as commit_error:
-            try:
-                os.rename(backup, destination_name, src_dir_fd=destination_root_fd, dst_dir_fd=destination_root_fd)
-            except BaseException as rollback_error:
-                # The old bundle remains at this private, descriptor-relative
-                # name. Do not run cleanup: it is the sole recoverable copy.
-                raise PublishError(
-                    "report bundle commit and rollback failed; prior bundle retained "
-                    f"as recoverable backup: {backup}"
-                ) from rollback_error
-            remove_tree(backup, destination_root_fd)
-            raise commit_error
-        else:
-            remove_tree(backup, destination_root_fd)
+            # The exchange is not durable until the containing directory has
+            # been synced.  Keep the old bundle if this step cannot complete.
+            os.fsync(destination_root_fd)
+        except BaseException as sync_error:
+            preserve_stage = True
+            raise PublishError(
+                "report bundle exchange completed but parent durability sync failed; "
+                f"prior bundle retained as recoverable backup: {stage}"
+            ) from sync_error
+
+        try:
+            remove_tree(stage, destination_root_fd)
+        except BaseException as cleanup_error:
+            preserve_stage = True
+            raise PublishError(
+                "report bundle exchange completed but prior-bundle cleanup failed; "
+                f"remaining recovery evidence: {stage}"
+            ) from cleanup_error
     finally:
         if stage_fd != -1:
             os.close(stage_fd)
-        remove_tree(stage, destination_root_fd)
+        if not preserve_stage:
+            remove_tree(stage, destination_root_fd)
 
 
 def publish(source: Path, destination_root: Path, slug: str = "") -> Path:

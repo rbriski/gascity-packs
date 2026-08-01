@@ -241,29 +241,53 @@ class PublishDeliveryReportTests(unittest.TestCase):
             self.assertFalse(destination.exists())
             self.assertEqual(list((root / "public").iterdir()), [])
 
-    def test_commit_failure_restores_existing_bundle(self) -> None:
+    def test_unsupported_atomic_replacement_leaves_existing_bundle_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             source = root / "source"
             self.write_bundle(source, "new")
             destination = root / "public" / "safe"
             self.write_bundle(destination, "old")
-            original_rename = publisher.os.rename
 
-            def fail_staged_commit(source_path: object, destination_path: object, **kwargs: object) -> None:
-                if str(source_path).startswith(".safe.stage-"):
-                    raise OSError("simulated bundle commit failure")
-                original_rename(source_path, destination_path, **kwargs)
-
-            with mock.patch.object(publisher.os, "rename", side_effect=fail_staged_commit):
-                with self.assertRaises(OSError):
+            with mock.patch.object(
+                publisher,
+                "rename_exchange",
+                side_effect=publisher.PublishError("atomic replacement unsupported"),
+            ):
+                with self.assertRaisesRegex(publisher.PublishError, "unsupported"):
                     publisher.publish(source, root / "public", "safe")
 
             self.assertEqual((destination / "index.html").read_text(encoding="utf-8"), "<html>old</html>")
             self.assertEqual((destination / "styles.css").read_text(encoding="utf-8"), "body{old}")
             self.assertEqual(list((root / "public").glob(".safe.*")), [])
 
-    def test_commit_and_rollback_failures_retain_recoverable_backup(self) -> None:
+    def test_atomic_exchange_never_removes_canonical_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            self.write_bundle(source, "new")
+            destination = root / "public" / "safe"
+            self.write_bundle(destination, "old")
+            original_exchange = publisher.rename_exchange
+            observations: list[dict[str, bytes]] = []
+
+            def observe_exchange(parent_fd: int, stage: str, live: str) -> None:
+                observations.append(
+                    {name: (destination / name).read_bytes() for name in publisher.FILES}
+                )
+                original_exchange(parent_fd, stage, live)
+                observations.append(
+                    {name: (destination / name).read_bytes() for name in publisher.FILES}
+                )
+
+            with mock.patch.object(publisher, "rename_exchange", side_effect=observe_exchange):
+                publisher.publish(source, root / "public", "safe")
+
+            self.assertEqual(observations[0]["index.html"], b"<html>old</html>")
+            self.assertEqual(observations[1]["index.html"], b"<html>new</html>")
+            self.assertTrue(destination.is_dir())
+
+    def test_parent_sync_failure_retains_complete_prior_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             source = root / "source"
@@ -273,36 +297,53 @@ class PublishDeliveryReportTests(unittest.TestCase):
             prior_bundle = {
                 name: (destination / name).read_bytes() for name in publisher.FILES
             }
-            original_rename = publisher.os.rename
+            original_fsync = publisher.os.fsync
+            calls = 0
 
-            def fail_commit_and_rollback(
-                source_path: object, destination_path: object, **kwargs: object
-            ) -> None:
-                if str(source_path).startswith(".safe.stage-"):
-                    raise OSError("simulated bundle commit failure")
-                if (
-                    str(source_path).startswith(".safe.backup-")
-                    and str(destination_path) == "safe"
-                ):
-                    raise OSError("simulated rollback rename failure")
-                original_rename(source_path, destination_path, **kwargs)
+            def fail_parent_sync(descriptor: int) -> None:
+                nonlocal calls
+                calls += 1
+                # Each staged file is synced, then the stage directory; the
+                # fourth sync is the parent after the atomic exchange.
+                if calls == 4:
+                    raise OSError("simulated parent fsync failure")
+                original_fsync(descriptor)
 
-            with mock.patch.object(publisher.os, "rename", side_effect=fail_commit_and_rollback):
+            with mock.patch.object(publisher.os, "fsync", side_effect=fail_parent_sync):
                 with self.assertRaisesRegex(
                     publisher.PublishError,
-                    r"commit and rollback failed; prior bundle retained as recoverable backup",
+                    r"parent durability sync failed; prior bundle retained as recoverable backup",
                 ) as raised:
                     publisher.publish(source, root / "public", "safe")
 
-            backups = list((root / "public").glob(".safe.backup-*"))
-            self.assertFalse(destination.exists())
+            backups = list((root / "public").glob(".safe.stage-*"))
+            self.assertTrue(destination.is_dir())
+            self.assertEqual((destination / "index.html").read_bytes(), b"<html>new</html>")
             self.assertEqual(len(backups), 1)
             self.assertIn(backups[0].name, str(raised.exception))
             self.assertEqual(
                 {name: (backups[0] / name).read_bytes() for name in publisher.FILES},
                 prior_bundle,
             )
-            self.assertEqual(list((root / "public").glob(".safe.stage-*")), [])
+
+    def test_cleanup_failure_retains_prior_bundle_as_recovery_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            self.write_bundle(source, "new")
+            destination = root / "public" / "safe"
+            self.write_bundle(destination, "old")
+
+            with mock.patch.object(publisher, "remove_tree", side_effect=OSError("cleanup failed")):
+                with self.assertRaisesRegex(publisher.PublishError, "cleanup failed") as raised:
+                    publisher.publish(source, root / "public", "safe")
+
+            backups = list((root / "public").glob(".safe.stage-*"))
+            self.assertTrue(destination.is_dir())
+            self.assertEqual((destination / "index.html").read_bytes(), b"<html>new</html>")
+            self.assertEqual(len(backups), 1)
+            self.assertIn(backups[0].name, str(raised.exception))
+            self.assertEqual((backups[0] / "index.html").read_bytes(), b"<html>old</html>")
 
     def test_destination_root_swap_before_staging_cannot_redirect_writes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -348,18 +389,18 @@ class PublishDeliveryReportTests(unittest.TestCase):
             outside = root / "outside"
             outside.mkdir()
             displaced_root = root / "displaced-public"
-            original_rename = publisher.os.rename
+            original_exchange = publisher.rename_exchange
             swapped = False
 
-            def swap_during_commit(source_path: object, destination_path: object, **kwargs: object) -> None:
+            def swap_during_exchange(parent_fd: int, stage: str, live: str) -> None:
                 nonlocal swapped
-                if str(source_path).startswith(".safe.stage-") and not swapped:
+                if not swapped:
                     swapped = True
                     destination_root.rename(displaced_root)
                     destination_root.symlink_to(outside, target_is_directory=True)
-                original_rename(source_path, destination_path, **kwargs)
+                original_exchange(parent_fd, stage, live)
 
-            with mock.patch.object(publisher.os, "rename", side_effect=swap_during_commit):
+            with mock.patch.object(publisher, "rename_exchange", side_effect=swap_during_exchange):
                 publisher.publish(source, destination_root, "safe")
 
             self.assertEqual(list(outside.iterdir()), [])
