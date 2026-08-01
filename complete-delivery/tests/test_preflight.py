@@ -155,7 +155,11 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("production_url must be an https URL", result.stderr)
 
     def test_production_url_requires_hostname_and_valid_port(self) -> None:
-        for production_url in ("https://@/release", "https://:443/release"):
+        for production_url in (
+            "https://@/release",
+            "https://:443/release",
+            "https://service.example.test:not-a-port/release",
+        ):
             with self.subTest(production_url=production_url):
                 result = self.run_preflight(
                     self.metadata(**{"gc.var.production_url": production_url})
