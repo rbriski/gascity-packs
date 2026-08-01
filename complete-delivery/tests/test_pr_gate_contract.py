@@ -154,10 +154,19 @@ class PrGateContractTests(unittest.TestCase):
         )
 
         for instruction in resolution_instructions:
-            self.assertIn("published_head", instruction)
-            self.assertIn("tested_commit", instruction)
-            self.assertIn("exact", instruction)
-            self.assertIn("containment", instruction)
+            normalized = " ".join(instruction.replace("`", "").split()).lower()
+            self.assertTrue(
+                "published_head == tested_commit" in normalized
+                or "published_head is exactly equal to tested_commit" in normalized
+                or (
+                    "published_head is exactly equal to the artifact's tested_commit"
+                    in normalized
+                ),
+                normalized,
+            )
+            self.assertRegex(normalized, r"containment[^.]*not sufficient")
+            self.assertNotIn("contains every mapped fix commit", normalized)
+            self.assertNotRegex(normalized, r"containment(?: alone)? is sufficient")
 
     def run_local_gates(self, command: str) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
         temporary_directory = tempfile.TemporaryDirectory()
