@@ -158,6 +158,10 @@ test_mayor_durable_formula_v2_contract() {
 
     grep -F 'Never take durable direct ownership of a rig-store implementation or source' "$prompt" >/dev/null ||
         fail "Mayor prompt must prohibit direct rig-store ownership"
+    grep -F 'For coordination that lasts beyond a brief interaction, create and own a' "$prompt" >/dev/null ||
+        fail "Mayor prompt must require creating and owning a city-store coordination bead"
+    grep -F 'Keep each implementation/source bead in its' "$prompt" >/dev/null ||
+        fail "Mayor prompt must keep implementation and source beads in their owning rig"
     grep -F 'A convoy records lineage and tracking; it is not an execution' "$prompt" >/dev/null ||
         fail "Mayor prompt must distinguish convoy tracking from runtime execution"
     grep -F 'gc sling gc.run-operator <rig-owned-bead-or-same-rig-convoy> --on <configured-v2-formula>' "$prompt" >/dev/null ||
