@@ -23,6 +23,19 @@ SOURCE_FILE_FLAGS = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
 READ_CHUNK_BYTES = 64 * 1024
 RENAME_EXCHANGE = 0x2
 _LIBC = ctypes.CDLL(None, use_errno=True)
+try:
+    _RENAMEAT2 = _LIBC.renameat2
+except AttributeError:
+    _RENAMEAT2 = None
+else:
+    _RENAMEAT2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    _RENAMEAT2.restype = ctypes.c_int
 
 
 class PublishError(RuntimeError):
@@ -38,24 +51,14 @@ def rename_exchange(parent_fd: int, left: str, right: str) -> None:
     when the platform lacks it; retaining the live bundle is safer than a
     non-atomic publish.
     """
-    try:
-        operation = _LIBC.renameat2
-    except AttributeError as exc:
-        raise PublishError("atomic report bundle replacement is unsupported") from exc
+    if _RENAMEAT2 is None:
+        raise PublishError("atomic report bundle replacement is unsupported")
 
-    operation.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    operation.restype = ctypes.c_int
-    if operation(parent_fd, os.fsencode(left), parent_fd, os.fsencode(right), RENAME_EXCHANGE) == 0:
+    if _RENAMEAT2(parent_fd, os.fsencode(left), parent_fd, os.fsencode(right), RENAME_EXCHANGE) == 0:
         return
 
     error_number = ctypes.get_errno()
-    if error_number in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+    if error_number in (errno.ENOSYS, errno.EOPNOTSUPP):
         raise PublishError("atomic report bundle replacement is unsupported")
     raise OSError(error_number, os.strerror(error_number))
 

@@ -249,10 +249,12 @@ class PublishDeliveryReportTests(unittest.TestCase):
             destination = root / "public" / "safe"
             self.write_bundle(destination, "old")
 
-            with mock.patch.object(
-                publisher,
-                "rename_exchange",
-                side_effect=publisher.PublishError("atomic replacement unsupported"),
+            def unsupported_exchange(*args: object) -> int:
+                return -1
+
+            with (
+                mock.patch.object(publisher, "_RENAMEAT2", side_effect=unsupported_exchange),
+                mock.patch.object(publisher.ctypes, "get_errno", return_value=publisher.errno.EOPNOTSUPP),
             ):
                 with self.assertRaisesRegex(publisher.PublishError, "unsupported"):
                     publisher.publish(source, root / "public", "safe")
@@ -260,6 +262,15 @@ class PublishDeliveryReportTests(unittest.TestCase):
             self.assertEqual((destination / "index.html").read_text(encoding="utf-8"), "<html>old</html>")
             self.assertEqual((destination / "styles.css").read_text(encoding="utf-8"), "body{old}")
             self.assertEqual(list((root / "public").glob(".safe.*")), [])
+
+            with (
+                mock.patch.object(publisher, "_RENAMEAT2", side_effect=unsupported_exchange),
+                mock.patch.object(publisher.ctypes, "get_errno", return_value=publisher.errno.EINVAL),
+                self.assertRaises(OSError) as raised,
+            ):
+                publisher.rename_exchange(0, "left", "right")
+
+            self.assertEqual(raised.exception.errno, publisher.errno.EINVAL)
 
     def test_atomic_exchange_never_removes_canonical_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -298,18 +309,26 @@ class PublishDeliveryReportTests(unittest.TestCase):
                 name: (destination / name).read_bytes() for name in publisher.FILES
             }
             original_fsync = publisher.os.fsync
-            calls = 0
+            original_exchange = publisher.rename_exchange
+            exchange_completed = False
+            parent_sync_failed = False
+
+            def observe_exchange(parent_fd: int, stage: str, live: str) -> None:
+                nonlocal exchange_completed
+                original_exchange(parent_fd, stage, live)
+                exchange_completed = True
 
             def fail_parent_sync(descriptor: int) -> None:
-                nonlocal calls
-                calls += 1
-                # Each staged file is synced, then the stage directory; the
-                # fourth sync is the parent after the atomic exchange.
-                if calls == 4:
+                nonlocal parent_sync_failed
+                if exchange_completed and not parent_sync_failed:
+                    parent_sync_failed = True
                     raise OSError("simulated parent fsync failure")
                 original_fsync(descriptor)
 
-            with mock.patch.object(publisher.os, "fsync", side_effect=fail_parent_sync):
+            with (
+                mock.patch.object(publisher, "rename_exchange", side_effect=observe_exchange),
+                mock.patch.object(publisher.os, "fsync", side_effect=fail_parent_sync),
+            ):
                 with self.assertRaisesRegex(
                     publisher.PublishError,
                     r"parent durability sync failed; prior bundle retained as recoverable backup",
