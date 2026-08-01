@@ -3957,6 +3957,8 @@ description = "Override sink that writes the base triage report contract."
             bin_dir.mkdir()
             show_dir = tmp / "show"
             show_dir.mkdir()
+            show_state_dir = tmp / "show-state"
+            show_state_dir.mkdir()
             for bead, payload in beads_by_id.items():
                 (show_dir / f"{bead}.json").write_text(payload, encoding="utf-8")
             fake_gc = bin_dir / "gc"
@@ -3967,7 +3969,19 @@ description = "Override sink that writes the base triage report contract."
                 "shift\n"
                 "case \"$1\" in\n"
                 "  version) exit 0 ;;\n"
-                "  show) cat \"$BD_SHOW_DIR/$2.json\" ;;\n"
+                "  show)\n"
+                "    attempt_file=\"$BD_SHOW_STATE_DIR/$2\"\n"
+                "    printf '%s\\n' \"$2\" >> \"${BD_SHOW_ATTEMPT_LOG:-/dev/null}\"\n"
+                "    attempts=0\n"
+                "    if [ -f \"$attempt_file\" ]; then attempts=$(cat \"$attempt_file\"); fi\n"
+                "    attempts=$((attempts + 1))\n"
+                "    printf '%s' \"$attempts\" > \"$attempt_file\"\n"
+                "    if [ \"$attempts\" -le \"${BD_SHOW_FAIL_COUNT:-0}\" ]; then\n"
+                "      echo \"transient bead read failure for $2\" >&2\n"
+                "      exit 75\n"
+                "    fi\n"
+                "    cat \"$BD_SHOW_DIR/$2.json\"\n"
+                "    ;;\n"
                 "  *) exit 2 ;;\n"
                 "esac\n",
                 encoding="utf-8",
@@ -3978,6 +3992,7 @@ description = "Override sink that writes the base triage report contract."
                 **os.environ,
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
                 "BD_SHOW_DIR": str(show_dir),
+                "BD_SHOW_STATE_DIR": str(show_state_dir),
                 "GC_BEAD_ID": bead_id,
                 **(extra_env or {}),
             }
@@ -4433,6 +4448,59 @@ description = "Override sink that writes the base triage report contract."
         self.assertIn("failed validation", result.stderr)
         self.assertIn("error:", result.stderr)
         self.assertIn("status", result.stderr)
+
+    def test_build_artifact_check_retries_transient_bead_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as artifact_dir:
+            artifact = pathlib.Path(artifact_dir) / "requirements.md"
+            artifact.write_text(self._valid_requirements_artifact(), encoding="utf-8")
+            attempt_log = pathlib.Path(artifact_dir) / "attempts.log"
+            control = (
+                '[{"id": "loop", "metadata": {'
+                '"gc.root_bead_id": "root", '
+                '"gc.build.artifact_schema": "gc.build.requirements.v1", '
+                '"gc.build.artifact_path_keys": "gc.build.requirements_path"}}]'
+            )
+            root_bead = (
+                '[{"id": "root", "metadata": {'
+                f'"gc.build.requirements_path": "{artifact}"'
+                "}}]"
+            )
+            result = self._run_build_artifact_check(
+                {"loop": control, "root": root_bead},
+                "loop",
+                {
+                    "BD_SHOW_FAIL_COUNT": "1",
+                    "BD_SHOW_ATTEMPT_LOG": str(attempt_log),
+                },
+            )
+            attempts = attempt_log.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("build artifact valid", result.stdout)
+        self.assertEqual(attempts, ["loop", "loop", "root", "root"])
+
+    def test_build_artifact_check_blocks_persistent_bead_read_failure(self) -> None:
+        control = (
+            '[{"id": "loop", "metadata": {'
+            '"gc.build.artifact_schema": "gc.build.requirements.v1", '
+            '"gc.build.artifact_path_keys": "gc.build.requirements_path"}}]'
+        )
+        with tempfile.TemporaryDirectory() as state_dir:
+            attempt_log = pathlib.Path(state_dir) / "attempts.log"
+            result = self._run_build_artifact_check(
+                {"loop": control},
+                "loop",
+                {
+                    "BD_SHOW_FAIL_COUNT": "3",
+                    "BD_SHOW_ATTEMPT_LOG": str(attempt_log),
+                },
+            )
+            attempts = attempt_log.read_text(encoding="utf-8").splitlines()
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gc bd show loop failed after 3 attempts", result.stderr)
+        self.assertIn("transient bead read failure for loop", result.stderr)
+        self.assertEqual(attempts, ["loop", "loop", "loop"])
 
     def test_build_artifact_check_fails_when_no_artifact_path_recorded(self) -> None:
         control = (

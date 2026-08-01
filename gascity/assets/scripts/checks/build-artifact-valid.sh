@@ -48,7 +48,38 @@ print(value if isinstance(value, str) else "")
 ' "$2"
 }
 
-SHOW_JSON="$(gc bd show "$BEAD_ID" --json 2>/dev/null)" || fail "gc bd show $BEAD_ID failed"
+# Formula v2 owns check retries. These bounded retries cover only transient
+# data-plane reads, so a valid artifact is not treated as invalid when Dolt
+# briefly fails to serve its step or workflow-root bead.
+SHOW_MAX_ATTEMPTS=3
+SHOW_RETRY_DELAY_SECONDS=1
+
+show_bead_json() {
+  # show_bead_json <bead-id> -> prints the successful JSON payload.
+  # Keep the final client error visible for repair context when every read
+  # fails; callers still fail closed rather than validating stale data.
+  local bead_id="$1"
+  local attempt=1
+  local output=""
+
+  while [ "$attempt" -le "$SHOW_MAX_ATTEMPTS" ]; do
+    if output="$(gc bd show "$bead_id" --json 2>&1)"; then
+      printf '%s' "$output"
+      return 0
+    fi
+
+    if [ "$attempt" -lt "$SHOW_MAX_ATTEMPTS" ]; then
+      sleep "$SHOW_RETRY_DELAY_SECONDS"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  printf 'gc bd show %s failed after %s attempts: %s\n' \
+    "$bead_id" "$SHOW_MAX_ATTEMPTS" "$output" >&2
+  return 1
+}
+
+SHOW_JSON="$(show_bead_json "$BEAD_ID")" || fail "gc bd show $BEAD_ID failed"
 
 SCHEMA="$(metadata_value "$SHOW_JSON" "gc.build.artifact_schema")"
 PATH_KEYS="$(metadata_value "$SHOW_JSON" "gc.build.artifact_path_keys")"
@@ -58,7 +89,7 @@ PATH_KEYS="$(metadata_value "$SHOW_JSON" "gc.build.artifact_path_keys")"
 ROOT_ID="$(metadata_value "$SHOW_JSON" "gc.root_bead_id")"
 ROOT_JSON="$SHOW_JSON"
 if [ -n "$ROOT_ID" ] && [ "$ROOT_ID" != "$BEAD_ID" ]; then
-  ROOT_JSON="$(gc bd show "$ROOT_ID" --json 2>/dev/null)" || fail "gc bd show $ROOT_ID failed"
+  ROOT_JSON="$(show_bead_json "$ROOT_ID")" || fail "gc bd show $ROOT_ID failed"
 fi
 
 ARTIFACT_PATH=""
