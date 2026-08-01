@@ -160,10 +160,26 @@ test_mayor_durable_formula_v2_contract() {
         fail "Mayor prompt must prohibit direct rig-store ownership"
     grep -F 'A convoy records lineage and tracking; it is not an execution' "$prompt" >/dev/null ||
         fail "Mayor prompt must distinguish convoy tracking from runtime execution"
-    grep -F 'gc sling gc.run-operator <durable-bead-or-convoy> --on <configured-v2-formula>' "$prompt" >/dev/null ||
-        fail "Mayor prompt must provide the durable Formula v2 launch pattern"
-    grep -F 'rig-scoped `gc.run-operator` control-dispatcher owns execution' "$prompt" >/dev/null ||
-        fail "Mayor prompt must use the target rig control-dispatcher"
+    grep -F 'gc sling gc.run-operator <rig-owned-bead-or-same-rig-convoy> --on <configured-v2-formula>' "$prompt" >/dev/null ||
+        fail "Mayor prompt must provide a same-rig Formula v2 launch pattern"
+    grep -F 'receives a rig-owned source: either a' "$prompt" >/dev/null ||
+        fail "Mayor prompt must use the target rig control-dispatcher with a rig-owned source"
+    grep -F 'convoy whose children are all in that same rig store' "$prompt" >/dev/null ||
+        fail "Mayor prompt must require same-rig convoy children for rig execution"
+    grep -F 'Do not pass a city coordination bead to a rig-scoped operator.' "$prompt" >/dev/null ||
+        fail "Mayor prompt must reject a city coordination bead as a rig launch source"
+    grep -F 'routing fails before Formula attachment' "$prompt" >/dev/null ||
+        fail "Mayor prompt must describe fail-closed cross-store source attachment"
+    grep -F 'fails per-child store validation' "$prompt" >/dev/null ||
+        fail "Mayor prompt must describe fail-closed convoy child validation"
+    grep -F 'configured city-scoped operator/control-dispatcher with a' "$prompt" >/dev/null ||
+        fail "Mayor prompt must require a city-scoped operator and city-owned source for city workflows"
+    grep -F 'coordination-only: record or link the rig workflow root' "$prompt" >/dev/null ||
+        fail "Mayor prompt must keep city coordination ownership separate from rig execution"
+    grep -F 'record or link the rig workflow root and its terminal' "$prompt" >/dev/null ||
+        fail "Mayor prompt must preserve rig workflow outcome on the city coordination bead"
+    grep -F 'bead or same-rig convoy remains the implementation owner' "$prompt" >/dev/null ||
+        fail "Mayor prompt must keep rig implementation ownership in the rig store"
     grep -F 'Do not manually advance dependency waves' "$prompt" >/dev/null ||
         fail "Mayor prompt must forbid manual waves when Formula v2 is configured"
     grep -F 'workflow root' "$prompt" | grep -F 'finalizer' >/dev/null ||

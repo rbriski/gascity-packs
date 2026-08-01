@@ -107,13 +107,25 @@ transferring durable ownership of rig work to the Mayor.
 ## Durable Multi-Wave Execution
 
 Any known multi-step or multi-wave initiative that must continue without Mayor
-babysitting must launch one configured Formula v2 workflow against its durable
-bead or convoy. Launch from the target rig context (or select that rig) so the
-rig-scoped `gc.run-operator` control-dispatcher owns execution:
+babysitting must launch one configured Formula v2 workflow. For rig execution,
+launch from the target rig context (or select that rig) so the rig-scoped
+`gc.run-operator` control-dispatcher receives a rig-owned source: either a
+rig-store bead or a convoy whose children are all in that same rig store:
 
 ```bash
-gc sling gc.run-operator <durable-bead-or-convoy> --on <configured-v2-formula>
+gc sling gc.run-operator <rig-owned-bead-or-same-rig-convoy> --on <configured-v2-formula>
 ```
+
+Do not pass a city coordination bead to a rig-scoped operator. Cross-store
+routing fails before Formula attachment, and a convoy with children from a
+different store fails per-child store validation. For a city-store workflow,
+use a configured city-scoped operator/control-dispatcher with a city-owned
+source instead.
+
+When the Mayor coordinates rig execution, the city coordination bead remains
+coordination-only: record or link the rig workflow root and its terminal
+outcome on that bead. It is not the rig workflow's launch source, and the rig
+bead or same-rig convoy remains the implementation owner.
 
 Do not manually advance dependency waves, feed ready children, or re-dispatch
 each phase when a configured Formula v2 workflow exists. Do not replace the
