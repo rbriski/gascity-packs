@@ -30,6 +30,12 @@ reject_terminal_approval_command() {
   fi
 
   normalized="${normalized//\\/}"
+  # Bash removes unescaped quote delimiters while joining adjacent fragments
+  # into one word. Mirror that join before matching so `g"h` and
+  # `delivery_"gate.py"` cannot become terminal commands only after this
+  # pre-execution guard has passed.
+  normalized="${normalized//\"/}"
+  normalized="${normalized//\'/}"
   # Quotes and backticks delimit shell words too. They must not become part
   # of a path/executable word in the pre-execution matcher: otherwise a
   # quoted terminal command or command substitution reaches `bash -lc`.

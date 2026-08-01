@@ -367,6 +367,23 @@ class PrGateContractTests(unittest.TestCase):
                         self.assertIn("command substitution", result.stderr)
                         self.assertFalse(marker.exists())
 
+    def test_local_gates_reject_quote_split_terminal_commands_before_side_effects(self) -> None:
+        for terminal_command in (
+            'g"h" pr checks',
+            '"g"h pr checks',
+            'delivery_"gate.py"',
+            'delivery-pr-"approved.sh"',
+        ):
+            with self.subTest(terminal_command=terminal_command):
+                with tempfile.TemporaryDirectory() as directory:
+                    marker = pathlib.Path(directory) / "side-effect"
+                    command = f"{terminal_command}; touch {shlex.quote(str(marker))}"
+                    result, _ = self.run_local_gates(command)
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("terminal remote approval gate", result.stderr)
+                    self.assertFalse(marker.exists())
+
     def test_local_gates_treat_redirection_and_grouping_operators_as_token_boundaries(self) -> None:
         script = LOCAL_GATES_SCRIPT.read_text(encoding="utf-8")
         self.assertIn(";,|&()<>{}", script)
