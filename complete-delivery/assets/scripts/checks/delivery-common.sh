@@ -33,15 +33,22 @@ delivery_read_bead_json() {
   local attempt=1
   local max_attempts=3
   local output
+  local diagnostic_file
+  local -a diagnostics=()
+
+  diagnostic_file="$(mktemp "${TMPDIR:-/tmp}/delivery-read-bead.XXXXXX")" || return 1
 
   # Lifecycle reads occasionally lose a transient Dolt connection.  Keep this
   # deliberately small and bounded: callers still fail closed after three
   # unsuccessful read-only attempts.
   while [ "$attempt" -le "$max_attempts" ]; do
-    if output="$(gc bd show "$bead_id" --json 2>/dev/null)"; then
+    if output="$(gc bd show "$bead_id" --json 2>"$diagnostic_file")"; then
+      rm -f "$diagnostic_file"
       printf '%s' "$output"
       return 0
     fi
+
+    diagnostics+=("$(<"$diagnostic_file")")
 
     if [ "$attempt" -lt "$max_attempts" ]; then
       sleep "0.$attempt"
@@ -49,6 +56,10 @@ delivery_read_bead_json() {
     attempt=$((attempt + 1))
   done
 
+  rm -f "$diagnostic_file"
+  if [ -n "${diagnostics[$((max_attempts - 1))]}" ]; then
+    printf '%s\n' "${diagnostics[$((max_attempts - 1))]}" >&2
+  fi
   return 1
 }
 

@@ -64,6 +64,7 @@ class PreflightTests(unittest.TestCase):
                 "  failures=$(cat \"$FAKE_GC_FAILURES_FILE\")\n"
                 "  if [ \"$failures\" -gt 0 ]; then\n"
                 "    printf '%s\\n' $((failures - 1)) > \"$FAKE_GC_FAILURES_FILE\"\n"
+                "    printf 'simulated gc failure: %s\\n' \"$failures\" >&2\n"
                 "    exit 1\n"
                 "  fi\n"
                 "fi\n"
@@ -123,6 +124,18 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("source_bead_id is required", result.stderr)
         self.assertIn("source_title is required", result.stderr)
+
+    def test_invalid_source_bead_id_fails_closed(self) -> None:
+        result = self.run_preflight(
+            self.metadata(**{"gc.var.source_bead_id": "fi/123"})
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("source_bead_id must be a valid durable bead or convoy ID", result.stderr)
+
+    def test_zero_local_gates_fail_closed_without_opt_out(self) -> None:
+        result = self.run_preflight(self.metadata(**{"gc.var.setup_command": ""}))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("configure at least one repository gate", result.stderr)
 
     def test_missing_deploy_and_verify_are_reported_together(self) -> None:
         result = self.run_preflight(
@@ -202,6 +215,8 @@ class PreflightTests(unittest.TestCase):
         result = self.run_preflight(self.metadata(), transient_gc_failures=3)
         self.assertEqual(result.returncode, 1)
         self.assertIn("gc bd show step-1 failed", result.stderr)
+        self.assertIn("simulated gc failure: 1", result.stderr)
+        self.assertNotIn("simulated gc failure: 3", result.stderr)
 
     def test_malformed_required_check_list_fails_early(self) -> None:
         result = self.run_preflight(
