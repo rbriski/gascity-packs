@@ -342,6 +342,38 @@ class PrGateContractTests(unittest.TestCase):
                     self.assertIn("terminal remote approval gate", result.stderr)
                     self.assertFalse(marker.exists())
 
+    def test_local_gates_reject_terminal_scripts_in_interpreter_arguments_before_execution(self) -> None:
+        cases = (
+            (
+                "python3",
+                "delivery_gate.py",
+                "import pathlib\npathlib.Path({marker!r}).touch()\n",
+            ),
+            (
+                "bash",
+                "delivery-pr-approved.sh",
+                "#!/usr/bin/env bash\ntouch {marker}\n",
+            ),
+        )
+        for interpreter, script_name, source in cases:
+            with self.subTest(interpreter=interpreter, script_name=script_name):
+                with tempfile.TemporaryDirectory() as directory:
+                    marker = pathlib.Path(directory) / "script-ran"
+                    script = pathlib.Path(directory) / script_name
+                    marker_value = (
+                        shlex.quote(str(marker)) if interpreter == "bash" else str(marker)
+                    )
+                    script.write_text(source.format(marker=marker_value), encoding="utf-8")
+                    script.chmod(0o755)
+
+                    result, _ = self.run_local_gates(
+                        f"{interpreter} {shlex.quote(str(script))}"
+                    )
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("terminal remote approval gate", result.stderr)
+                    self.assertFalse(marker.exists())
+
     def test_local_gates_reject_command_substitution_before_side_effects(self) -> None:
         constructions = {
             "dollar": (
@@ -409,6 +441,16 @@ class PrGateContractTests(unittest.TestCase):
         result, _ = self.run_local_gates("printf '%s' ${GC_SESSION_ID:-manual}")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("manual", result.stdout)
+
+        result, _ = self.run_local_gates("printf '%s' '$HOME'")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("$HOME", result.stdout)
+
+        for command in ("printf '%s' $HOME", 'printf \'%s\' "$HOME"'):
+            with self.subTest(command=command):
+                result, _ = self.run_local_gates(command)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("parameter, arithmetic, or command expansion", result.stderr)
 
     def test_local_gates_reject_quote_split_terminal_commands_before_side_effects(self) -> None:
         for terminal_command in (

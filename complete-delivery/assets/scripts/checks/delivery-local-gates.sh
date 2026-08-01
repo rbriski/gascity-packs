@@ -87,9 +87,9 @@ while i < len(source):
     elif state == "'":
         if character == "'":
             state = None
-        elif character == "$":
-            fail("parameter expansion")
         else:
+            # Shell does not expand dollars in single quotes; preserve them
+            # verbatim so literal command arguments retain their meaning.
             word.append(character)
     else:
         if character == "\"":
@@ -127,8 +127,10 @@ blocked = {
     "delivery_gate.py", "env", "eval", "exec", "fish", "gh", "ksh",
     "sh", "source", "zsh", "coderabbit",
 }
+terminal_scripts = {"delivery-pr-approved.sh", "delivery_gate.py"}
 if (
     executable in blocked
+    or any(pathlib.PurePath(argument).name.lower() in terminal_scripts for argument in args)
     or executable.startswith(("remote-approval", "remote_approval", "approval-gate", "approval_gate"))
     or any("api.github.com" in argument.lower() for argument in args)
 ):
