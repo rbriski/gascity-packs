@@ -4,6 +4,7 @@ Read `<artifact_root>/delivery/external-review-handoff.json` and verify that
 `HEAD` is the exact recorded fix commit before testing. Invoke
 `{{pack_root}}/assets/scripts/checks/delivery-local-gates.sh` with this claimed
 bead as `GC_BEAD_ID`. The complete nonterminal local-gate set is the configured
+`setup_command`, `lint_command`, `typecheck_command`, `test_command`,
 `build_command`, `browser_test_command`, `security_command`, and
 `extra_gate_command`, executed only through this script. Before invoking it,
 inspect those configured commands. If any invokes `delivery_gate.py`,

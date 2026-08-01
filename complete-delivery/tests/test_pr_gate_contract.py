@@ -113,6 +113,10 @@ class PrGateContractTests(unittest.TestCase):
         for content in (prompt, rerun_local_gates):
             self.assertIn("complete nonterminal local-gate set", content)
             for local_command in (
+                "setup_command",
+                "lint_command",
+                "typecheck_command",
+                "test_command",
                 "build_command",
                 "browser_test_command",
                 "security_command",
