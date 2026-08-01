@@ -315,6 +315,33 @@ def test_required_ci_workflows_support_a_repository_runner_override() -> None:
         assert workflow["jobs"][job_id]["runs-on"] == expected_runner
 
 
+def test_required_pack_release_compatibility_runs_for_every_main_pr() -> None:
+    workflow = yaml.load(
+        (
+            gascity_pack_inference_gate.REPO_ROOT
+            / ".github"
+            / "workflows"
+            / "pack-release-compatibility.yml"
+        ).read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+
+    pull_request = workflow["on"]["pull_request"]
+    assert pull_request["branches"] == ["main"]
+    assert "paths" not in pull_request
+    assert "paths-ignore" not in pull_request
+
+    push = workflow["on"]["push"]
+    assert push["branches"] == ["main"]
+    assert push["paths"] == [
+        "registry.toml",
+        "scripts/pack_release_compat.py",
+        "tests/test_pack_release_compat.py",
+        ".github/workflows/pack-release-compatibility.yml",
+        "*/pack.toml",
+    ]
+
+
 def test_readme_includes_blacksmith_sponsor_badge() -> None:
     readme = (gascity_pack_inference_gate.REPO_ROOT / "README.md").read_text(encoding="utf-8")
     readme_lines = {line.strip() for line in readme.splitlines()}
