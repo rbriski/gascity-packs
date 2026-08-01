@@ -216,6 +216,64 @@ if verify >= metadata:
 PY
 }
 
+test_refinery_existing_pr_identity_precedes_rebase() {
+    local formula
+    formula="$GASTOWN/formulas/mol-refinery-patrol.toml"
+
+    python3 - "$formula" <<'PY' || fail "existing PR identity must be validated before refinery branch mutation"
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+start = text.index('id = "rebase"')
+end = text.index('id = "run-tests"', start)
+rebase = text[start:end]
+
+identity = rebase.index('**Existing PR gate — validate before mutating any refs.**')
+lookup = rebase.index('gh pr view "$EXISTING_PR" --repo "$CANONICAL_REPO"')
+fetch = rebase.index('git fetch "$REMOTE_URL"')
+checkout = rebase.index('git checkout -B temp "$SOURCE_REF"')
+rebase_cmd = rebase.index('git rebase "$TARGET_REF"')
+
+if not (identity < lookup < fetch < checkout < rebase_cmd):
+    raise SystemExit(1)
+if '[ "$PR_REPO" != "$CANONICAL_REPO" ] || [ "$PR_STATE" != "OPEN" ] || [ "$PR_HEAD" != "$BRANCH" ]' not in rebase:
+    raise SystemExit(1)
+if '[ "$PR_BASE" != "$TARGET" ] || [ "$PR_HEAD_REPO" != "$CANONICAL_REPO" ]' not in rebase:
+    raise SystemExit(1)
+PY
+}
+
+test_refinery_existing_pr_preserves_fresh_exact_head() {
+    local formula
+    formula="$GASTOWN/formulas/mol-refinery-patrol.toml"
+
+    python3 - "$formula" <<'PY' || fail "existing PR rebase must preserve an already-current branch head"
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+start = text.index('id = "rebase"')
+end = text.index('id = "run-tests"', start)
+rebase = text[start:end]
+
+ancestor = rebase.index('if git merge-base --is-ancestor "$TARGET_REF" temp; then')
+rebase_cmd = rebase.index('git rebase "$TARGET_REF"')
+if ancestor >= rebase_cmd:
+    raise SystemExit(1)
+if 'preserving exact head' not in rebase:
+    raise SystemExit(1)
+
+merge_start = text.index('id = "merge-push"')
+merge_end = text.index('id = "patrol-summary"', merge_start)
+merge = text[merge_start:merge_end]
+if merge.index('if [ -n "$EXISTING_PR" ]; then') >= merge.index('elif command -v gh >/dev/null 2>&1; then'):
+    raise SystemExit(1)
+if 'gh pr view --repo "$ORIGIN_REPO"' not in merge:
+    raise SystemExit(1)
+if '"--force-with-lease=refs/heads/$BRANCH:$EXPECTED_REMOTE_HEAD"' not in merge:
+    raise SystemExit(1)
+PY
+}
+
 test_dog_assets_are_pack_local
 test_retired_dog_formulas_are_not_reintroduced
 test_shutdown_dance_contracts_are_executable
@@ -224,5 +282,7 @@ test_composition_is_documented
 test_polecat_startup_uses_standard_hook_claim
 test_review_leg_contract_forbids_synthetic_mutation
 test_refinery_direct_merge_is_worktree_safe_and_fail_closed
+test_refinery_existing_pr_identity_precedes_rebase
+test_refinery_existing_pr_preserves_fresh_exact_head
 
 echo "gastown pack asset tests passed"

@@ -210,13 +210,90 @@ Read the work bead metadata:
 ```bash
 BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
+MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"')
+EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
 ```
 
-Fetch and attempt mechanical rebase:
+**Existing PR gate — validate before mutating any refs.**
+
+An explicit `metadata.existing_pr` is the authoritative repository identity
+for PR-mode work. Do not resolve it through the checkout's default remote:
+that remote can point at the upstream project while the supplied PR belongs to
+a protected fork. In particular, do not run `git fetch`, `git checkout`, or
+`git rebase` until this gate passes.
+
 ```bash
-git fetch --prune origin
-git checkout -b temp origin/$BRANCH
-git rebase origin/$TARGET
+if [ "$MERGE_STRATEGY" = "pr" ]; then
+  MERGE_STRATEGY="mr"
+fi
+if [ -n "$EXISTING_PR" ] && [ "$MERGE_STRATEGY" = "direct" ]; then
+  MERGE_STRATEGY="mr"
+fi
+
+CANONICAL_REPO=""
+if [ "$MERGE_STRATEGY" = "mr" ] && [ -n "$EXISTING_PR" ]; then
+  CANONICAL_REPO=$(printf '%s\n' "$EXISTING_PR" \
+    | sed -nE 's#^[Hh][Tt][Tt][Pp][Ss]://github.com/([^/]+/[^/]+)/pull/[0-9]+/?$#\\1#p' \
+    | head -n 1)
+  if [ -z "$CANONICAL_REPO" ]; then
+    echo "existing_pr must be a github.com owner/repo pull URL. STOP. Do not mutate refs."
+    gc runtime drain-ack
+    exit 1
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "Existing PR validation requires gh before branch mutation. STOP. Do not mutate refs."
+    gc runtime drain-ack
+    exit 1
+  fi
+  PR_INFO=$(gh pr view "$EXISTING_PR" --repo "$CANONICAL_REPO" \
+    --json url,state,headRefName,baseRefName,headRepositoryOwner,headRepository 2>/dev/null) || {
+      echo "Could not read existing PR $EXISTING_PR in $CANONICAL_REPO. STOP. Do not mutate refs."
+      gc runtime drain-ack
+      exit 1
+    }
+  PR_URL=$(printf '%s\n' "$PR_INFO" | jq -r '.url')
+  PR_REPO=$(printf '%s\n' "$PR_URL" \
+    | sed -nE 's#^https://github.com/([^/]+/[^/]+)/pull/[0-9]+/?$#\\1#p' \
+    | head -n 1)
+  PR_STATE=$(printf '%s\n' "$PR_INFO" | jq -r '.state')
+  PR_HEAD=$(printf '%s\n' "$PR_INFO" | jq -r '.headRefName')
+  PR_BASE=$(printf '%s\n' "$PR_INFO" | jq -r '.baseRefName')
+  PR_HEAD_REPO=$(printf '%s\n' "$PR_INFO" | jq -r '.headRepositoryOwner.login + "/" + .headRepository.name')
+  if [ "$PR_REPO" != "$CANONICAL_REPO" ] || [ "$PR_STATE" != "OPEN" ] || [ "$PR_HEAD" != "$BRANCH" ] || \
+     [ "$PR_BASE" != "$TARGET" ] || [ "$PR_HEAD_REPO" != "$CANONICAL_REPO" ]; then
+    echo "Existing PR identity does not match repository, branch, or target metadata. STOP. Do not mutate refs."
+    gc runtime drain-ack
+    exit 1
+  fi
+fi
+```
+
+Fetch and attempt mechanical rebase only after the identity gate. The
+temporary remote-tracking refs keep a fork PR independent from an unrelated
+`origin` default:
+```bash
+if [ -n "$CANONICAL_REPO" ]; then
+  REMOTE_URL="https://github.com/$CANONICAL_REPO.git"
+  SOURCE_REF="refs/remotes/gc-refinery/$WORK/source"
+  TARGET_REF="refs/remotes/gc-refinery/$WORK/target"
+  git fetch "$REMOTE_URL" \
+    "+refs/heads/${BRANCH}:${SOURCE_REF}" \
+    "+refs/heads/${TARGET}:${TARGET_REF}"
+else
+  git fetch --prune origin
+  SOURCE_REF="origin/$BRANCH"
+  TARGET_REF="origin/$TARGET"
+fi
+git checkout -B temp "$SOURCE_REF"
+
+# Rebase only a genuinely stale branch. When the protected target is already
+# an ancestor, `git rebase` can rewrite an otherwise tree-identical head and
+# invalidate exact-head PR gates, so preserve the source commit byte-for-byte.
+if git merge-base --is-ancestor "$TARGET_REF" temp; then
+  echo "Target $TARGET_REF is already an ancestor of temp; preserving exact head."
+else
+  git rebase "$TARGET_REF"
+fi
 ```
 
 If rebase SUCCEEDED (exit 0): close this step, proceed to run-tests.
@@ -396,7 +473,25 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
 MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"')
 EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
 ORIGIN_REPO_ERROR=""
-if command -v gh >/dev/null 2>&1; then
+TARGET_REF="origin/$TARGET"
+SOURCE_REF="origin/$BRANCH"
+PUBLISH_REMOTE="origin"
+# An explicitly supplied PR owns its repository identity. Resolving the
+# checkout default first is unsafe: it may be the upstream repo rather than
+# the protected fork that hosts the PR. The rebase step already validated this
+# identity before creating temp; retain it here for PR verification and push.
+if [ -n "$EXISTING_PR" ]; then
+  ORIGIN_REPO=$(printf '%s\n' "$EXISTING_PR" \
+    | sed -nE 's#^[Hh][Tt][Tt][Pp][Ss]://github.com/([^/]+/[^/]+)/pull/[0-9]+/?$#\\1#p' \
+    | head -n 1)
+  if [ -z "$ORIGIN_REPO" ]; then
+    ORIGIN_REPO_ERROR="existing_pr must be a github.com owner/repo pull URL."
+  else
+    SOURCE_REF="refs/remotes/gc-refinery/$WORK/source"
+    TARGET_REF="refs/remotes/gc-refinery/$WORK/target"
+    PUBLISH_REMOTE="https://github.com/$ORIGIN_REPO.git"
+  fi
+elif command -v gh >/dev/null 2>&1; then
   if ! ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>&1); then
     ORIGIN_REPO_ERROR="gh repo view failed while resolving origin repository: $ORIGIN_REPO"
     ORIGIN_REPO=""
@@ -584,7 +679,7 @@ lookup_pr_info() {
   ref="$1"
   err_file="$2"
   if command -v gh >/dev/null 2>&1; then
-    gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$ref" 2>"$err_file"
+    gh pr view --repo "$ORIGIN_REPO" --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$ref" 2>"$err_file"
     return $?
   fi
   if ! init_github_rest 2>"$err_file"; then
@@ -750,7 +845,7 @@ case "$BHRC_STATUS" in
   0) : ;;  # verified real change -> continue to the merge script below
   1) halt_false_completion "$BRANCH" "$(git merge-base "origin/$TARGET" temp 2>/dev/null || printf '%s' "origin/$TARGET")" ;;
   *)
-    echo "branch_has_real_change could not evaluate temp vs origin/$TARGET (tool error, status $BHRC_STATUS). STOP. Do not mutate bead state."
+    echo "branch_has_real_change could not evaluate temp vs $TARGET_REF (tool error, status $BHRC_STATUS). STOP. Do not mutate bead state."
     gc runtime drain-ack
     exit 1
     ;;
@@ -835,11 +930,11 @@ PR handoff closes the bead, so an empty PR is the same false completion as
 an empty direct merge. A tool error (status 2) is not an empty branch — stop
 without mutating bead state rather than halt-escalating a healthy branch.
 ```bash
-branch_has_real_change "origin/$TARGET" temp
+branch_has_real_change "$TARGET_REF" temp
 BHRC_STATUS=$?
 case "$BHRC_STATUS" in
   0) : ;;  # verified real change -> continue to publish the PR
-  1) halt_false_completion "$BRANCH" "$(git merge-base "origin/$TARGET" temp 2>/dev/null || printf '%s' "origin/$TARGET")" ;;
+  1) halt_false_completion "$BRANCH" "$(git merge-base "$TARGET_REF" temp 2>/dev/null || printf '%s' "$TARGET_REF")" ;;
   *)
     echo "branch_has_real_change could not evaluate temp vs origin/$TARGET (tool error, status $BHRC_STATUS). STOP. Do not mutate bead state."
     gc runtime drain-ack
@@ -848,10 +943,16 @@ case "$BHRC_STATUS" in
 esac
 ```
 
-**1. Push the rebased branch back to origin:**
+**1. Push the rebased branch back to its canonical repository:**
 ```bash
 git checkout temp
-git push origin HEAD:$BRANCH --force-with-lease
+EXPECTED_REMOTE_HEAD=$(git rev-parse "$SOURCE_REF") || {
+  echo "Could not resolve the fetched source ref $SOURCE_REF. STOP."
+  gc runtime drain-ack
+  exit 1
+}
+git push "$PUBLISH_REMOTE" "HEAD:$BRANCH" \
+  "--force-with-lease=refs/heads/$BRANCH:$EXPECTED_REMOTE_HEAD"
 ```
 If `--force-with-lease` fails, the existing PR branch moved after your
 fetch. STOP, fetch the latest branch, rebase your temp branch again, and
