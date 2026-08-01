@@ -2331,8 +2331,10 @@ def load_methodology_formula(pack_source: Path, formula_name: str | None, missin
         return None
     if payload.get("formula") != formula_name:
         missing.append(f"{formula_name}: formula field is {payload.get('formula')!r}, want {formula_name!r}")
-    if payload.get("contract") != "graph.v2":
-        missing.append(f"{formula_name}: contract is {payload.get('contract')!r}, want 'graph.v2'")
+    requires = payload.get("requires")
+    if not isinstance(requires, Mapping) or requires.get("formula_compiler") != ">=2.0.0":
+        found = requires.get("formula_compiler") if isinstance(requires, Mapping) else None
+        missing.append(f"{formula_name}: requires.formula_compiler is {found!r}, want '>=2.0.0'")
     return payload
 
 
