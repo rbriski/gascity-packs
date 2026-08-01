@@ -10,6 +10,9 @@ import unittest
 
 PACK_ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-preflight.sh"
+RELEASE_VERIFIED_SCRIPT = (
+    PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-release-verified.sh"
+)
 
 
 class PreflightTests(unittest.TestCase):
@@ -139,6 +142,56 @@ class PreflightTests(unittest.TestCase):
         result = self.run_preflight(self.metadata(), protected=False)
         self.assertEqual(result.returncode, 1)
         self.assertIn("base branch must be protected", result.stderr)
+
+    def test_release_verification_requires_metadata_before_running_commands(self) -> None:
+        for missing_key in ("delivery.repo", "delivery.pr_number"):
+            with self.subTest(missing_key=missing_key), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                repository = root / "repo"
+                repository.mkdir()
+                evidence = root / "evidence.txt"
+                evidence.write_text("verified\n", encoding="utf-8")
+                command_marker = root / "command-ran"
+                metadata = {
+                    "delivery.merge_sha": "a" * 40,
+                    "delivery.deployed_sha": "a" * 40,
+                    "delivery.deploy_status": "verified",
+                    "delivery.deploy_evidence_path": str(evidence),
+                    "delivery.verify_evidence_path": str(evidence),
+                    "delivery.repo": "example/repo",
+                    "delivery.pr_number": "123",
+                    "gc.var.deploy_mode": "command",
+                    "gc.var.deploy_command": "/bin/true",
+                    "gc.var.deploy_verify_command": "touch \"$COMMAND_MARKER\"",
+                    "gc.var.smoke_command": "touch \"$COMMAND_MARKER\"",
+                }
+                metadata[missing_key] = ""
+                bin_dir = root / "bin"
+                bin_dir.mkdir()
+                gc = bin_dir / "gc"
+                gc.write_text(
+                    '#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_JSON"\n', encoding="utf-8"
+                )
+                gc.chmod(0o755)
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        "GC_BEAD_ID": "step-1",
+                        "GC_WORK_DIR": str(repository),
+                        "FAKE_GC_JSON": json.dumps([{"metadata": metadata}]),
+                        "COMMAND_MARKER": str(command_marker),
+                        "PATH": f"{bin_dir}:{environment['PATH']}",
+                    }
+                )
+                result = subprocess.run(
+                    ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"{missing_key} is missing", result.stderr)
+                self.assertFalse(command_marker.exists())
 
 
 if __name__ == "__main__":

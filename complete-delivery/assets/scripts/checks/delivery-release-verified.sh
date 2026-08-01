@@ -47,8 +47,11 @@ VERIFY_EVIDENCE="$(delivery_resolve_path "$VERIFY_EVIDENCE")"
 [ -s "$VERIFY_EVIDENCE" ] || delivery_fail "verification evidence is missing or empty: $VERIFY_EVIDENCE"
 
 export DELIVERY_SHA="$MERGE_SHA"
-export DELIVERY_REPO="$(delivery_root_metadata delivery.repo)"
-export DELIVERY_PR="$(delivery_root_metadata delivery.pr_number)"
+DELIVERY_REPO="$(delivery_root_metadata delivery.repo)"
+DELIVERY_PR="$(delivery_root_metadata delivery.pr_number)"
+[ -n "$DELIVERY_REPO" ] || delivery_fail "delivery.repo is missing"
+[ -n "$DELIVERY_PR" ] || delivery_fail "delivery.pr_number is missing"
+export DELIVERY_REPO DELIVERY_PR
 cd "$DELIVERY_WORK_DIR"
 
 VERIFY_COMMAND="$(delivery_var deploy_verify_command "")"
