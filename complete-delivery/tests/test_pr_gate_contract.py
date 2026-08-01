@@ -5,6 +5,7 @@ import os
 import pathlib
 import shlex
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -58,6 +59,17 @@ class PrGateContractTests(unittest.TestCase):
             terminal["metadata"]["gc.run_target"],
             "complete-delivery.report-editor",
         )
+
+    def test_only_post_check_finalizer_may_publish_passing_report(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        precheck = (workflows / "{target}.report-external-review.md").read_text(
+            encoding="utf-8"
+        )
+        finalizer = (workflows / "{target}.md").read_text(encoding="utf-8")
+
+        self.assertIn("Keep\n`external-review` `active`", precheck)
+        self.assertIn("never claim protected merge is next", precheck)
+        self.assertIn("sole\nauthority", finalizer)
 
     def test_formula_preserves_the_bounded_resolve_test_publish_handoff(self) -> None:
         loop = self.templates["{target}.external-review-loop"]
@@ -178,6 +190,33 @@ class PrGateContractTests(unittest.TestCase):
             self.assertIn("no-push iteration", content)
             self.assertIn("published_head_matches_tested_commit", content)
 
+    def test_handoff_instructions_require_immutable_test_and_publish_tree(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        rerun_local_gates = (workflows / "{target}.rerun-local-gates.md").read_text(
+            encoding="utf-8"
+        )
+        publish_fixes = (workflows / "{target}.publish-fixes.md").read_text(
+            encoding="utf-8"
+        )
+
+        for content in (rerun_local_gates, publish_fixes):
+            self.assertIn("clean", content)
+        self.assertIn("candidate_commit", rerun_local_gates)
+        self.assertIn("remain clean", rerun_local_gates)
+        self.assertIn("still equal `candidate_commit`", rerun_local_gates)
+        self.assertIn("still exactly equal `tested_commit`", publish_fixes)
+        self.assertIn("Push exactly `tested_commit`", publish_fixes)
+
+    def test_non_actionable_thread_resolution_requires_published_disposition_evidence(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        publish_fixes = (workflows / "{target}.publish-fixes.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("invalid,\nsuperseded, or otherwise non-actionable", publish_fixes)
+        self.assertIn("disposition evidence has been published", publish_fixes)
+        self.assertIn("published_head_matches_tested_commit` is true", publish_fixes)
+
     def test_every_thread_resolution_instruction_requires_exact_head_equality(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
         resolver_prompt = (
@@ -283,7 +322,9 @@ class PrGateContractTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(marker.exists())
 
-    def run_terminal_gate(self, handoff: dict[str, object]) -> subprocess.CompletedProcess[str]:
+    def run_terminal_gate(
+        self, handoff: dict[str, object], report: dict[str, object] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             artifact_root = root / "artifacts"
@@ -303,14 +344,38 @@ class PrGateContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             gc.chmod(0o755)
+            if report is not None:
+                report_fixture = root / "delivery-gate-report.json"
+                report_fixture.write_text(json.dumps(report), encoding="utf-8")
+                python = bin_dir / "python3"
+                python.write_text(
+                    "#!/bin/sh\n"
+                    "if [ \"${1##*/}\" = delivery_gate.py ]; then\n"
+                    "  shift\n"
+                    "  while [ \"$#\" -gt 0 ]; do\n"
+                    "    if [ \"$1\" = --output ]; then\n"
+                    "      cp \"$GATE_REPORT_FIXTURE\" \"$2\"\n"
+                    "      exit 0\n"
+                    "    fi\n"
+                    "    shift\n"
+                    "  done\n"
+                    "  exit 2\n"
+                    "fi\n"
+                    "exec \"$REAL_PYTHON\" \"$@\"\n",
+                    encoding="utf-8",
+                )
+                python.chmod(0o755)
             environment = os.environ.copy()
             environment.update(
                 {
                     "GC_BEAD_ID": "step-1",
                     "FAKE_GC_STEP_JSON": json.dumps([{"metadata": metadata}]),
                     "PATH": f"{bin_dir}:{environment['PATH']}",
+                    "REAL_PYTHON": sys.executable,
                 }
             )
+            if report is not None:
+                environment["GATE_REPORT_FIXTURE"] = str(report_fixture)
             return subprocess.run(
                 ["bash", str(TERMINAL_GATE_SCRIPT)],
                 capture_output=True,
@@ -373,6 +438,40 @@ class PrGateContractTests(unittest.TestCase):
 
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("proven passing local-gate evidence", result.stderr)
+
+    def test_terminal_gate_accepts_passing_delivery_gate_report(self) -> None:
+        commit = "a" * 40
+        result = self.run_terminal_gate(
+            {
+                "candidate_commit": commit,
+                "tested_commit": commit,
+                "published_head": commit,
+                "published_head_matches_tested_commit": True,
+                "local_gates": {"status": "passed", "tested_commit": commit},
+            },
+            {"passed": True, "head_sha": commit},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_terminal_gate_rejects_failed_or_wrong_head_delivery_gate_report(self) -> None:
+        commit = "a" * 40
+        handoff = {
+            "candidate_commit": commit,
+            "tested_commit": commit,
+            "published_head": commit,
+            "published_head_matches_tested_commit": True,
+            "local_gates": {"status": "passed", "tested_commit": commit},
+        }
+        for report in (
+            {"passed": False, "head_sha": commit},
+            {"passed": True, "head_sha": "b" * 40},
+        ):
+            with self.subTest(report=report):
+                result = self.run_terminal_gate(handoff, report)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("delivery_gate.py", result.stderr)
 
 
 if __name__ == "__main__":

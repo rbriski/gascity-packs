@@ -17,9 +17,13 @@ fixes exist.
 
 This lane must never push or resolve a thread. `rerun-local-gates` tests the
 recorded `candidate_commit` and records it as `tested_commit` in the same
-artifact; `publish-fixes` alone
-reads it, and resolves a corresponding valid thread only when its refreshed
-`published_head` is exactly equal to the artifact's `tested_commit`. Commit
+artifact; `publish-fixes` alone reads the published disposition evidence and
+may resolve a corresponding valid thread only after its fix evidence passes,
+or an invalid, superseded, or otherwise non-actionable thread only after its
+recorded disposition evidence is published. Either resolution requires the
+refreshed `published_head` to be exactly equal to the artifact's
+`tested_commit` (that is, `published_head == tested_commit`) and
+`published_head_matches_tested_commit` to be true. Commit
 containment alone is not sufficient. If publication or exact-head confirmation
 fails, leave every mapped thread open.
 
