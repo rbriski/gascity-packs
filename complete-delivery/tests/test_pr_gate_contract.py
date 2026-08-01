@@ -209,6 +209,8 @@ class PrGateContractTests(unittest.TestCase):
         for terminal_command in (
             "delivery_gate.py",
             "delivery-pr-approved.sh",
+            r"delivery_gat\e.py",
+            r"delivery-pr-approv\ed.sh",
             "gh pr checks",
             "/usr/bin/gh api repos/example/repo/pulls/8",
             "coderabbit review",

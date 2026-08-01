@@ -14,6 +14,7 @@ RAN=0
 reject_terminal_approval_command() {
   local command="$1"
   local normalized="${command,,}"
+  normalized="${normalized//\\/}"
   local gh_command_pattern='(^|[[:space:];|&()])([^[:space:];|&()]*/)?gh([[:space:];|&()]|$)'
 
   # Local gates run before publication and must never decide the terminal PR
@@ -21,6 +22,8 @@ reject_terminal_approval_command() {
   # `bash -lc`, so a compound command cannot run a side effect first. The
   # resolver also inspects repository-specific wrappers that cannot be named
   # centrally; this policy enforces the canonical provider/approval boundary.
+  # Normalize Bash's simple backslash escapes so a forbidden executable name
+  # cannot cross that boundary under a shell-escaped spelling.
   # Repository gate configuration is trusted policy, not a shell sandbox.
   case "$normalized" in
     *delivery_gate.py*|*delivery-pr-approved.sh*|*coderabbit*|*api.github.com*|*remote-approval*|*remote_approval*|*approval-gate*|*approval_gate*)
