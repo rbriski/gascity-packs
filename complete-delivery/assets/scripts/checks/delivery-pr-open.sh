@@ -25,9 +25,12 @@ RESULT="$(printf '%s' "$PR_JSON" | python3 -c '
 import json
 import sys
 data = json.load(sys.stdin)
+draft = data.get("draft")
+if not isinstance(draft, bool):
+    raise ValueError("PR response has no boolean draft field")
 print("\t".join([
     str(data.get("state") or ""),
-    str(bool(data.get("draft"))).lower(),
+    str(draft).lower(),
     str((data.get("head") or {}).get("sha") or ""),
     str((data.get("head") or {}).get("ref") or ""),
     str((data.get("base") or {}).get("ref") or ""),

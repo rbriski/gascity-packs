@@ -41,10 +41,11 @@ stage, rather than release-readiness, owns the merge-SHA attestation: for real
 deployments it requires `delivery.deployed_sha == delivery.merge_sha`; for an
 explicit non-applicable artifact it validates the documented reason and its
 nonempty regular-file deployment evidence as the non-deployment attestation.
-Before accepting that evidence, canonicalize `delivery.deploy_evidence_path`
-and require it to remain within `<artifact_root>/delivery`; reject paths outside
-that directory, traversal, and symlink escapes, as well as empty or nonregular
-files.
+Before accepting evidence, canonicalize `delivery.deploy_evidence_path`,
+`delivery.verify_evidence_path`, and real-deployment stdout/stderr capture
+paths. Require every one to remain within `<artifact_root>/delivery`; reject
+paths outside that directory, traversal, and symlink escapes, as well as empty
+or nonregular deployment and verification evidence files.
 Close with `gc.outcome=pass` only after that graph check: for `verified` it
 reruns the configured verification and applicable smoke commands and compares
 SHAs; for `not_applicable` it validates the reason and evidence instead of

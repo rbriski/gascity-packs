@@ -161,6 +161,7 @@ delivery_run_bounded_command() {
 delivery_run_deploy_command() {
   local artifact_root delivery_dir evidence_path evidence_tmp stdout_path stderr_path stdout_tmp stderr_tmp
   local status_dir status_marker command_label child_status wrapper_status outcome deploy_status
+  local previous_status previous_sha
 
   MERGE_SHA="$(delivery_root_metadata delivery.merge_sha)"
   DEPLOY_COMMAND="$(delivery_var deploy_command '')"
@@ -181,10 +182,19 @@ delivery_run_deploy_command() {
   [ -n "$artifact_root" ] || delivery_fail "gc.var.artifact_root is missing"
   command -v timeout >/dev/null 2>&1 || delivery_fail "timeout is required on PATH"
 
+  previous_status="$(delivery_root_metadata delivery.deploy_status)"
+  previous_sha="$(delivery_root_metadata delivery.deploy_merge_sha)"
+  if [ "$previous_sha" = "$MERGE_SHA" ] && \
+     { [ "$previous_status" = deployed ] || [ "$previous_status" = failed ]; }; then
+    delivery_fail "deploy_command already ran for $MERGE_SHA; exact-once deployment forbids a rerun"
+  fi
+
   artifact_root="$(delivery_resolve_contained_path "$artifact_root" "artifact_root")"
   mkdir -p "$artifact_root/delivery" || delivery_fail "failed to create deployment evidence directory"
   delivery_dir="$(delivery_resolve_contained_path "$artifact_root/delivery" "deployment evidence directory")"
   evidence_path="$delivery_dir/deploy.log"
+  [ ! -e "$evidence_path" ] || \
+    delivery_fail "deploy evidence already exists; exact-once deployment forbids a rerun"
   stdout_path="$delivery_dir/deploy.stdout.log"
   stderr_path="$delivery_dir/deploy.stderr.log"
   evidence_tmp="$(mktemp "$delivery_dir/deploy.log.tmp.XXXXXX")" || \
@@ -398,7 +408,7 @@ PY
     rm -rf -- "$api_dir"
     delivery_fail "failed to query merged PR $ci_pr for CI deployment evidence"
   fi
-  if ! gh api -X GET "repos/$ci_repo/deployments" \
+  if ! gh api --paginate --slurp -X GET "repos/$ci_repo/deployments" \
     -f "sha=$ci_sha" -f "environment=$ci_environment" -f per_page=100 \
     >"$api_dir/deployments.json"; then
     rm -rf -- "$api_dir"
@@ -423,6 +433,21 @@ def read_json(path):
         return json.load(handle)
 
 
+def paginated_items(value, label):
+    if not isinstance(value, list):
+        raise SystemExit(f"{label} API returned an unexpected shape")
+    if all(isinstance(item, dict) for item in value):
+        return value
+    if all(isinstance(page, list) for page in value):
+        flattened = []
+        for page in value:
+            if not all(isinstance(item, dict) for item in page):
+                raise SystemExit(f"{label} API returned an unexpected shape")
+            flattened.extend(page)
+        return flattened
+    raise SystemExit(f"{label} API returned an unexpected shape")
+
+
 def timestamp(value, label):
     if not isinstance(value, str) or not value:
         raise SystemExit(f"{label} timestamp is missing")
@@ -438,8 +463,9 @@ def timestamp(value, label):
 run = read_json(run_path)
 pull = read_json(pr_path)
 deployments = read_json(deployments_path)
-if not isinstance(run, dict) or not isinstance(pull, dict) or not isinstance(deployments, list):
+if not isinstance(run, dict) or not isinstance(pull, dict):
     raise SystemExit("GitHub deployment API returned an unexpected shape")
+deployments = paginated_items(deployments, "GitHub deployment")
 if str(run.get("id", "")) != run_id:
     raise SystemExit("GitHub Actions run ID does not match delivery.deploy_run_id")
 if (run.get("repository") or {}).get("full_name") != repo:
@@ -510,7 +536,7 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     print(json.load(handle)["deployment"]["id"])
 PY
 )"
-  if ! gh api "repos/$ci_repo/deployments/$deployment_id/statuses?per_page=100" \
+  if ! gh api --paginate --slurp "repos/$ci_repo/deployments/$deployment_id/statuses?per_page=100" \
     >"$api_dir/statuses.json"; then
     rm -rf -- "$api_dir"
     delivery_fail "failed to query GitHub deployment statuses"
@@ -542,6 +568,21 @@ def timestamp(value, label):
     return parsed
 
 
+def paginated_items(value, label):
+    if not isinstance(value, list):
+        raise SystemExit(f"{label} API returned an unexpected shape")
+    if all(isinstance(item, dict) for item in value):
+        return value
+    if all(isinstance(page, list) for page in value):
+        flattened = []
+        for page in value:
+            if not all(isinstance(item, dict) for item in page):
+                raise SystemExit(f"{label} API returned an unexpected shape")
+            flattened.extend(page)
+        return flattened
+    raise SystemExit(f"{label} API returned an unexpected shape")
+
+
 with open(selection_path, encoding="utf-8") as handle:
     selection = json.load(handle)
 with open(statuses_path, encoding="utf-8") as handle:
@@ -550,6 +591,7 @@ run = selection["run"]
 deployment = selection["deployment"]
 if not isinstance(statuses, list):
     raise SystemExit("GitHub deployment statuses have an unexpected shape")
+statuses = paginated_items(statuses, "GitHub deployment statuses")
 deployment_created = timestamp(deployment.get("created_at"), "deployment")
 successful = []
 for status in statuses:
@@ -618,6 +660,7 @@ delivery_run_ci_deploy_check() {
   evidence_path="$delivery_dir/deploy.log"
   evidence_tmp="$(mktemp "$delivery_dir/deploy.log.tmp.XXXXXX")" || \
     delivery_fail "failed to create CI deployment evidence file"
+  trap 'rm -f -- "$evidence_tmp"' EXIT
   if ! delivery_collect_ci_deploy_evidence "$evidence_tmp"; then
     rm -f "$evidence_tmp"
     delivery_fail "failed to collect CI deployment evidence"
@@ -626,6 +669,7 @@ delivery_run_ci_deploy_check() {
     rm -f "$evidence_tmp"
     delivery_fail "failed to atomically publish CI deployment evidence"
   }
+  trap - EXIT
 
   workflow_id="$(delivery_ci_evidence_field "$evidence_path" workflow_id)" || \
     delivery_fail "CI deployment evidence has no workflow ID"
@@ -675,6 +719,7 @@ delivery_validate_ci_deploy_evidence() {
   evidence_dir="$(dirname "$evidence_path")"
   current_tmp="$(mktemp "$evidence_dir/ci-deploy-current.tmp.XXXXXX")" || \
     delivery_fail "failed to create current CI deployment evidence file"
+  trap 'rm -f -- "$current_tmp"' EXIT
   if ! delivery_collect_ci_deploy_evidence "$current_tmp"; then
     rm -f "$current_tmp"
     delivery_fail "failed to re-query current CI deployment evidence"
@@ -684,6 +729,7 @@ delivery_validate_ci_deploy_evidence() {
     delivery_fail "CI deployment evidence is forged, stale, or incomplete"
   fi
   rm -f "$current_tmp" || delivery_fail "failed to clean current CI deployment evidence"
+  trap - EXIT
 
   [ "$(delivery_root_metadata delivery.deploy_workflow_id)" = "$(delivery_ci_evidence_field "$evidence_path" workflow_id)" ] || \
     delivery_fail "CI deploy workflow ID metadata does not match evidence"
@@ -772,8 +818,8 @@ DELIVERY_PR="$(delivery_root_metadata delivery.pr_number)"
   delivery_fail "deployed SHA $DEPLOYED_SHA does not match merge SHA $MERGE_SHA"
 [ -n "$DEPLOY_EVIDENCE" ] || delivery_fail "delivery.deploy_evidence_path is missing"
 [ -n "$VERIFY_EVIDENCE" ] || delivery_fail "delivery.verify_evidence_path is missing"
-DEPLOY_EVIDENCE="$(delivery_resolve_contained_path "$DEPLOY_EVIDENCE" "deployment evidence path")"
-VERIFY_EVIDENCE="$(delivery_resolve_contained_path "$VERIFY_EVIDENCE" "verification evidence path")"
+DEPLOY_EVIDENCE="$(delivery_resolve_artifact_delivery_evidence "$DEPLOY_EVIDENCE" "deployment evidence path")"
+VERIFY_EVIDENCE="$(delivery_resolve_artifact_delivery_evidence "$VERIFY_EVIDENCE" "verification evidence path")"
 [ -f "$DEPLOY_EVIDENCE" ] && [ -s "$DEPLOY_EVIDENCE" ] || \
   delivery_fail "deploy evidence is missing, not a regular file, or empty: $DEPLOY_EVIDENCE"
 [ -f "$VERIFY_EVIDENCE" ] && [ -s "$VERIFY_EVIDENCE" ] || \
@@ -796,8 +842,8 @@ case "$DEPLOY_MODE" in
     DEPLOY_STDERR="$(delivery_root_metadata delivery.deploy_stderr_path)"
     [ -n "$DEPLOY_STDOUT" ] && [ -n "$DEPLOY_STDERR" ] || \
       delivery_fail "deploy evidence capture paths are missing"
-    DEPLOY_STDOUT="$(delivery_resolve_contained_path "$DEPLOY_STDOUT" "deployment stdout evidence path")"
-    DEPLOY_STDERR="$(delivery_resolve_contained_path "$DEPLOY_STDERR" "deployment stderr evidence path")"
+    DEPLOY_STDOUT="$(delivery_resolve_artifact_delivery_evidence "$DEPLOY_STDOUT" "deployment stdout evidence path")"
+    DEPLOY_STDERR="$(delivery_resolve_artifact_delivery_evidence "$DEPLOY_STDERR" "deployment stderr evidence path")"
     [ "$DEPLOY_EVIDENCE_LABEL" = "$DEPLOY_COMMAND_LABEL" ] || \
       delivery_fail "deploy evidence command label does not match deploy_command"
     [ "$DEPLOY_EVIDENCE_TIMEOUT" = "$DEPLOY_TIMEOUT" ] || \

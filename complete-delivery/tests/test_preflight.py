@@ -39,8 +39,8 @@ def command_deploy_fixture(
     command: str = "/bin/true",
     timeout: str = "5m",
 ) -> tuple[dict[str, str], pathlib.Path]:
-    delivery_dir = repository / "delivery-evidence"
-    delivery_dir.mkdir(exist_ok=True)
+    delivery_dir = repository / "artifacts" / "delivery"
+    delivery_dir.mkdir(parents=True, exist_ok=True)
     deploy_log = delivery_dir / "deploy.log"
     verify_log = delivery_dir / "verify.log"
     stdout = delivery_dir / "deploy.stdout.log"
@@ -80,6 +80,7 @@ def command_deploy_fixture(
             "delivery.deploy_merge_sha": merge_sha,
             "delivery.deploy_stdout_path": str(stdout),
             "delivery.deploy_stderr_path": str(stderr),
+            "gc.var.artifact_root": "artifacts",
             "gc.var.deploy_mode": "command",
             "gc.var.deploy_command": command,
             "gc.var.deploy_timeout": timeout,
@@ -1247,6 +1248,46 @@ class PreflightTests(unittest.TestCase):
                     self.assertIn("outcome=command_failure", evidence)
                     self.assertIn(f"child_status={status}", evidence)
 
+            delivery_dir = repository / "artifacts" / "delivery"
+            for path in delivery_dir.iterdir():
+                path.unlink()
+            for status in ("deployed", "failed"):
+                with self.subTest(existing_deploy_status=status):
+                    if marker.exists():
+                        marker.unlink()
+                    environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
+                        **base_metadata,
+                        "gc.var.deploy_command": success_command,
+                        "delivery.deploy_status": status,
+                        "delivery.deploy_merge_sha": merge_sha,
+                    }}])
+                    repeated = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(repeated.returncode, 1)
+                    self.assertIn("exact-once deployment forbids a rerun", repeated.stderr)
+                    self.assertFalse(marker.exists())
+
+            if marker.exists():
+                marker.unlink()
+            (delivery_dir / "deploy.log").write_text("existing evidence\n", encoding="utf-8")
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
+                **base_metadata,
+                "gc.var.deploy_command": success_command,
+            }}])
+            repeated = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(repeated.returncode, 1)
+            self.assertIn("deploy evidence already exists", repeated.stderr)
+            self.assertFalse(marker.exists())
+
             succeeded, evidence = run_deploy(success_command)
             self.assertEqual(succeeded.returncode, 0, succeeded.stderr)
             delivery_dir = repository / "artifacts" / "delivery"
@@ -1288,6 +1329,29 @@ class PreflightTests(unittest.TestCase):
                 env=environment,
             )
             self.assertEqual(release.returncode, 0, release.stderr)
+
+            outside_evidence = root / "outside-real-deploy-evidence.log"
+            outside_evidence.write_text("outside\n", encoding="utf-8")
+            for metadata_key in (
+                "delivery.deploy_evidence_path",
+                "delivery.verify_evidence_path",
+                "delivery.deploy_stdout_path",
+                "delivery.deploy_stderr_path",
+            ):
+                with self.subTest(real_deployment_evidence_path=metadata_key):
+                    environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
+                        **verified_metadata,
+                        metadata_key: str(outside_evidence),
+                    }}])
+                    escaped = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(escaped.returncode, 1)
+                    self.assertIn("must resolve within", escaped.stderr)
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": verified_metadata}])
 
             deploy_log.write_text("verified\n", encoding="utf-8")
             forged = subprocess.run(
@@ -1423,6 +1487,17 @@ class PreflightTests(unittest.TestCase):
                     self.assertEqual(
                         deployed.returncode, 0, deployed.stdout + deployed.stderr
                     )
+            environment["FAKE_DEPLOYMENTS_JSON"] = json.dumps([deployments])
+            environment["FAKE_STATUSES_JSON"] = json.dumps([statuses])
+            paginated = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(paginated.returncode, 0, paginated.stdout + paginated.stderr)
+            environment["FAKE_DEPLOYMENTS_JSON"] = json.dumps(deployments)
+            environment["FAKE_STATUSES_JSON"] = json.dumps(statuses)
             environment["FAKE_RUN_JSON"] = json.dumps(run)
             deploy_log = repository / "artifacts" / "delivery" / "deploy.log"
             recorded = deploy_log.read_text(encoding="utf-8")
@@ -1488,6 +1563,20 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
 
+            environment["FAKE_RUN_JSON"] = json.dumps({**run, "conclusion": "failure"})
+            stale_ci_evidence = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(stale_ci_evidence.returncode, 1)
+            self.assertEqual(
+                list((repository / "artifacts" / "delivery").glob("ci-deploy-current.tmp.*")),
+                [],
+            )
+            environment["FAKE_RUN_JSON"] = json.dumps(run)
+
             deploy_log.write_text("arbitrary nonempty evidence\n", encoding="utf-8")
             forged = subprocess.run(
                 ["bash", str(RELEASE_VERIFIED_SCRIPT)],
@@ -1530,6 +1619,10 @@ class PreflightTests(unittest.TestCase):
                     self.assertIn(
                         "GitHub CI deployment run is failed, stale, or does not bind",
                         rejected.stderr,
+                    )
+                    self.assertEqual(
+                        list((repository / "artifacts" / "delivery").glob("deploy.log.tmp.*")),
+                        [],
                     )
             environment["FAKE_RUN_JSON"] = json.dumps(run)
 
@@ -1592,6 +1685,7 @@ class PreflightTests(unittest.TestCase):
             for mutation, message in (
                 ({"state": "closed"}, "PR is not open"),
                 ({"draft": True}, "PR is still a draft"),
+                ({"draft": "false"}, "PR response has no boolean draft field"),
                 ({"head": {"sha": "b" * 40}}, "does not match GitHub head"),
                 ({"head": {"sha": "a" * 40, "ref": "wrong-branch"}}, "does not match GitHub head branch"),
                 ({"base": {"ref": "wrong-base", "repo": {"full_name": "example/repo"}}}, "does not match configured base branch"),
@@ -1609,6 +1703,17 @@ class PreflightTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 1)
                     self.assertIn(message, result.stderr)
+
+            missing_draft = {key: value for key, value in pull.items() if key != "draft"}
+            environment["FAKE_PR_JSON"] = json.dumps(missing_draft)
+            result = subprocess.run(
+                ["bash", str(PR_OPEN_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("PR response has no boolean draft field", result.stderr)
 
             environment["FAKE_GC_JSON"] = json.dumps(
                 [{"metadata": {**metadata, "gc.var.base_branch": ""}}]

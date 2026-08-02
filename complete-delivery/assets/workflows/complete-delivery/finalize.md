@@ -11,8 +11,10 @@ pack/name to `complete-delivery` / `complete-delivery` and producer stage to
 Risks.
 
 This is not the terminal delivery claim: say explicitly that PR, external
-review, merge, deploy, and verification still follow. Record the absolute path
-on the workflow root as `gc.build.final_report_path`.
+review, merge, deploy, and verification still follow. Write the report only
+under `<artifact_root>/delivery/`, resolve its canonical path, reject
+non-regular files and symlink escapes, and record only that validated absolute
+path on the workflow root as `gc.build.final_report_path`.
 
 Before finalizing, read `gc.var.source_bead_id` and the durable source bead or
 convoy. Fetch exactly one durable record and require its returned `id` to equal
