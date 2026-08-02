@@ -424,8 +424,14 @@ if run.get("head_sha") != merge_sha:
     raise SystemExit("GitHub Actions run head SHA does not match delivery.merge_sha")
 if run.get("head_branch") != base_branch:
     raise SystemExit("GitHub Actions run branch does not match base_branch")
-if run.get("path") != workflow:
-    raise SystemExit("GitHub Actions workflow path does not match deploy_ci_workflow")
+workflow_run_path = run.get("path")
+allowed_workflow_run_paths = {
+    workflow,
+    f"{workflow}@{base_branch}",
+    f"{workflow}@refs/heads/{base_branch}",
+}
+if workflow_run_path not in allowed_workflow_run_paths:
+    raise SystemExit("GitHub Actions workflow path or ref does not match deploy_ci_workflow and base_branch")
 if run.get("status") != "completed" or run.get("conclusion") != "success":
     raise SystemExit("GitHub Actions deployment run is not completed successfully")
 workflow_id = run.get("workflow_id")
@@ -549,6 +555,7 @@ fields = [
     ("base_branch", base_branch),
     ("workflow_id", str(run["workflow_id"])),
     ("workflow_path", workflow),
+    ("workflow_run_path", run["path"]),
     ("run_id", run_id),
     ("run_url", run["html_url"]),
     ("run_status", "completed"),
@@ -577,7 +584,7 @@ PY
 
 delivery_run_ci_deploy_check() {
   local artifact_root delivery_dir evidence_path evidence_tmp
-  local workflow_id run_id run_url environment deployment_id deployment_status_id
+  local workflow_id workflow_run_path run_id run_url environment deployment_id deployment_status_id
 
   artifact_root="$(delivery_var artifact_root '')"
   [ -n "$artifact_root" ] || delivery_fail "gc.var.artifact_root is missing"
@@ -598,6 +605,8 @@ delivery_run_ci_deploy_check() {
 
   workflow_id="$(delivery_ci_evidence_field "$evidence_path" workflow_id)" || \
     delivery_fail "CI deployment evidence has no workflow ID"
+  workflow_run_path="$(delivery_ci_evidence_field "$evidence_path" workflow_run_path)" || \
+    delivery_fail "CI deployment evidence has no workflow run path"
   run_id="$(delivery_ci_evidence_field "$evidence_path" run_id)" || \
     delivery_fail "CI deployment evidence has no run ID"
   run_url="$(delivery_ci_evidence_field "$evidence_path" run_url)" || \
@@ -616,6 +625,7 @@ delivery_run_ci_deploy_check() {
     --set-metadata "delivery.deploy_run_url=$run_url" \
     --set-metadata "delivery.deploy_workflow_id=$workflow_id" \
     --set-metadata "delivery.deploy_workflow=$(delivery_var deploy_ci_workflow '')" \
+    --set-metadata "delivery.deploy_workflow_run_path=$workflow_run_path" \
     --set-metadata "delivery.deploy_environment=$environment" \
     --set-metadata "delivery.deploy_merge_sha=$(delivery_root_metadata delivery.merge_sha)" \
     --set-metadata "delivery.deploy_conclusion=success" \
@@ -653,6 +663,8 @@ delivery_validate_ci_deploy_evidence() {
 
   [ "$(delivery_root_metadata delivery.deploy_workflow_id)" = "$(delivery_ci_evidence_field "$evidence_path" workflow_id)" ] || \
     delivery_fail "CI deploy workflow ID metadata does not match evidence"
+  [ "$(delivery_root_metadata delivery.deploy_workflow_run_path)" = "$(delivery_ci_evidence_field "$evidence_path" workflow_run_path)" ] || \
+    delivery_fail "CI deploy workflow run path metadata does not match evidence"
   [ "$(delivery_root_metadata delivery.deploy_run_url)" = "$(delivery_ci_evidence_field "$evidence_path" run_url)" ] || \
     delivery_fail "CI deploy run URL metadata does not match evidence"
   [ "$(delivery_root_metadata delivery.deploy_deployment_id)" = "$(delivery_ci_evidence_field "$evidence_path" deployment_id)" ] || \

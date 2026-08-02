@@ -1311,7 +1311,7 @@ class PreflightTests(unittest.TestCase):
                 "repository": {"full_name": "example/repo"},
                 "head_sha": merge_sha,
                 "head_branch": "main",
-                "path": workflow,
+                "path": f"{workflow}@refs/heads/main",
                 "status": "completed",
                 "conclusion": "success",
                 "workflow_id": 99,
@@ -1369,18 +1369,33 @@ class PreflightTests(unittest.TestCase):
                 }
             )
 
-            deployed = subprocess.run(
-                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
-                capture_output=True,
-                text=True,
-                env=environment,
-            )
-            self.assertEqual(deployed.returncode, 0, deployed.stdout + deployed.stderr)
+            for workflow_run_path in (
+                workflow,
+                f"{workflow}@main",
+                f"{workflow}@refs/heads/main",
+            ):
+                with self.subTest(workflow_run_path=workflow_run_path):
+                    environment["FAKE_RUN_JSON"] = json.dumps(
+                        {**run, "path": workflow_run_path}
+                    )
+                    deployed = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(
+                        deployed.returncode, 0, deployed.stdout + deployed.stderr
+                    )
+            environment["FAKE_RUN_JSON"] = json.dumps(run)
             deploy_log = repository / "artifacts" / "delivery" / "deploy.log"
             recorded = deploy_log.read_text(encoding="utf-8")
             self.assertIn("schema=complete-delivery.ci-deploy.v1", recorded)
             self.assertIn(f"merge_sha={merge_sha}", recorded)
             self.assertIn("workflow_id=99", recorded)
+            self.assertIn(
+                f"workflow_run_path={workflow}@refs/heads/main", recorded
+            )
             self.assertIn("run_id=456", recorded)
             self.assertIn("run_conclusion=success", recorded)
             self.assertIn("environment=production", recorded)
@@ -1392,6 +1407,10 @@ class PreflightTests(unittest.TestCase):
             update_record = updates.read_text(encoding="utf-8")
             self.assertIn("delivery.deploy_status=deployed", update_record)
             self.assertIn("delivery.deploy_run_url=https://github.com/example/repo/actions/runs/456", update_record)
+            self.assertIn(
+                f"delivery.deploy_workflow_run_path={workflow}@refs/heads/main",
+                update_record,
+            )
 
             verify_log = repository / "artifacts" / "delivery" / "verify.log"
             verify_log.write_text("verification evidence\n", encoding="utf-8")
@@ -1404,6 +1423,7 @@ class PreflightTests(unittest.TestCase):
                 "delivery.deploy_run_url": run["html_url"],
                 "delivery.deploy_workflow_id": "99",
                 "delivery.deploy_workflow": workflow,
+                "delivery.deploy_workflow_run_path": f"{workflow}@refs/heads/main",
                 "delivery.deploy_environment": "production",
                 "delivery.deploy_merge_sha": merge_sha,
                 "delivery.deploy_conclusion": "success",
@@ -1455,6 +1475,12 @@ class PreflightTests(unittest.TestCase):
                 ("wrong sha", {"head_sha": "b" * 40}),
                 ("failed run", {"conclusion": "failure"}),
                 ("stale run", {"created_at": "2026-08-02T09:59:00Z"}),
+                ("wrong workflow", {"path": ".github/workflows/other.yml@main"}),
+                ("wrong short ref", {"path": f"{workflow}@release"}),
+                ("wrong qualified ref", {"path": f"{workflow}@refs/heads/release"}),
+                ("tag ref", {"path": f"{workflow}@refs/tags/main"}),
+                ("workflow prefix", {"path": f"x{workflow}@main"}),
+                ("ref suffix", {"path": f"{workflow}@main-extra"}),
             ):
                 with self.subTest(name=name):
                     environment["FAKE_RUN_JSON"] = json.dumps({**run, **run_mutation})
