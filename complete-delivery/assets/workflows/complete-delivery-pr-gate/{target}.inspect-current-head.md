@@ -5,7 +5,7 @@ SHA before invoking the gate. Remove any pre-existing `<artifact_root>/delivery/
 `{{pack_root}}/assets/scripts/delivery_gate.py` with workflow-root repo/PR,
 `required_checks`, and `coderabbit`, writing that path. Never consume a pre-existing artifact after a command failure. Accept authority only from fresh evaluator JSON with semantic
 `gc.complete-delivery.pr-gate.v1` identity: exact `schema`, workflow-root `repo` and `pr_number`, Boolean `passed`: `true` only with `state: "passed"` and `false` only with `state: "blocked"`, canonical full `head_sha`, and typed
-`required_checks`, `coderabbit`, `unresolved_threads`, `human_change_requests`, and `blockers` collections/objects. A blocked gate exit is expected while work remains only when that identity's canonical full `head_sha` exactly equals workflow-root `delivery.head_sha`; preserve that fresh blocked snapshot and close this
+`required_checks` as a list, `coderabbit` as an object, `unresolved_threads` as a list, `human_change_requests` as a list, and `blockers` as a list. A blocked gate exit is expected while work remains only when that identity's canonical full `head_sha` exactly equals workflow-root `delivery.head_sha`; preserve that fresh blocked snapshot and close this
 inspection lane with `gc.outcome=pass` so repair children can act. First
 invalidate prior terminal-success evidence (`tested_commit`, `local_gates`,
 `published_head`, and `published_head_matches_tested_commit`), retain that

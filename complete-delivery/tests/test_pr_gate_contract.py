@@ -142,7 +142,7 @@ class PrGateContractTests(unittest.TestCase):
 
         self.assert_prose_contains(prompt, "Never push or resolve a thread in this lane")
         self.assertIn("resolve only a current mapped thread", prompt)
-        self.assertTrue("Only the Formula v2 `external-review-loop` terminal check" in prompt and all(" ".join(term.split()) in " ".join(prompt.split()) for term in ("semantic `gc.complete-delivery.pr-gate.v1` identity", "`schema`", "`repo`", "`pr_number`", "`passed`", "`true` only", '`state: "passed"', "`false` only", '`state: "blocked"', "`required_checks`", "`coderabbit`", "`unresolved_threads`", "`human_change_requests`", "`blockers`", "blocker-only state")))
+        self.assertTrue("Only the Formula v2 `external-review-loop` terminal check" in prompt and all(" ".join(term.split()) in " ".join(prompt.split()) for term in ("semantic `gc.complete-delivery.pr-gate.v1` identity", "`schema`", "`repo`", "`pr_number`", "`passed`", "`true` only", '`state: "passed"', "`false` only", '`state: "blocked"', "`required_checks` as a list", "`coderabbit` as an object", "`unresolved_threads` as a list", "`human_change_requests` as a list", "`blockers` as a list", "blocker-only state")))
         self.assertNotIn("After fixes are pushed and applicable review threads are resolved", prompt)
 
     def test_nonterminal_lanes_only_run_local_gates_and_require_exact_published_head(self) -> None:
@@ -602,7 +602,7 @@ class PrGateContractTests(unittest.TestCase):
         self.assert_prose_contains(finalizer, "then close with a non-pass outcome")
         for requirement in (
             "Remove any pre-existing",
-            "semantic `gc.complete-delivery.pr-gate.v1` identity: exact `schema`, workflow-root `repo` and `pr_number`, Boolean `passed`: `true` only with `state: \"passed\"` and `false` only with `state: \"blocked\"`",
+            "semantic `gc.complete-delivery.pr-gate.v1` identity: exact `schema`, workflow-root `repo` and `pr_number`, Boolean `passed`: `true` only with `state: \"passed\"` and `false` only with `state: \"blocked\"`, canonical full `head_sha`, and typed `required_checks` as a list, `coderabbit` as an object, `unresolved_threads` as a list, `human_change_requests` as a list, and `blockers` as a list",
             "canonical full `head_sha` exactly equals workflow-root `delivery.head_sha`",
             "Never consume a pre-existing artifact after a command failure",
         ):
