@@ -110,11 +110,18 @@ delivery_run_bounded_command() {
   local command="$2"
   local timeout_value="$3"
   local status outcome label status_dir status_marker wrapper_status
+  local evidence_dir stdout_path stderr_path
 
   label="$(delivery_command_label "$command")"
   status_dir="$(mktemp -d "${TMPDIR:-/tmp}/delivery-command-status.XXXXXX")" || \
     delivery_fail "failed to create $name status directory"
   status_marker="$status_dir/status"
+  evidence_dir="$(dirname "$VERIFY_EVIDENCE")"
+  [ -d "$evidence_dir" ] || { rm -rf -- "$status_dir"; delivery_fail "verification evidence directory is unavailable"; }
+  stdout_path="$(mktemp "$evidence_dir/$name.stdout.log.XXXXXX")" || \
+    { rm -rf -- "$status_dir"; delivery_fail "failed to create $name stdout capture"; }
+  stderr_path="$(mktemp "$evidence_dir/$name.stderr.log.XXXXXX")" || \
+    { rm -f -- "$stdout_path"; rm -rf -- "$status_dir"; delivery_fail "failed to create $name stderr capture"; }
 
   # GNU timeout uses 124, 125, and 137 for its own outcomes, but a managed
   # command may legitimately return any of those statuses.  The inner Bash
@@ -131,7 +138,7 @@ delivery_run_bounded_command() {
       exit 125
     fi
     exit "$child_status"
-  ' delivery-bounded-command "$command" "$status_dir"; then
+  ' delivery-bounded-command "$command" "$status_dir" >"$stdout_path" 2>"$stderr_path"; then
     wrapper_status=0
   else
     wrapper_status=$?
@@ -151,9 +158,10 @@ delivery_run_bounded_command() {
       *) outcome=timeout_utility_failure ;;
     esac
   fi
-  printf 'command=%s label=%s timeout=%s outcome=%s status=%s\n' \
-    "$name" "$label" "$timeout_value" "$outcome" "$status" >>"$VERIFY_EVIDENCE" || \
-    { rm -rf -- "$status_dir"; delivery_fail "failed to record $name verification evidence"; }
+  printf 'command=%s label=%s timeout=%s outcome=%s status=%s stdout_path=%s stderr_path=%s\n' \
+    "$name" "$label" "$timeout_value" "$outcome" "$status" \
+    "$stdout_path" "$stderr_path" >>"$VERIFY_EVIDENCE" || \
+    { rm -f -- "$stdout_path" "$stderr_path"; rm -rf -- "$status_dir"; delivery_fail "failed to record $name verification evidence"; }
   rm -rf -- "$status_dir" || delivery_fail "failed to clean $name status directory"
   [ "$status" -eq 0 ]
 }
@@ -209,6 +217,13 @@ delivery_run_deploy_command() {
 
   evidence_tmp="$(mktemp "$delivery_dir/deploy.log.tmp.XXXXXX")" || \
     delivery_fail "failed to create deployment evidence file"
+  stdout_tmp=""
+  stderr_tmp=""
+  status_dir=""
+  trap 'rm -f -- "$evidence_tmp" "$stdout_tmp" "$stderr_tmp"; rm -rf -- "$status_dir"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   stdout_tmp="$(mktemp "$delivery_dir/deploy.stdout.log.tmp.XXXXXX")" || \
     { rm -f "$evidence_tmp"; delivery_fail "failed to create deployment stdout capture"; }
   stderr_tmp="$(mktemp "$delivery_dir/deploy.stderr.log.tmp.XXXXXX")" || \
@@ -297,6 +312,7 @@ delivery_run_deploy_command() {
       rm -f -- "$evidence_path" "$stdout_path" "$stderr_path"
       delivery_fail "failed to atomically record deployment evidence metadata"
     }
+  trap - EXIT HUP INT TERM
 
   [ "$outcome" = passed ] && [ "$child_status" = 0 ] && [ "$wrapper_status" -eq 0 ] || \
     delivery_fail "deploy_command failed; see deployment evidence"
@@ -615,8 +631,6 @@ for status in statuses:
     status_environment = status.get("environment")
     if status_environment not in (None, "", environment):
         continue
-    if status.get("log_url") != run["html_url"]:
-        continue
     status_id = status.get("id")
     if not isinstance(status_id, int) or status_id <= 0:
         continue
@@ -627,6 +641,14 @@ for status in statuses:
 if not successful:
     raise SystemExit("GitHub deployment has no successful status for the configured environment")
 _, _, status = min(successful, key=lambda item: (item[0], item[1]))
+# A deployment status is read only through the selected deployment endpoint,
+# which is already bound above to the exact repository, merge SHA, and
+# environment. GitHub documents log_url as optional and deployment-specific.
+log_url = status.get("log_url", "")
+if log_url is None:
+    log_url = ""
+if not isinstance(log_url, str):
+    raise SystemExit("GitHub deployment status log URL has an unexpected shape")
 
 fields = [
     ("schema", "complete-delivery.ci-deploy.v1"),
@@ -647,7 +669,7 @@ fields = [
     ("deployment_created_at", deployment["created_at"]),
     ("deployment_status_id", str(status["id"])),
     ("deployment_status", "success"),
-    ("deployment_log_url", status["log_url"]),
+    ("deployment_log_url", log_url),
     ("deployment_status_created_at", status["created_at"]),
 ]
 if any("\n" in value or "\r" in value for _, value in fields):

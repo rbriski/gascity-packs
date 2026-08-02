@@ -30,9 +30,12 @@ non-applicable evidence, then follow
   for non-deployable artifacts only, never an escape hatch for missing config.
 
 For `not-applicable`, record `delivery.deploy_evidence_path` and set
-`delivery.deploy_status=not_applicable`. In command and CI modes, the graph
-check records the evidence path and `delivery.deploy_status=deployed` only
-after its mechanical gate passes.
+`delivery.deploy_status=not_applicable`. In command mode, the graph records
+`delivery.deploy_status=started` before invoking the command and records
+`failed` if that command fails or times out; both states are terminal for that
+iteration because the exact-once guard rejects another run for the same
+`delivery.merge_sha`. In command and CI modes, it records the evidence path
+and `delivery.deploy_status=deployed` only after its mechanical gate passes.
 Do not yet set `verified` or
 `delivery.deployed_sha`; the next stage owns production proof. Preserve the
 last known good production state on failure and include rollback guidance.

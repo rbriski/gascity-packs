@@ -21,8 +21,11 @@ RESULT="$(printf '%s' "$PR_JSON" | python3 -c '
 import json
 import sys
 data = json.load(sys.stdin)
+merged = data.get("merged")
+if not isinstance(merged, bool):
+    raise ValueError("PR response has no boolean merged field")
 print("\t".join([
-    str(bool(data.get("merged"))).lower(),
+    str(merged).lower(),
     str(data.get("merge_commit_sha") or ""),
     str((data.get("base") or {}).get("ref") or ""),
 ]))

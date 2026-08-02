@@ -23,8 +23,9 @@ acceptance criteria, non-goals, and open questions.
 In YAML front matter, record `source.id`, `source.title`,
 `source.anchor: gc:<source-id>`, and `source.acceptance_criteria_sha256` using
 the exact durable values resolved above. The hash is `sha256:` plus the SHA-256
-digest of the exact acceptance-criteria string; do not copy the raw criteria
-into that source mapping.
+digest of the exact JSON `acceptance_criteria` string returned by
+`gc bd show <source-id> --json`, byte-for-byte without trimming or
+reformatting; do not copy the raw criteria into that source mapping.
 Start the body with the exact unfenced H2 heading `## Source Intent` and place
 the resolved source ID and title immediately below it, then trace each
 requested description/acceptance point into the requirements. Use

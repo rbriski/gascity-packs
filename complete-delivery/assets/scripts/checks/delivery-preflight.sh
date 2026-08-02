@@ -118,12 +118,13 @@ require_enum coderabbit "$CODERABBIT" required optional off
 require_enum merge_method "$MERGE_METHOD" squash merge rebase
 require_enum deploy_mode "$DEPLOY_MODE" command ci not-applicable
 
-if [ "$ALLOW_NO_SMOKE" = "true" ] && ! [[ "$NO_SMOKE_REASON" =~ [^[:space:]] ]]; then
+if [ "$ALLOW_NO_SMOKE" = "true" ] && ! delivery_command_is_nonblank "$NO_SMOKE_REASON"; then
   errors+=("no_smoke_reason is required and must be nonblank when allow_no_smoke=true")
 fi
 
 [ -n "$SOURCE_BEAD_ID" ] || errors+=("source_bead_id is required; launch from a durable work bead or convoy")
-[ -n "$SOURCE_TITLE" ] || errors+=("source_title is required; resolve the durable source title before launch")
+delivery_command_is_nonblank "$SOURCE_TITLE" || \
+  errors+=("source_title is required; resolve the durable source title before launch")
 case "$SOURCE_BEAD_ID" in
   *[!A-Za-z0-9._-]*|"") errors+=("source_bead_id must be a valid durable bead or convoy ID") ;;
 esac
@@ -144,6 +145,8 @@ if not isinstance(data, dict):
     raise SystemExit(1)
 title = data.get("title")
 if not isinstance(title, str) or not title.strip():
+    raise SystemExit(1)
+if any(ord(character) < 32 or ord(character) == 127 for character in title):
     raise SystemExit(1)
 print(title.strip())
 ')" || SOURCE_RESOLVED_TITLE=""

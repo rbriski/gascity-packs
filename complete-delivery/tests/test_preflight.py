@@ -205,6 +205,26 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("source_bead_id is required", result.stderr)
         self.assertIn("source_title is required", result.stderr)
 
+    def test_source_title_rejects_whitespace_and_control_characters(self) -> None:
+        whitespace = self.run_preflight(
+            self.metadata(**{"gc.var.source_title": " \t "})
+        )
+        self.assertEqual(whitespace.returncode, 1)
+        self.assertIn("source_title is required", whitespace.stderr)
+
+        for control in ("\n", "\r", "\t", "\x00", "\x7f"):
+            with self.subTest(control=repr(control)):
+                title = f"Requested{control}delivery"
+                result = self.run_preflight(
+                    self.metadata(**{"gc.var.source_title": title}),
+                    source_json=json.dumps([{"title": title}]),
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "source_bead_id must resolve to one durable source with a title",
+                    result.stderr,
+                )
+
     def test_invalid_source_bead_id_fails_closed(self) -> None:
         result = self.run_preflight(
             self.metadata(**{"gc.var.source_bead_id": "fi/123"})
@@ -736,6 +756,44 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(identity_verified.returncode, 0, identity_verified.stderr)
 
+            delivery_dir = repository / "artifacts" / "delivery"
+            for capture in delivery_dir.glob("*.stdout.log.*"):
+                capture.unlink()
+            for capture in delivery_dir.glob("*.stderr.log.*"):
+                capture.unlink()
+            evidence.write_text("verified\n", encoding="utf-8")
+            environment["FAKE_GC_JSON"] = json.dumps(
+                [{"metadata": {
+                    **base_metadata,
+                    "gc.var.allow_no_smoke": "false",
+                    "gc.var.deploy_verify_command": "printf verify-stdout; printf verify-stderr >&2",
+                    "gc.var.smoke_command": "printf smoke-stdout; printf smoke-stderr >&2",
+                }}]
+            )
+            captured = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(captured.returncode, 0, captured.stderr)
+            recorded_captures = evidence.read_text(encoding="utf-8")
+            for name, stdout, stderr in (
+                ("deploy_verify", "verify-stdout", "verify-stderr"),
+                ("smoke", "smoke-stdout", "smoke-stderr"),
+            ):
+                self.assertIn(f"command={name}", recorded_captures)
+                self.assertIn("stdout_path=", recorded_captures)
+                self.assertIn("stderr_path=", recorded_captures)
+                self.assertEqual(
+                    [path.read_text(encoding="utf-8") for path in delivery_dir.glob(f"{name}.stdout.log.*")],
+                    [stdout],
+                )
+                self.assertEqual(
+                    [path.read_text(encoding="utf-8") for path in delivery_dir.glob(f"{name}.stderr.log.*")],
+                    [stderr],
+                )
+
             environment["FAKE_GC_JSON"] = json.dumps(
                 [{"metadata": {
                     **base_metadata,
@@ -964,6 +1022,24 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(verified.returncode, 0, verified.stderr)
             self.assertIn("-> main", verified.stdout)
+
+            for merged in (None, "false", "true", 0, 1):
+                with self.subTest(merged=repr(merged)):
+                    environment["FAKE_PR_JSON"] = json.dumps(
+                        {
+                            "merged": merged,
+                            "merge_commit_sha": "a" * 40,
+                            "base": {"ref": "main"},
+                        }
+                    )
+                    rejected = subprocess.run(
+                        ["bash", str(MERGED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(rejected.returncode, 1)
+                    self.assertIn("boolean merged field", rejected.stderr)
 
     def test_release_verification_disambiguates_child_and_timeout_statuses(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1701,6 +1777,42 @@ class PreflightTests(unittest.TestCase):
                 update_record,
             )
 
+            for label, log_url in (
+                ("missing", None),
+                ("different deployment URL", "https://deploy.example.test/logs/789"),
+            ):
+                with self.subTest(deployment_status_log_url=label):
+                    status = {
+                        "id": 790,
+                        "state": "success",
+                        "environment": "production",
+                        "created_at": "2026-08-02T10:03:00Z",
+                    }
+                    if log_url is not None:
+                        status["log_url"] = log_url
+                    environment["FAKE_STATUSES_JSON"] = json.dumps([status])
+                    deployed = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(
+                        deployed.returncode, 0, deployed.stdout + deployed.stderr
+                    )
+                    recorded_status = deploy_log.read_text(encoding="utf-8")
+                    self.assertIn(
+                        f"deployment_log_url={log_url or ''}", recorded_status
+                    )
+            environment["FAKE_STATUSES_JSON"] = json.dumps(statuses)
+            restored = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+
             verify_log = repository / "artifacts" / "delivery" / "verify.log"
             verify_log.write_text("verification evidence\n", encoding="utf-8")
             verified_metadata = {
@@ -1776,6 +1888,7 @@ class PreflightTests(unittest.TestCase):
             environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": base_metadata}])
             for name, run_mutation in (
                 ("wrong sha", {"head_sha": "b" * 40}),
+                ("wrong repository", {"repository": {"full_name": "other/repo"}}),
                 ("failed run", {"conclusion": "failure"}),
                 ("stale run", {"created_at": "2026-08-02T09:59:00Z"}),
                 ("wrong workflow", {"path": ".github/workflows/other.yml@main"}),
@@ -1922,6 +2035,10 @@ class PreflightTests(unittest.TestCase):
             steps["finalize"]["check"]["check"]["path"],
             ".gc/scripts/checks/delivery-source-artifact-valid.sh",
         )
+        self.assertEqual(
+            steps["finalize"]["metadata"]["gc.build.artifact_path_keys"],
+            "gc.build.final_report_path,gc.var.final_report_path",
+        )
 
         for prompt, expected_path, materialized in (
             (WORKFLOW_ROOT / "delivery-preflight.md", ".gc/scripts/checks/delivery-preflight.sh", True),
@@ -2023,9 +2140,22 @@ class PreflightTests(unittest.TestCase):
             prompt_text = (WORKFLOW_ROOT / prompt).read_text(encoding="utf-8")
             self.assertIn("exact unfenced H2 heading `## Source Intent`", prompt_text)
             self.assertIn("source.acceptance_criteria_sha256", prompt_text)
+            self.assertIn("exact JSON", prompt_text)
+            self.assertIn("`acceptance_criteria`", prompt_text)
+            self.assertIn("byte-for-byte", prompt_text)
+            self.assertIn("trimming", prompt_text)
+            self.assertIn("reformatting", prompt_text)
 
 
 class SourceArtifactTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not SOURCE_ARTIFACT_GENERIC_CHECK.is_file():
+            raise RuntimeError(
+                "required inherited gascity checker is unavailable: "
+                f"{SOURCE_ARTIFACT_GENERIC_CHECK}"
+            )
+
     def artifact(
         self,
         *,
@@ -2146,6 +2276,8 @@ class SourceArtifactTests(unittest.TestCase):
         upstream_overrides: dict[str, str | None] | None = None,
         artifact_path_variant: str = "contained",
         upstream_path_variant: tuple[str, str] | None = None,
+        artifact_path_keys: str | None = None,
+        use_variable_artifact_path: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -2212,7 +2344,7 @@ class SourceArtifactTests(unittest.TestCase):
             step = [{"id": "step-1", "metadata": {
                 "gc.root_bead_id": "root-1",
                 "gc.build.artifact_schema": f"gc.build.{artifact_kind}.v1",
-                "gc.build.artifact_path_keys": artifact_path_key,
+                "gc.build.artifact_path_keys": artifact_path_keys or artifact_path_key,
             }}]
             root_metadata = {
                 artifact_path_key: artifact_path_value,
@@ -2224,6 +2356,11 @@ class SourceArtifactTests(unittest.TestCase):
                     else {}
                 ),
             }
+            if use_variable_artifact_path:
+                root_metadata.pop(artifact_path_key)
+                root_metadata[f"gc.var.{artifact_kind.replace('-', '_')}_path"] = (
+                    artifact_path_value
+                )
             if artifact_kind == "final-report":
                 upstream_overrides = upstream_overrides or {}
                 for upstream_kind in ("requirements", "plan", "decomposition"):
@@ -2391,6 +2528,14 @@ class SourceArtifactTests(unittest.TestCase):
         )
         self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
         self.assertIn("final-report", valid.stdout)
+
+        fallback = self.run_check(
+            self.artifact(artifact_kind="final-report"),
+            artifact_kind="final-report",
+            artifact_path_keys="gc.build.final_report_path,gc.var.final_report_path",
+            use_variable_artifact_path=True,
+        )
+        self.assertEqual(fallback.returncode, 0, fallback.stdout + fallback.stderr)
 
         missing_trace = self.run_check(
             self.artifact(artifact_kind="final-report", include_source_trace=False),

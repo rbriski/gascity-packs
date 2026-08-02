@@ -284,7 +284,7 @@ description_file = "../assets/workflows/complete-delivery/release-readiness.md"
 id = "finalize"
 title = "Finalize the pre-publication delivery record"
 needs = ["release-readiness"]
-metadata = { "gc.run_target" = "gstack.release-engineer", "gc.build.artifact_schema" = "gc.build.final-report.v1", "gc.build.artifact_path_keys" = "gc.build.final_report_path" }
+metadata = { "gc.run_target" = "gstack.release-engineer", "gc.build.artifact_schema" = "gc.build.final-report.v1", "gc.build.artifact_path_keys" = "gc.build.final_report_path,gc.var.final_report_path" }
 description_file = "../assets/workflows/complete-delivery/finalize.md"
 
 [steps.check]

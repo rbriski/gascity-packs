@@ -11,9 +11,10 @@ Write the plan to `{{plan_path}}` and record that exact resolved path on the
 workflow root as `gc.build.plan_path`. In YAML front matter, record `source.id`,
 `source.title`, `source.anchor: gc:<source-id>`, and
 `source.acceptance_criteria_sha256` using the exact durable values resolved
-above. The hash is `sha256:` plus the SHA-256 digest of the exact durable
-acceptance-criteria string; do not copy the raw criteria into that source
-mapping. Start the body with the exact unfenced H2 heading `## Source Intent`
+above. The hash is `sha256:` plus the SHA-256 digest of the exact JSON
+`acceptance_criteria` string returned by `gc bd show <source-id> --json`,
+byte-for-byte without trimming or reformatting; do not copy the raw criteria
+into that source mapping. Start the body with the exact unfenced H2 heading `## Source Intent`
 and place the resolved source ID and title immediately below it, then map every
 requested acceptance criterion to a planned change or
 explicit verification. Include at least two implementation approaches, the
