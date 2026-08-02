@@ -6,6 +6,38 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/delivery-common.sh"
 delivery_initialize_context
 
+delivery_resolve_contained_path() {
+  local value="$1"
+  local label="$2"
+  local resolved
+
+  if ! resolved="$(python3 - "$DELIVERY_WORK_DIR" "$value" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+root_value, candidate_value = sys.argv[1:]
+if not candidate_value:
+    raise SystemExit(1)
+root = Path(root_value).resolve(strict=True)
+if not root.is_dir():
+    raise SystemExit(1)
+raw = Path(candidate_value)
+if not raw.is_absolute() and ".." in raw.parts:
+    raise SystemExit(1)
+candidate = raw.resolve(strict=False) if raw.is_absolute() else (root / raw).resolve(strict=False)
+try:
+    candidate.relative_to(root)
+except ValueError:
+    raise SystemExit(1)
+print(os.fspath(candidate))
+PY
+  )"; then
+    delivery_fail "$label must resolve within the canonical delivery work directory"
+  fi
+  printf '%s' "$resolved"
+}
+
 # A deployed pack supplies the common checker beside this materialized script.
 # Source-tree and other non-materialized callers must configure it explicitly;
 # never walk repository-relative paths that can silently select a different
@@ -17,10 +49,6 @@ else
   GENERIC_CHECK="$(delivery_resolve_path "$GENERIC_CHECK")"
 fi
 [ -f "$GENERIC_CHECK" ] || delivery_fail "build-artifact-valid.sh is unavailable"
-
-# Preserve the inherited schema and trace gate before applying the
-# Complete Delivery source-binding refinement.
-bash "$GENERIC_CHECK"
 
 SCHEMA="$(delivery_metadata_value "$DELIVERY_STEP_JSON" "gc.build.artifact_schema")"
 case "$SCHEMA" in
@@ -37,12 +65,16 @@ for key in "${KEYS[@]}"; do
   [ -n "$key" ] || continue
   value="$(delivery_root_metadata "$key")"
   if [ -n "$value" ]; then
-    ARTIFACT_PATH="$(delivery_resolve_path "$value")"
+    ARTIFACT_PATH="$(delivery_resolve_contained_path "$value" "source-bound artifact path")"
     break
   fi
 done
 [ -n "$ARTIFACT_PATH" ] || delivery_fail "source-bound artifact path is missing"
 [ -f "$ARTIFACT_PATH" ] || delivery_fail "source-bound artifact does not exist: $ARTIFACT_PATH"
+
+# Reject foreign paths before the inherited checker can open them, then preserve
+# its schema and trace gate before applying the Complete Delivery refinement.
+bash "$GENERIC_CHECK"
 
 SOURCE_ID="$(delivery_var source_bead_id "")"
 SOURCE_TITLE="$(delivery_var source_title "")"
@@ -107,9 +139,9 @@ if [ "$SCHEMA" = "gc.build.final-report.v1" ]; then
     delivery_fail "gc.build.plan_path is required to finalize source traceability"
   [ -n "$DECOMPOSITION_PATH" ] || \
     delivery_fail "gc.build.decomposition_path is required to finalize source traceability"
-  REQUIREMENTS_PATH="$(delivery_resolve_path "$REQUIREMENTS_PATH")"
-  PLAN_PATH="$(delivery_resolve_path "$PLAN_PATH")"
-  DECOMPOSITION_PATH="$(delivery_resolve_path "$DECOMPOSITION_PATH")"
+  REQUIREMENTS_PATH="$(delivery_resolve_contained_path "$REQUIREMENTS_PATH" "approved requirements artifact path")"
+  PLAN_PATH="$(delivery_resolve_contained_path "$PLAN_PATH" "approved plan artifact path")"
+  DECOMPOSITION_PATH="$(delivery_resolve_contained_path "$DECOMPOSITION_PATH" "approved decomposition artifact path")"
 fi
 
 DELIVERY_SOURCE_FIELDS="$SOURCE_FIELDS" \

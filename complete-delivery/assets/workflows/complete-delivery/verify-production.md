@@ -1,5 +1,11 @@
 Verify production behavior and exact-SHA attestation.
 
+For `deploy_mode=ci`, do not replace or edit the deploy-stage evidence. The
+graph check reopens it, re-queries GitHub, and requires an exact structured
+match for repository, PR, merge SHA, configured workflow, run ID and URL,
+successful conclusion, deployment ID/status, and configured environment before
+it runs production verification.
+
 For every real deployment mode (`command` or `ci`), require and run
 `deploy_verify_command` with `DELIVERY_SHA=delivery.merge_sha` under its
 strictly positive, finite configured timeout of no more than one hour; it must

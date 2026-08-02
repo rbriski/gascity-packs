@@ -120,6 +120,14 @@ default = "command"
 description = "Repository-owned command that deploys DELIVERY_SHA."
 default = ""
 
+[vars.deploy_ci_workflow]
+description = "Exact .github/workflows/*.yml path that owns CI deployment when deploy_mode=ci."
+default = ""
+
+[vars.deploy_environment]
+description = "Exact GitHub deployment environment required when deploy_mode=ci."
+default = ""
+
 [vars.deploy_timeout]
 description = "Positive finite timeout for deploy_command, no greater than one hour."
 default = "5m"

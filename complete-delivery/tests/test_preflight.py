@@ -32,6 +32,62 @@ PR_GATE_WORKFLOW_ROOT = (
 )
 
 
+def command_deploy_fixture(
+    repository: pathlib.Path,
+    merge_sha: str,
+    *,
+    command: str = "/bin/true",
+    timeout: str = "5m",
+) -> tuple[dict[str, str], pathlib.Path]:
+    delivery_dir = repository / "delivery-evidence"
+    delivery_dir.mkdir(exist_ok=True)
+    deploy_log = delivery_dir / "deploy.log"
+    verify_log = delivery_dir / "verify.log"
+    stdout = delivery_dir / "deploy.stdout.log"
+    stderr = delivery_dir / "deploy.stderr.log"
+    stdout.write_text("", encoding="utf-8")
+    stderr.write_text("", encoding="utf-8")
+    verify_log.write_text("verified\n", encoding="utf-8")
+    label = "sha256:" + hashlib.sha256(command.encode()).hexdigest()
+    deploy_log.write_text(
+        "\n".join(
+            (
+                "schema=complete-delivery.deploy.v1",
+                f"command_label={label}",
+                f"timeout={timeout}",
+                "outcome=passed",
+                "child_status=0",
+                "wrapper_status=0",
+                f"merge_sha={merge_sha}",
+                f"stdout_path={stdout}",
+                f"stderr_path={stderr}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    return (
+        {
+            "delivery.deployed_sha": merge_sha,
+            "delivery.deploy_status": "verified",
+            "delivery.deploy_evidence_path": str(deploy_log),
+            "delivery.verify_evidence_path": str(verify_log),
+            "delivery.deploy_command_label": label,
+            "delivery.deploy_timeout": timeout,
+            "delivery.deploy_outcome": "passed",
+            "delivery.deploy_child_status": "0",
+            "delivery.deploy_wrapper_status": "0",
+            "delivery.deploy_merge_sha": merge_sha,
+            "delivery.deploy_stdout_path": str(stdout),
+            "delivery.deploy_stderr_path": str(stderr),
+            "gc.var.deploy_mode": "command",
+            "gc.var.deploy_command": command,
+            "gc.var.deploy_timeout": timeout,
+        },
+        verify_log,
+    )
+
+
 class PreflightTests(unittest.TestCase):
     def metadata(self, **overrides: str) -> dict[str, str]:
         values = {
@@ -312,6 +368,34 @@ class PreflightTests(unittest.TestCase):
                     invalid.stderr,
                 )
 
+    def test_ci_deploy_requires_exact_workflow_and_environment(self) -> None:
+        values = self.metadata(
+            **{
+                "gc.var.deploy_mode": "ci",
+                "gc.var.deploy_command": "",
+                "gc.var.deploy_ci_workflow": ".github/workflows/deploy.yml",
+                "gc.var.deploy_environment": "production",
+            }
+        )
+        valid = self.run_preflight(values)
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+
+        for key, value in (
+            ("gc.var.deploy_ci_workflow", ""),
+            ("gc.var.deploy_ci_workflow", ".github/workflows/../deploy.yml"),
+            ("gc.var.deploy_ci_workflow", "deploy.yml"),
+            ("gc.var.deploy_environment", ""),
+            ("gc.var.deploy_environment", " production "),
+            ("gc.var.deploy_environment", "production\nforged"),
+        ):
+            with self.subTest(key=key, value=repr(value)):
+                invalid = self.run_preflight({**values, key: value})
+                self.assertEqual(invalid.returncode, 1)
+                self.assertIn(
+                    "deploy_mode=ci requires a .github/workflows/*.yml deploy_ci_workflow and nonblank deploy_environment",
+                    invalid.stderr,
+                )
+
     def test_unsafe_production_url_fails(self) -> None:
         result = self.run_preflight(
             self.metadata(**{"gc.var.production_url": "javascript:alert(1)"})
@@ -384,7 +468,7 @@ class PreflightTests(unittest.TestCase):
                 root = pathlib.Path(directory)
                 repository = root / "repo"
                 repository.mkdir()
-                evidence = root / "evidence.txt"
+                evidence = repository / "evidence.txt"
                 evidence.write_text("verified\n", encoding="utf-8")
                 command_marker = root / "command-ran"
                 metadata = {
@@ -472,6 +556,35 @@ class PreflightTests(unittest.TestCase):
             result = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
             self.assertEqual(result.returncode, 0, result.stderr)
 
+            outside_evidence = root / "outside-deploy.log"
+            outside_evidence.write_text("foreign evidence\n", encoding="utf-8")
+            linked_evidence = repository / "linked-deploy.log"
+            linked_evidence.symlink_to(outside_evidence)
+            for escaped_path in (
+                "../outside-deploy.log",
+                "nested/../../outside-deploy.log",
+                str(outside_evidence),
+                str(linked_evidence),
+            ):
+                with self.subTest(escaped_evidence=escaped_path):
+                    environment["FAKE_GC_JSON"] = json.dumps(
+                        [{"metadata": {
+                            **base_metadata,
+                            "delivery.deploy_evidence_path": escaped_path,
+                        }}]
+                    )
+                    escaped = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(escaped.returncode, 1)
+                    self.assertIn(
+                        "must resolve within the canonical delivery work directory",
+                        escaped.stderr,
+                    )
+
             for reason in ("", " \t "):
                 with self.subTest(deploy_not_applicable_reason=repr(reason)):
                     environment["FAKE_GC_JSON"] = json.dumps(
@@ -537,8 +650,8 @@ class PreflightTests(unittest.TestCase):
             root = pathlib.Path(directory)
             repository = root / "repo"
             repository.mkdir()
-            evidence = root / "evidence.txt"
-            evidence.write_text("verified\n", encoding="utf-8")
+            merge_sha = "a" * 40
+            deploy_metadata, evidence = command_deploy_fixture(repository, merge_sha)
             bin_dir = root / "bin"
             bin_dir.mkdir()
             gc = bin_dir / "gc"
@@ -546,14 +659,10 @@ class PreflightTests(unittest.TestCase):
             gc.chmod(0o755)
             base_metadata = {
                 "gc.step_ref": "complete-delivery.verify-production",
-                "delivery.merge_sha": "a" * 40,
-                "delivery.deployed_sha": "a" * 40,
-                "delivery.deploy_status": "verified",
-                "delivery.deploy_evidence_path": str(evidence),
-                "delivery.verify_evidence_path": str(evidence),
+                "delivery.merge_sha": merge_sha,
+                **deploy_metadata,
                 "delivery.repo": "example/repo",
                 "delivery.pr_number": "123",
-                "gc.var.deploy_mode": "ci",
                 "gc.var.allow_no_smoke": "true",
                 "gc.var.no_smoke_reason": "No production endpoint is exposed",
                 "delivery.no_smoke_reason": "No production endpoint is exposed",
@@ -566,6 +675,36 @@ class PreflightTests(unittest.TestCase):
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                 }
             )
+            outside_verify = root / "outside-verify.log"
+            outside_verify.write_text("foreign verification\n", encoding="utf-8")
+            linked_verify = repository / "linked-verify.log"
+            linked_verify.symlink_to(outside_verify)
+            for escaped_path in (
+                "../outside-verify.log",
+                "nested/../../outside-verify.log",
+                str(outside_verify),
+                str(linked_verify),
+            ):
+                with self.subTest(escaped_verify_evidence=escaped_path):
+                    environment["FAKE_GC_JSON"] = json.dumps(
+                        [{"metadata": {
+                            **base_metadata,
+                            "delivery.verify_evidence_path": escaped_path,
+                            "gc.var.deploy_verify_command": "/bin/true",
+                        }}]
+                    )
+                    escaped = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(escaped.returncode, 1)
+                    self.assertIn(
+                        "must resolve within the canonical delivery work directory",
+                        escaped.stderr,
+                    )
+
             environment["FAKE_GC_JSON"] = json.dumps([{"metadata": base_metadata}])
             missing = subprocess.run(
                 ["bash", str(RELEASE_VERIFIED_SCRIPT)],
@@ -574,7 +713,7 @@ class PreflightTests(unittest.TestCase):
                 env=environment,
             )
             self.assertEqual(missing.returncode, 1)
-            self.assertIn("deploy_verify_command is required for deploy_mode=ci", missing.stderr)
+            self.assertIn("deploy_verify_command is required for deploy_mode=command", missing.stderr)
 
             environment["FAKE_GC_JSON"] = json.dumps(
                 [
@@ -794,8 +933,8 @@ class PreflightTests(unittest.TestCase):
             root = pathlib.Path(directory)
             repository = root / "repo"
             repository.mkdir()
-            evidence = root / "evidence.txt"
-            evidence.write_text("verified\n", encoding="utf-8")
+            merge_sha = "a" * 40
+            deploy_metadata, evidence = command_deploy_fixture(repository, merge_sha)
             bin_dir = root / "bin"
             bin_dir.mkdir()
             gc = bin_dir / "gc"
@@ -803,14 +942,10 @@ class PreflightTests(unittest.TestCase):
             gc.chmod(0o755)
             base_metadata = {
                 "gc.step_ref": "complete-delivery.verify-production",
-                "delivery.merge_sha": "a" * 40,
-                "delivery.deployed_sha": "a" * 40,
-                "delivery.deploy_status": "verified",
-                "delivery.deploy_evidence_path": str(evidence),
-                "delivery.verify_evidence_path": str(evidence),
+                "delivery.merge_sha": merge_sha,
+                **deploy_metadata,
                 "delivery.repo": "example/repo",
                 "delivery.pr_number": "123",
-                "gc.var.deploy_mode": "ci",
                 "gc.var.allow_no_smoke": "true",
                 "gc.var.no_smoke_reason": "No production endpoint is exposed",
                 "delivery.no_smoke_reason": "No production endpoint is exposed",
@@ -934,6 +1069,63 @@ class PreflightTests(unittest.TestCase):
                 unsupported_mode.stderr,
             )
             self.assertFalse(marker.exists())
+
+            outside_artifacts = root / "outside-artifacts"
+            outside_artifacts.mkdir()
+            linked_artifacts = repository / "linked-artifacts"
+            linked_artifacts.symlink_to(outside_artifacts, target_is_directory=True)
+            for escaped_root in (
+                "../outside-artifacts",
+                "nested/../../outside-artifacts",
+                str(outside_artifacts),
+                str(linked_artifacts),
+            ):
+                with self.subTest(escaped_artifact_root=escaped_root):
+                    environment["FAKE_GC_ROOT_JSON"] = json.dumps(
+                        [{"metadata": {
+                            **base_metadata,
+                            "gc.var.artifact_root": escaped_root,
+                            "gc.var.deploy_command": "/bin/true",
+                        }}]
+                    )
+                    escaped = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(escaped.returncode, 1)
+                    self.assertIn(
+                        "must resolve within the canonical delivery work directory",
+                        escaped.stderr,
+                    )
+                    self.assertFalse(marker.exists())
+
+            linked_delivery_root = repository / "artifacts-with-linked-delivery"
+            linked_delivery_root.mkdir()
+            (linked_delivery_root / "delivery").symlink_to(
+                outside_artifacts, target_is_directory=True
+            )
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps(
+                [{"metadata": {
+                    **base_metadata,
+                    "gc.var.artifact_root": "artifacts-with-linked-delivery",
+                    "gc.var.deploy_command": "/bin/true",
+                }}]
+            )
+            escaped_delivery_dir = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(escaped_delivery_dir.returncode, 1)
+            self.assertIn(
+                "deployment evidence directory must resolve within the canonical delivery work directory",
+                escaped_delivery_dir.stderr,
+            )
+            self.assertFalse(marker.exists())
+
             environment["FAKE_GC_ROOT_JSON"] = json.dumps(
                 [{"metadata": {**base_metadata, "gc.var.deploy_command": "/bin/true"}}]
             )
@@ -1070,6 +1262,226 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(forged.returncode, 1)
             self.assertIn("deploy evidence is forged, stale, or incomplete", forged.stderr)
+
+    def test_ci_deploy_is_github_attested_and_revalidated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            updates = root / "updates.log"
+            gc = bin_dir / "gc"
+            gc.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = bd ] && [ \"${2:-}\" = update ]; then\n"
+                "  printf '%s\\n' \"$*\" >> \"$FAKE_GC_UPDATES\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"${3:-}\" = root-1 ]; then\n"
+                "  printf '%s\\n' \"$FAKE_GC_ROOT_JSON\"\n"
+                "else\n"
+                "  printf '%s\\n' \"$FAKE_GC_STEP_JSON\"\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                "endpoint=\n"
+                "for argument in \"$@\"; do\n"
+                "  case \"$argument\" in repos/*) endpoint=$argument ;; esac\n"
+                "done\n"
+                "case \"$endpoint\" in\n"
+                "  repos/example/repo/actions/runs/456) printf '%s\\n' \"$FAKE_RUN_JSON\" ;;\n"
+                "  repos/example/repo/pulls/123) printf '%s\\n' \"$FAKE_PR_JSON\" ;;\n"
+                "  repos/example/repo/deployments) printf '%s\\n' \"$FAKE_DEPLOYMENTS_JSON\" ;;\n"
+                "  repos/example/repo/deployments/789/statuses*) printf '%s\\n' \"$FAKE_STATUSES_JSON\" ;;\n"
+                "  *) printf 'unexpected endpoint: %s\\n' \"$endpoint\" >&2; exit 1 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+
+            merge_sha = "a" * 40
+            workflow = ".github/workflows/deploy.yml"
+            run = {
+                "id": 456,
+                "repository": {"full_name": "example/repo"},
+                "head_sha": merge_sha,
+                "head_branch": "main",
+                "path": workflow,
+                "status": "completed",
+                "conclusion": "success",
+                "workflow_id": 99,
+                "html_url": "https://github.com/example/repo/actions/runs/456",
+                "created_at": "2026-08-02T10:01:00Z",
+            }
+            pull = {
+                "number": 123,
+                "base": {"ref": "main", "repo": {"full_name": "example/repo"}},
+                "merge_commit_sha": merge_sha,
+                "merged_at": "2026-08-02T10:00:00Z",
+            }
+            deployments = [{
+                "id": 789,
+                "sha": merge_sha,
+                "environment": "production",
+                "created_at": "2026-08-02T10:02:00Z",
+            }]
+            statuses = [{
+                "id": 790,
+                "state": "success",
+                "environment": "production",
+                "log_url": "https://github.com/example/repo/actions/runs/456",
+                "created_at": "2026-08-02T10:03:00Z",
+            }]
+            base_metadata = {
+                "delivery.merge_sha": merge_sha,
+                "delivery.repo": "example/repo",
+                "delivery.pr_number": "123",
+                "delivery.deploy_run_id": "456",
+                "gc.var.artifact_root": "artifacts",
+                "gc.var.base_branch": "main",
+                "gc.var.deploy_mode": "ci",
+                "gc.var.deploy_ci_workflow": workflow,
+                "gc.var.deploy_environment": "production",
+            }
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GC_BEAD_ID": "deploy-step",
+                    "GC_WORK_DIR": str(repository),
+                    "FAKE_GC_UPDATES": str(updates),
+                    "FAKE_GC_STEP_JSON": json.dumps(
+                        [{"metadata": {
+                            "gc.root_bead_id": "root-1",
+                            "gc.step_ref": "complete-delivery.deploy",
+                        }}]
+                    ),
+                    "FAKE_GC_ROOT_JSON": json.dumps([{"metadata": base_metadata}]),
+                    "FAKE_RUN_JSON": json.dumps(run),
+                    "FAKE_PR_JSON": json.dumps(pull),
+                    "FAKE_DEPLOYMENTS_JSON": json.dumps(deployments),
+                    "FAKE_STATUSES_JSON": json.dumps(statuses),
+                    "PATH": f"{bin_dir}:{environment['PATH']}",
+                }
+            )
+
+            deployed = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(deployed.returncode, 0, deployed.stdout + deployed.stderr)
+            deploy_log = repository / "artifacts" / "delivery" / "deploy.log"
+            recorded = deploy_log.read_text(encoding="utf-8")
+            self.assertIn("schema=complete-delivery.ci-deploy.v1", recorded)
+            self.assertIn(f"merge_sha={merge_sha}", recorded)
+            self.assertIn("workflow_id=99", recorded)
+            self.assertIn("run_id=456", recorded)
+            self.assertIn("run_conclusion=success", recorded)
+            self.assertIn("environment=production", recorded)
+            self.assertIn("deployment_status=success", recorded)
+            self.assertIn(
+                "deployment_log_url=https://github.com/example/repo/actions/runs/456",
+                recorded,
+            )
+            update_record = updates.read_text(encoding="utf-8")
+            self.assertIn("delivery.deploy_status=deployed", update_record)
+            self.assertIn("delivery.deploy_run_url=https://github.com/example/repo/actions/runs/456", update_record)
+
+            verify_log = repository / "artifacts" / "delivery" / "verify.log"
+            verify_log.write_text("verification evidence\n", encoding="utf-8")
+            verified_metadata = {
+                **base_metadata,
+                "delivery.deployed_sha": merge_sha,
+                "delivery.deploy_status": "verified",
+                "delivery.deploy_evidence_path": str(deploy_log),
+                "delivery.verify_evidence_path": str(verify_log),
+                "delivery.deploy_run_url": run["html_url"],
+                "delivery.deploy_workflow_id": "99",
+                "delivery.deploy_workflow": workflow,
+                "delivery.deploy_environment": "production",
+                "delivery.deploy_merge_sha": merge_sha,
+                "delivery.deploy_conclusion": "success",
+                "delivery.deploy_deployment_id": "789",
+                "delivery.deploy_deployment_status_id": "790",
+                "gc.var.deploy_verify_command": "/bin/true",
+                "gc.var.allow_no_smoke": "true",
+                "gc.var.no_smoke_reason": "No production endpoint is exposed",
+                "delivery.no_smoke_reason": "No production endpoint is exposed",
+            }
+            environment["GC_BEAD_ID"] = "verify-step"
+            environment["FAKE_GC_STEP_JSON"] = json.dumps(
+                [{"metadata": {
+                    "gc.root_bead_id": "root-1",
+                    "gc.step_ref": "complete-delivery.verify-production",
+                }}]
+            )
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps(
+                [{"metadata": verified_metadata}]
+            )
+            verified = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+
+            deploy_log.write_text("arbitrary nonempty evidence\n", encoding="utf-8")
+            forged = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(forged.returncode, 1)
+            self.assertIn("CI deployment evidence is forged, stale, or incomplete", forged.stderr)
+            deploy_log.write_text(recorded, encoding="utf-8")
+
+            environment["GC_BEAD_ID"] = "deploy-step"
+            environment["FAKE_GC_STEP_JSON"] = json.dumps(
+                [{"metadata": {
+                    "gc.root_bead_id": "root-1",
+                    "gc.step_ref": "complete-delivery.deploy",
+                }}]
+            )
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": base_metadata}])
+            for name, run_mutation in (
+                ("wrong sha", {"head_sha": "b" * 40}),
+                ("failed run", {"conclusion": "failure"}),
+                ("stale run", {"created_at": "2026-08-02T09:59:00Z"}),
+            ):
+                with self.subTest(name=name):
+                    environment["FAKE_RUN_JSON"] = json.dumps({**run, **run_mutation})
+                    rejected = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(rejected.returncode, 1)
+                    self.assertIn(
+                        "GitHub CI deployment run is failed, stale, or does not bind",
+                        rejected.stderr,
+                    )
+            environment["FAKE_RUN_JSON"] = json.dumps(run)
+
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps(
+                [{"metadata": {**base_metadata, "gc.var.deploy_environment": ""}}]
+            )
+            missing_environment = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(missing_environment.returncode, 1)
+            self.assertIn("deploy_environment", missing_environment.stderr)
 
     def test_pr_open_validates_full_recorded_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1209,12 +1621,17 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("deploy_timeout", deploy)
         self.assertIn("timeout --kill-after=5s", deploy)
         self.assertIn("DELIVERY_SHA", deploy)
+        self.assertIn("delivery.deploy_run_id", deploy)
+        self.assertIn("deploy_ci_workflow", deploy)
+        self.assertIn("deploy_environment", deploy)
         self.assertEqual(
             steps["deploy"]["check"]["check"]["path"],
             ".gc/scripts/checks/delivery-release-verified.sh",
         )
 
         self.assertEqual(formula["vars"]["deploy_timeout"]["default"], "5m")
+        self.assertEqual(formula["vars"]["deploy_ci_workflow"]["default"], "")
+        self.assertEqual(formula["vars"]["deploy_environment"]["default"], "")
 
         merge = (WORKFLOW_ROOT / "merge.md").read_text(encoding="utf-8")
         self.assertIn("DELIVERY_PR_URL", merge)
@@ -1364,11 +1781,45 @@ class SourceArtifactTests(unittest.TestCase):
         source_json: object | None = None,
         source_title: str = "Requested delivery",
         upstream_overrides: dict[str, str | None] | None = None,
+        artifact_path_variant: str = "contained",
+        upstream_path_variant: tuple[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            artifact = root / f"{artifact_kind}.md"
-            artifact.write_text(artifact_text, encoding="utf-8")
+            work_dir = root / "work"
+            work_dir.mkdir()
+
+            def write_artifact(
+                kind: str, text: str, variant: str
+            ) -> tuple[pathlib.Path, str]:
+                if variant == "contained":
+                    path = work_dir / f"{kind}.md"
+                    value = str(path)
+                elif variant == "parent":
+                    path = root / f"outside-{kind}.md"
+                    value = f"../outside-{kind}.md"
+                elif variant == "nested-parent":
+                    (work_dir / "nested").mkdir(exist_ok=True)
+                    path = root / f"outside-{kind}.md"
+                    value = f"nested/../../outside-{kind}.md"
+                elif variant == "absolute-outside":
+                    path = root / f"outside-{kind}.md"
+                    value = str(path)
+                elif variant == "symlink":
+                    outside_dir = root / f"outside-{kind}"
+                    outside_dir.mkdir()
+                    path = outside_dir / f"{kind}.md"
+                    link = work_dir / f"linked-{kind}"
+                    link.symlink_to(outside_dir, target_is_directory=True)
+                    value = f"linked-{kind}/{kind}.md"
+                else:
+                    raise AssertionError(f"unknown artifact path variant: {variant}")
+                path.write_text(text, encoding="utf-8")
+                return path, value
+
+            artifact, artifact_path_value = write_artifact(
+                artifact_kind, artifact_text, artifact_path_variant
+            )
             bin_dir = root / "bin"
             bin_dir.mkdir()
             gc = bin_dir / "gc"
@@ -1401,7 +1852,7 @@ class SourceArtifactTests(unittest.TestCase):
                 "gc.build.artifact_path_keys": artifact_path_key,
             }}]
             root_metadata = {
-                artifact_path_key: str(artifact),
+                artifact_path_key: artifact_path_value,
                 "gc.var.source_bead_id": "fi-123",
                 "gc.var.source_title": source_title,
                 **(
@@ -1422,10 +1873,17 @@ class SourceArtifactTests(unittest.TestCase):
                     )
                     if upstream_text is None:
                         continue
-                    upstream_path = root / f"{upstream_kind}.md"
-                    upstream_path.write_text(upstream_text, encoding="utf-8")
-                    root_metadata[f"gc.build.{upstream_kind}_path"] = str(
-                        upstream_path
+                    upstream_variant = (
+                        upstream_path_variant[1]
+                        if upstream_path_variant
+                        and upstream_path_variant[0] == upstream_kind
+                        else "contained"
+                    )
+                    _, upstream_path_value = write_artifact(
+                        upstream_kind, upstream_text, upstream_variant
+                    )
+                    root_metadata[f"gc.build.{upstream_kind}_path"] = (
+                        upstream_path_value
                     )
             workflow_root = [{"id": "root-1", "metadata": root_metadata}]
             source = (
@@ -1440,7 +1898,7 @@ class SourceArtifactTests(unittest.TestCase):
             environment = os.environ.copy()
             environment.update({
                 "GC_BEAD_ID": "step-1",
-                "GC_WORK_DIR": str(REPOSITORY_ROOT),
+                "GC_WORK_DIR": str(work_dir),
                 "FAKE_STEP_JSON": json.dumps(step),
                 "FAKE_ROOT_JSON": json.dumps(workflow_root),
                 "FAKE_SOURCE_JSON": json.dumps(source),
@@ -1477,6 +1935,31 @@ class SourceArtifactTests(unittest.TestCase):
                 result = self.run_check(artifact)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
+
+    def test_source_and_upstream_artifacts_cannot_escape_work_directory(self) -> None:
+        for variant in ("parent", "nested-parent", "absolute-outside", "symlink"):
+            with self.subTest(source_artifact=variant):
+                result = self.run_check(
+                    self.artifact(), artifact_path_variant=variant
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "must resolve within the canonical delivery work directory",
+                    result.stderr,
+                )
+
+        for variant in ("parent", "nested-parent", "absolute-outside", "symlink"):
+            with self.subTest(upstream_artifact=variant):
+                result = self.run_check(
+                    self.artifact(artifact_kind="final-report"),
+                    artifact_kind="final-report",
+                    upstream_path_variant=("plan", variant),
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "must resolve within the canonical delivery work directory",
+                    result.stderr,
+                )
 
     def test_source_artifact_requires_pyyaml_at_runtime(self) -> None:
         result = self.run_check(self.artifact(), missing_pyyaml=True)

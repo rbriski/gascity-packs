@@ -67,6 +67,24 @@ raise SystemExit(0 if parsed.scheme == "https" and hostname and not any(char.iss
 PY
 }
 
+delivery_ci_profile_is_valid() {
+  python3 - "$1" "$2" <<'PY'
+import re
+import sys
+
+workflow, environment = sys.argv[1:]
+valid = (
+    re.fullmatch(r"\.github/workflows/[A-Za-z0-9_./-]+\.ya?ml", workflow)
+    and ".." not in workflow.split("/")
+    and environment.strip() == environment
+    and environment
+    and len(environment) <= 255
+    and not any(character in environment for character in "\r\n\t")
+)
+raise SystemExit(0 if valid else 1)
+PY
+}
+
 PUSH="$(delivery_var push true)"
 OPEN_PR="$(delivery_var open_pr true)"
 ALLOW_NO_CI="$(delivery_var allow_no_ci false)"
@@ -78,6 +96,8 @@ REQUIRED_CHECKS="$(delivery_var required_checks auto)"
 MERGE_METHOD="$(delivery_var merge_method squash)"
 DEPLOY_MODE="$(delivery_var deploy_mode command)"
 DEPLOY_COMMAND="$(delivery_var deploy_command '')"
+DEPLOY_CI_WORKFLOW="$(delivery_var deploy_ci_workflow '')"
+DEPLOY_ENVIRONMENT="$(delivery_var deploy_environment '')"
 VERIFY_COMMAND="$(delivery_var deploy_verify_command '')"
 SMOKE_COMMAND="$(delivery_var smoke_command '')"
 DEPLOY_TIMEOUT="$(delivery_var deploy_timeout 5m)"
@@ -165,6 +185,8 @@ case "$DEPLOY_MODE" in
     delivery_command_is_nonblank "$VERIFY_COMMAND" || errors+=("deploy_verify_command is required for deploy_mode=command")
     ;;
   ci)
+    delivery_ci_profile_is_valid "$DEPLOY_CI_WORKFLOW" "$DEPLOY_ENVIRONMENT" || \
+      errors+=("deploy_mode=ci requires a .github/workflows/*.yml deploy_ci_workflow and nonblank deploy_environment")
     delivery_command_is_nonblank "$VERIFY_COMMAND" || errors+=("deploy_verify_command is required for deploy_mode=ci")
     ;;
   not-applicable)
