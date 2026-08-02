@@ -226,7 +226,8 @@ class PrGateContractTests(unittest.TestCase):
             self.assertTrue(all(term in normalized for term in ("shared repository-scoped", "resolveReviewThread")))
             self.assertTrue("between that final check and all" in normalized or "after that final head check and before all" in normalized)
         self.assertTrue(all(term in resolve_findings for term in ("replace the entire handoff object", "only blocker state")))
-        self.assertTrue(all(term in rerun_local_gates for term in ("candidate_commit", "tested_commit", "final committed `HEAD`", "individual thread `fix_commit`", "at most three complete regression-repair-and-rerun", "blocker-only retry-exhausted evidence", "non-pass outcome")))
+        self.assertTrue(all(term in content for content in (prompt, rerun_local_gates) for term in ("at most three complete regression-repair-and-rerun", "fourth repair", "replace the entire handoff", "blocker-only retry-exhausted evidence", "no authority fields", "close with a non-pass outcome")))
+        self.assertTrue(all(term in rerun_local_gates for term in ("candidate_commit", "tested_commit", "final committed `HEAD`", "individual thread `fix_commit`", "full local-gate sequence passes")))
         for content in (prompt, publish_fixes):
             self.assert_prose_contains(content, "no empty commit/push")
             self.assertIn("published_head_matches_tested_commit", content)
@@ -443,14 +444,14 @@ class PrGateContractTests(unittest.TestCase):
     def test_local_gates_reject_interpreter_inline_program_forms_before_execution(self) -> None:
         forms = (
             "node -e", "node --eval=", "node -p", "node --print=", "node --require node:path -p", "node -pe",
-            "python3 -c", "python3 -X dev -c", "python3 -Ic", "perl -e", "perl -E", "perl -we", "perl -pe", "perl -0 -e", "perl -C -e", "ruby -e", "ruby -we",
+            "python2 -c", "python3 -c", "python3 -X dev -c", "python3 -Ic", "pypy3 -c", "perl -e", "perl -E", "perl -we", "perl -pe", "perl -0 -e", "perl -C -e", "ruby -e", "ruby -we",
             "awk -e", "awk --source=", "awk", "awk --",
         )
         for form in forms:
             with self.subTest(form=form), tempfile.TemporaryDirectory() as directory:
                 marker = pathlib.Path(directory) / "inline-ran"
                 source = {
-                    "python3 -Ic": f"__import__('pathlib').Path({str(marker)!r}).touch()",
+                    "python2 -c": f"__import__('pathlib').Path({str(marker)!r}).touch()", "python3 -Ic": f"__import__('pathlib').Path({str(marker)!r}).touch()", "pypy3 -c": f"__import__('pathlib').Path({str(marker)!r}).touch()",
                     "ruby -we": f"File.write({str(marker)!r}, '')",
                     "node -pe": f"require('fs').writeFileSync({str(marker)!r}, '')",
                 }.get(form, f"touch {marker}")

@@ -150,7 +150,7 @@ def inline_program_present(executable: str, options: list[str]) -> bool:
     if executable in {"node", "nodejs"}:
         flags = ("-e", "-p", "--eval", "--print")
         option_operands = ("-r", "--require", "--import")
-    elif executable == "python" or executable.startswith("python3"):
+    elif executable.startswith(("python", "pypy")):
         flags = ("-c",)
         option_operands = ("-X", "-W")
     elif executable.startswith("perl"):
@@ -209,7 +209,7 @@ def inline_program_present(executable: str, options: list[str]) -> bool:
         elif awk and not selected and not argument.startswith("-"):
             # awk's first positional argument is its program unless -f/-E selected a file.
             return True
-        elif executable == "python" or executable.startswith("python3"):
+        elif executable.startswith(("python", "pypy")):
             if argument == "-m" or argument.startswith("-m"):
                 selected = True
                 if argument == "-m":
