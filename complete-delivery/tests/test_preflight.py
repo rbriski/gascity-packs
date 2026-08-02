@@ -189,6 +189,29 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("deploy_command is required", result.stderr)
         self.assertIn("deploy_verify_command is required", result.stderr)
 
+    def test_timeouts_must_be_positive_finite_and_at_most_one_hour(self) -> None:
+        for key in ("gc.var.deploy_verify_timeout", "gc.var.smoke_timeout"):
+            for value in ("0", "0s", "inf", "infinity", "-1s", "5x", "--foreground", "3601s", "2h"):
+                with self.subTest(key=key, value=value):
+                    result = self.run_preflight(self.metadata(**{key: value}))
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn(
+                        f"{key.removeprefix('gc.var.')} must be a positive finite duration no greater than 1h",
+                        result.stderr,
+                    )
+
+        for value in ("0.01s", "5m", "1h", ".5h"):
+            with self.subTest(value=value):
+                result = self.run_preflight(
+                    self.metadata(
+                        **{
+                            "gc.var.deploy_verify_timeout": value,
+                            "gc.var.smoke_timeout": value,
+                        }
+                    )
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_not_applicable_requires_reason_but_not_smoke(self) -> None:
         values = self.metadata(
             **{
@@ -413,6 +436,31 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(timed_out.returncode, 1)
             self.assertIn("deploy_verify_command failed or timed out", timed_out.stderr)
+
+            for timeout_value in ("0", "0s", "inf", "infinity", "--foreground"):
+                with self.subTest(timeout_value=timeout_value):
+                    environment["FAKE_GC_JSON"] = json.dumps(
+                        [
+                            {
+                                "metadata": {
+                                    **base_metadata,
+                                    "gc.var.deploy_verify_command": "/bin/true",
+                                    "gc.var.deploy_verify_timeout": timeout_value,
+                                }
+                            }
+                        ]
+                    )
+                    invalid = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(invalid.returncode, 1)
+                    self.assertIn(
+                        "deploy_verify_timeout must be a positive finite duration no greater than 1h",
+                        invalid.stderr,
+                    )
 
     def test_pr_open_validates_full_recorded_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

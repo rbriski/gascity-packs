@@ -121,7 +121,7 @@ description = "Command that proves the deployment completed for DELIVERY_SHA."
 default = ""
 
 [vars.deploy_verify_timeout]
-description = "Explicit timeout for deploy_verify_command."
+description = "Positive finite timeout for deploy_verify_command, no greater than one hour."
 default = "5m"
 
 [vars.smoke_command]
@@ -129,7 +129,7 @@ description = "Production smoke or health command, run with DELIVERY_SHA exporte
 default = ""
 
 [vars.smoke_timeout]
-description = "Explicit timeout for smoke_command."
+description = "Positive finite timeout for smoke_command, no greater than one hour."
 default = "5m"
 
 [vars.allow_no_smoke]

@@ -140,8 +140,13 @@ case "$DEPLOY_MODE" in
     [ -n "$NA_REASON" ] || errors+=("deploy_not_applicable_reason is required for deploy_mode=not-applicable")
     ;;
 esac
-[ -n "$VERIFY_TIMEOUT" ] || errors+=("deploy_verify_timeout is required")
-[ -n "$SMOKE_TIMEOUT" ] || errors+=("smoke_timeout is required")
+if [ "$DEPLOY_MODE" != "not-applicable" ]; then
+  command -v timeout >/dev/null 2>&1 || errors+=("timeout is required on PATH for deployment verification")
+  delivery_timeout_is_bounded "$VERIFY_TIMEOUT" || \
+    errors+=("deploy_verify_timeout must be a positive finite duration no greater than 1h")
+  delivery_timeout_is_bounded "$SMOKE_TIMEOUT" || \
+    errors+=("smoke_timeout must be a positive finite duration no greater than 1h")
+fi
 if [ "$DEPLOY_MODE" != "not-applicable" ] && [ -z "$SMOKE_COMMAND" ] && \
   [ "$ALLOW_NO_SMOKE" != "true" ]; then
   errors+=("smoke_command is required unless allow_no_smoke=true")
