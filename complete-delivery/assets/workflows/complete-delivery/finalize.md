@@ -27,9 +27,11 @@ a non-pass outcome; do not write a passing final report or set
 `gc.outcome=pass`. Only after every value resolves may the visible, unfenced
 `## Source trace` section record these exact lines: `Source ID: <source-id>`,
 `Source title: <source-title>`, and `Acceptance criteria SHA-256:
-sha256:<hash>`. In YAML front matter, set `source.id`, `source.title`,
+sha256:<hash>`. Compute the SHA-256 over the exact raw acceptance-criteria
+string before any serialization. In YAML front matter, set `source.id`, `source.title`,
 `source.anchor`, and `source.acceptance_criteria_sha256` to the same resolved
-values. Write each visible value as its exact raw text without Markdown
+values, using safe YAML string serialization (including quoting/escaping every
+string-valued source field). Write each visible value as its exact raw text without Markdown
 backticks or other decoration. The hash is the SHA-256 digest of the exact
 acceptance-criteria string.
 This trace proves the delivered outcome is the requested work rather than a

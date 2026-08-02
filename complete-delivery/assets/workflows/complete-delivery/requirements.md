@@ -19,7 +19,8 @@ unresolved ambiguity in the artifact.
 Write requirements to `{{requirements_path}}` and record that exact path on the
 workflow root as `gc.build.requirements_path`. Include goal, demand evidence,
 current workaround, target user, narrowest wedge, future-fit, constraints,
-acceptance criteria, non-goals, and open questions.
+acceptance criteria, non-goals, and open questions. A requirements artifact is
+usable by later stages only with explicit YAML front-matter `status: approved`.
 In YAML front matter, record `source.id`, `source.title`,
 `source.anchor: gc:<source-id>`, and `source.acceptance_criteria_sha256` using
 the exact durable values resolved above. The hash is `sha256:` plus the SHA-256

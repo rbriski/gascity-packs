@@ -25,7 +25,13 @@ if not root.is_dir():
 raw = Path(candidate_value)
 if not raw.is_absolute() and ".." in raw.parts:
     raise SystemExit(1)
-candidate = raw.resolve(strict=False) if raw.is_absolute() else (root / raw).resolve(strict=False)
+unresolved = raw if raw.is_absolute() else root / raw
+probe = unresolved
+while probe != probe.parent:
+    if probe.is_symlink():
+        raise SystemExit(1)
+    probe = probe.parent
+candidate = unresolved.resolve(strict=False)
 try:
     candidate.relative_to(root)
 except ValueError:
@@ -122,6 +128,9 @@ delivery_run_bounded_command() {
     { rm -rf -- "$status_dir"; delivery_fail "failed to create $name stdout capture"; }
   stderr_path="$(mktemp "$evidence_dir/$name.stderr.log.XXXXXX")" || \
     { rm -f -- "$stdout_path"; rm -rf -- "$status_dir"; delivery_fail "failed to create $name stderr capture"; }
+  trap 'rm -f -- "$stdout_path" "$stderr_path"; rm -rf -- "$status_dir"; exit 129' HUP
+  trap 'rm -f -- "$stdout_path" "$stderr_path"; rm -rf -- "$status_dir"; exit 130' INT
+  trap 'rm -f -- "$stdout_path" "$stderr_path"; rm -rf -- "$status_dir"; exit 143' TERM
 
   # GNU timeout uses 124, 125, and 137 for its own outcomes, but a managed
   # command may legitimately return any of those statuses.  The inner Bash
@@ -163,6 +172,7 @@ delivery_run_bounded_command() {
     "$stdout_path" "$stderr_path" >>"$VERIFY_EVIDENCE" || \
     { rm -f -- "$stdout_path" "$stderr_path"; rm -rf -- "$status_dir"; delivery_fail "failed to record $name verification evidence"; }
   rm -rf -- "$status_dir" || delivery_fail "failed to clean $name status directory"
+  trap - HUP INT TERM
   [ "$status" -eq 0 ]
 }
 
@@ -428,18 +438,19 @@ PY
     delivery_fail "CI deployment requires valid delivery.repo, PR, merge SHA, delivery.deploy_run_id, deploy_ci_workflow, deploy_environment, and base_branch"
   fi
   command -v gh >/dev/null 2>&1 || delivery_fail "gh is required on PATH for deploy_mode=ci"
+  command -v timeout >/dev/null 2>&1 || delivery_fail "timeout is required on PATH for deploy_mode=ci"
 
   api_dir="$(mktemp -d "${TMPDIR:-/tmp}/delivery-ci-api.XXXXXX")" || \
     delivery_fail "failed to create CI deployment API evidence directory"
-  if ! gh api "repos/$ci_repo/actions/runs/$ci_run_id" >"$api_dir/run.json"; then
+  if ! timeout --kill-after=5s 30s gh api "repos/$ci_repo/actions/runs/$ci_run_id" >"$api_dir/run.json"; then
     rm -rf -- "$api_dir"
     delivery_fail "failed to query GitHub Actions run $ci_run_id"
   fi
-  if ! gh api "repos/$ci_repo/pulls/$ci_pr" >"$api_dir/pr.json"; then
+  if ! timeout --kill-after=5s 30s gh api "repos/$ci_repo/pulls/$ci_pr" >"$api_dir/pr.json"; then
     rm -rf -- "$api_dir"
     delivery_fail "failed to query merged PR $ci_pr for CI deployment evidence"
   fi
-  if ! gh api --paginate --slurp -X GET "repos/$ci_repo/deployments" \
+  if ! timeout --kill-after=5s 30s gh api --paginate --slurp -X GET "repos/$ci_repo/deployments" \
     -f "sha=$ci_sha" -f "environment=$ci_environment" -f per_page=100 \
     >"$api_dir/deployments.json"; then
     rm -rf -- "$api_dir"
@@ -567,7 +578,7 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     print(json.load(handle)["deployment"]["id"])
 PY
 )"
-  if ! gh api --paginate --slurp "repos/$ci_repo/deployments/$deployment_id/statuses?per_page=100" \
+  if ! timeout --kill-after=5s 30s gh api --paginate --slurp "repos/$ci_repo/deployments/$deployment_id/statuses?per_page=100" \
     >"$api_dir/statuses.json"; then
     rm -rf -- "$api_dir"
     delivery_fail "failed to query GitHub deployment statuses"

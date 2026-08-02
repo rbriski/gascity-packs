@@ -16,7 +16,10 @@ failure. Write a concise gate summary under `<artifact_root>/delivery/` and
 record it on the workflow root as `delivery.local_gate_summary_path`. A passing
 summary must record `status=passed` and the full final `tested_commit`; confirm
 that the checkout is clean and `HEAD` still equals that commit before recording
-success. Any failed, skipped, unavailable, or head-mismatched gate must clear
+success. Before recording or trusting `delivery.local_gate_summary_path`,
+canonicalize it and require a nonempty regular, non-symlink file contained
+within `<artifact_root>/delivery`. Any failed, skipped, unavailable, or
+head-mismatched gate must clear
 or overwrite passing evidence as failed.
 
 The graph check reruns the commands mechanically. Close with

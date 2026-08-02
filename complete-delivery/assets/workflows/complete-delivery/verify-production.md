@@ -12,16 +12,19 @@ For every real deployment mode (`command` or `ci`), require and run
 its strictly positive, finite configured timeout of no more than one hour. The
 command must consume or independently attest all three identity values and
 prove the deployed revision is that exact SHA. Then run `smoke_command` with
-the same delivery identity, using the Formula's strictly positive, finite
-`smoke_timeout` (no more than one hour) when `allow_no_smoke=false`. When `allow_no_smoke=true`,
+the same delivery identity whenever `smoke_command` is nonblank, using the Formula's
+strictly positive, finite `smoke_timeout` (no more than one hour). `allow_no_smoke=true`
+permits only an omitted smoke command; it never suppresses a nonblank command.
+When `allow_no_smoke=false`, a smoke command is required.
+When `allow_no_smoke=true`,
 require the nonempty `gc.var.no_smoke_reason`, record it on the workflow root
 as `delivery.no_smoke_reason` using an argument-safe metadata update, and
 record its SHA-256 label in verification evidence; it never waives deployment
 verification or exact-SHA attestation. Treat either command timeout as a failed
 verification attempt, record it in the verification evidence, and leave the
 workflow blocked.
-Capture full evidence at
-`<artifact_root>/delivery/verify.log`. The verification path must prove the
+Capture the structured summary at `<artifact_root>/delivery/verify.log`, with
+its recorded sibling stdout/stderr capture paths. The verification path must prove the
 deployed revision is the merge SHA. When the service cannot expose its
 revision, require provider metadata or another independently verifiable
 artifact that binds the deployed target exactly to `delivery.merge_sha`; fail

@@ -30,8 +30,8 @@ recorded `delivery.pr_url`, `delivery.repo`, `delivery.pr_number`,
 `delivery.head_sha`, and configured `gc.var.base_branch` against a fresh
 `gh api repos/<repo>/pulls/<number>` response. Require the response number and
 URL to equal the recorded identity, its base repository and `base.ref` to equal
-the configured repository and base branch, and its head SHA to equal the
-recorded exact head. Require `merged` to be a JSON Boolean. If it is `true`,
+the configured repository and base branch. Require `merged` to be a JSON
+Boolean. If it is `true`,
 require a nonempty full merge SHA, verify that SHA is reachable from the
 configured base branch (for example with `gh api repos/<repo>/compare/<merge-sha>...<base-branch>` and only `identical` or `ahead`), then persist that exact SHA as
 `delivery.merge_sha` before continuing. This recovery is idempotent: the same
@@ -40,7 +40,10 @@ GitHub `merged_at` value and reconciliation result in the normal merge evidence
 under `<artifact_root>/delivery/`, then close with `gc.outcome=pass`.
 
 Only invoke `gh pr merge` when that fresh response has `state=open`,
-`merged=false`, and the exact recorded head SHA. Any other state is a
+`merged=false`, and the exact recorded head SHA. For that open, unmerged state,
+require the fresh head SHA to equal `delivery.head_sha`; an already-merged
+recovery validates its durable identity, base, Boolean, merge SHA, and
+reachability without requiring a mutable current head. Any other state is a
 non-pass reconciliation outcome; do not send it through the open-PR gate as if
 it were still mergeable.
 

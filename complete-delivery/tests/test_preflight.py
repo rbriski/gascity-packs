@@ -993,6 +993,8 @@ class PreflightTests(unittest.TestCase):
                 "delivery.repo": "example/repo",
                 "delivery.pr_number": "123",
                 "delivery.merge_sha": "a" * 40,
+                "delivery.head_sha": "b" * 40,
+                "delivery.pr_url": "https://github.com/example/repo/pull/123",
                 "gc.var.base_branch": "main",
             }
             environment = os.environ.copy()
@@ -1001,9 +1003,15 @@ class PreflightTests(unittest.TestCase):
                     "GC_BEAD_ID": "step-1",
                     "GC_WORK_DIR": str(root),
                     "FAKE_GC_JSON": json.dumps([{"metadata": metadata}]),
-                    "FAKE_PR_JSON": json.dumps(
-                        {"merged": True, "merge_commit_sha": "a" * 40, "base": {"ref": "release"}}
-                    ),
+                    "FAKE_PR_JSON": json.dumps({
+                        "merged": True,
+                        "state": "closed",
+                        "merged_at": "2026-08-02T10:00:00Z",
+                        "merge_commit_sha": "a" * 40,
+                        "head": {"sha": "b" * 40},
+                        "base": {"ref": "release"},
+                        "html_url": "https://github.com/example/repo/pull/123",
+                    }),
                     "FAKE_COMPARE_STATUS": "ahead",
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                 }
@@ -1014,24 +1022,35 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(mismatched.returncode, 1)
             self.assertIn("does not match configured base_branch main", mismatched.stderr)
 
-            environment["FAKE_PR_JSON"] = json.dumps(
-                {"merged": True, "merge_commit_sha": "a" * 40, "base": {"ref": "main"}}
-            )
+            valid_pr = {
+                "merged": True,
+                "state": "closed",
+                "merged_at": "2026-08-02T10:00:00Z",
+                "merge_commit_sha": "a" * 40,
+                "head": {"sha": "b" * 40},
+                "base": {"ref": "main"},
+                "html_url": "https://github.com/example/repo/pull/123",
+            }
+            environment["FAKE_PR_JSON"] = json.dumps(valid_pr)
             verified = subprocess.run(
                 ["bash", str(MERGED_SCRIPT)], capture_output=True, text=True, env=environment
             )
             self.assertEqual(verified.returncode, 0, verified.stderr)
             self.assertIn("-> main", verified.stdout)
 
-            for merged in (None, "false", "true", 0, 1):
-                with self.subTest(merged=repr(merged)):
-                    environment["FAKE_PR_JSON"] = json.dumps(
-                        {
-                            "merged": merged,
-                            "merge_commit_sha": "a" * 40,
-                            "base": {"ref": "main"},
-                        }
-                    )
+            for mutation, message in (
+                ({"merged": None}, "boolean merged field"),
+                ({"merged": "false"}, "boolean merged field"),
+                ({"merged": "true"}, "boolean merged field"),
+                ({"merged": 0}, "boolean merged field"),
+                ({"merged": 1}, "boolean merged field"),
+                ({"state": "open"}, "is not closed"),
+                ({"merged_at": ""}, "no merged_at timestamp"),
+                ({"head": {"sha": "c" * 40}}, "does not match GitHub head"),
+                ({"html_url": "https://github.com/example/repo/pull/999"}, "does not match recorded URL"),
+            ):
+                with self.subTest(mutation=mutation):
+                    environment["FAKE_PR_JSON"] = json.dumps({**valid_pr, **mutation})
                     rejected = subprocess.run(
                         ["bash", str(MERGED_SCRIPT)],
                         capture_output=True,
@@ -1039,7 +1058,7 @@ class PreflightTests(unittest.TestCase):
                         env=environment,
                     )
                     self.assertEqual(rejected.returncode, 1)
-                    self.assertIn("boolean merged field", rejected.stderr)
+                    self.assertIn(message, rejected.stderr)
 
     def test_release_verification_disambiguates_child_and_timeout_statuses(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2055,12 +2074,14 @@ class PreflightTests(unittest.TestCase):
                 self.assertNotIn("{{pack_root}}/assets/scripts/checks/", text)
 
         external_review = (WORKFLOW_ROOT / "external-review.md").read_text(encoding="utf-8")
-        for term in ("delivery.head_sha", "delivery.repo", "delivery.branch", "delivery.pr_number", "delivery.pr_url", "local_gates.status: \"passed\"", "tested_commit"):
+        for term in ("delivery.head_sha", "delivery.repo", "delivery.branch", "delivery.pr_number", "delivery.pr_url", "local_gates.status: \"passed\"", "tested_commit", "single UTC", "two hours", "non-resettable UTC"):
             self.assertIn(term, external_review)
 
         local_gates = (WORKFLOW_ROOT / "local-gates.md").read_text(encoding="utf-8")
         self.assertIn("status=passed", local_gates)
         self.assertIn("full final `tested_commit`", local_gates)
+        for term in ("delivery.local_gate_summary_path", "canonicalize", "non-symlink", "nonempty regular"):
+            self.assertIn(term, local_gates)
 
         readiness = (WORKFLOW_ROOT / "release-readiness.md").read_text(encoding="utf-8")
         for term in ("deploy_mode=command", "deploy_mode=not-applicable", "deploy_not_applicable_reason", "allow_no_smoke=true", "no_smoke_reason", "verify-production"):
@@ -2078,12 +2099,16 @@ class PreflightTests(unittest.TestCase):
             "repository rollback guidance",
             "separately authorized repository-owned bounded workflow",
             "<artifact_root>/delivery",
+            "whenever `smoke_command` is nonblank",
+            "structured summary",
+            "sibling stdout/stderr",
         ):
             self.assertIn(term, verification)
 
         requirements = (WORKFLOW_ROOT / "requirements.md").read_text(encoding="utf-8")
         self.assertIn("Write requirements to `{{requirements_path}}`", requirements)
         self.assertIn("gc.build.requirements_path", requirements)
+        self.assertIn("status: approved", requirements)
 
         plan = (WORKFLOW_ROOT / "plan.md").read_text(encoding="utf-8")
         self.assertIn("Write the plan to `{{plan_path}}`", plan)
@@ -2116,6 +2141,7 @@ class PreflightTests(unittest.TestCase):
         for flag in ("--squash", "--merge", "--rebase"):
             self.assertIn(flag, merge)
         self.assertLess(merge.index("re-read the PR's `base.ref`"), merge.index('gh pr merge "$DELIVERY_PR_URL"'))
+        self.assertIn("without requiring a mutable current head", merge)
 
         self.assertIn("no repair-redeployment lane", deploy)
         self.assertIn("completed successful deployment for the exact merge SHA", deploy)
@@ -2135,6 +2161,12 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("source.acceptance_criteria_sha256", finalizer)
         self.assertIn("source-artifact validator", finalizer)
         self.assertIn("no blockers remain", finalizer)
+        self.assertIn("exact raw acceptance-criteria", finalizer)
+        self.assertIn("safe YAML string serialization", finalizer)
+
+        release_verified = RELEASE_VERIFIED_SCRIPT.read_text(encoding="utf-8")
+        self.assertEqual(release_verified.count("timeout --kill-after=5s 30s gh api"), 4)
+        self.assertIn("trap - HUP INT TERM", release_verified)
 
         for prompt in ("requirements.md", "plan.md", "decompose.md"):
             prompt_text = (WORKFLOW_ROOT / prompt).read_text(encoding="utf-8")
