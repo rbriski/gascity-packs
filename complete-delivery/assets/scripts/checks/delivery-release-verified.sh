@@ -184,8 +184,7 @@ delivery_run_deploy_command() {
 
   previous_status="$(delivery_root_metadata delivery.deploy_status)"
   previous_sha="$(delivery_root_metadata delivery.deploy_merge_sha)"
-  if [ "$previous_sha" = "$MERGE_SHA" ] && \
-     { [ "$previous_status" = deployed ] || [ "$previous_status" = failed ]; }; then
+  if [ "$previous_sha" = "$MERGE_SHA" ] && [ -n "$previous_status" ]; then
     delivery_fail "deploy_command already ran for $MERGE_SHA; exact-once deployment forbids a rerun"
   fi
 
@@ -193,10 +192,21 @@ delivery_run_deploy_command() {
   mkdir -p "$artifact_root/delivery" || delivery_fail "failed to create deployment evidence directory"
   delivery_dir="$(delivery_resolve_contained_path "$artifact_root/delivery" "deployment evidence directory")"
   evidence_path="$delivery_dir/deploy.log"
-  [ ! -e "$evidence_path" ] || \
-    delivery_fail "deploy evidence already exists; exact-once deployment forbids a rerun"
   stdout_path="$delivery_dir/deploy.stdout.log"
   stderr_path="$delivery_dir/deploy.stderr.log"
+  for final_capture in "$evidence_path" "$stdout_path" "$stderr_path"; do
+    [ ! -e "$final_capture" ] && [ ! -L "$final_capture" ] || \
+      delivery_fail "deploy evidence or capture already exists; exact-once deployment forbids a rerun"
+  done
+
+  # Record the same-SHA execution guard before allocating captures or running
+  # the side-effecting command.  A crash after any later publication leaves
+  # this fail-closed state in place, so a retry cannot deploy twice.
+  gc bd update "$DELIVERY_ROOT_ID" \
+    --set-metadata "delivery.deploy_merge_sha=$MERGE_SHA" \
+    --set-metadata "delivery.deploy_status=started" || \
+    delivery_fail "failed to atomically record deployment execution-started guard"
+
   evidence_tmp="$(mktemp "$delivery_dir/deploy.log.tmp.XXXXXX")" || \
     delivery_fail "failed to create deployment evidence file"
   stdout_tmp="$(mktemp "$delivery_dir/deploy.stdout.log.tmp.XXXXXX")" || \
@@ -245,7 +255,8 @@ delivery_run_deploy_command() {
   fi
 
   if ! mv "$stdout_tmp" "$stdout_path" || ! mv "$stderr_tmp" "$stderr_path"; then
-    rm -f "$evidence_tmp" "$stdout_tmp" "$stderr_tmp"
+    rm -f -- "$evidence_tmp" "$stdout_tmp" "$stderr_tmp" \
+      "$evidence_path" "$stdout_path" "$stderr_path"
     rm -rf -- "$status_dir"
     delivery_fail "failed to publish deployment command captures"
   fi
@@ -259,12 +270,14 @@ delivery_run_deploy_command() {
     "merge_sha=$MERGE_SHA" \
     "stdout_path=$stdout_path" \
     "stderr_path=$stderr_path" >"$evidence_tmp" || {
-      rm -f "$evidence_tmp"
+      rm -f -- "$evidence_tmp" "$stdout_tmp" "$stderr_tmp" \
+        "$evidence_path" "$stdout_path" "$stderr_path"
       rm -rf -- "$status_dir"
       delivery_fail "failed to write deployment evidence"
     }
   mv "$evidence_tmp" "$evidence_path" || {
-    rm -f "$evidence_tmp"
+    rm -f -- "$evidence_tmp" "$stdout_tmp" "$stderr_tmp" \
+      "$evidence_path" "$stdout_path" "$stderr_path"
     rm -rf -- "$status_dir"
     delivery_fail "failed to publish deployment evidence"
   }
@@ -280,8 +293,10 @@ delivery_run_deploy_command() {
     --set-metadata "delivery.deploy_merge_sha=$MERGE_SHA" \
     --set-metadata "delivery.deploy_stdout_path=$stdout_path" \
     --set-metadata "delivery.deploy_stderr_path=$stderr_path" \
-    --set-metadata "delivery.deploy_status=$deploy_status" || \
-    delivery_fail "failed to atomically record deployment evidence metadata"
+    --set-metadata "delivery.deploy_status=$deploy_status" || {
+      rm -f -- "$evidence_path" "$stdout_path" "$stderr_path"
+      delivery_fail "failed to atomically record deployment evidence metadata"
+    }
 
   [ "$outcome" = passed ] && [ "$child_status" = 0 ] && [ "$wrapper_status" -eq 0 ] || \
     delivery_fail "deploy_command failed; see deployment evidence"

@@ -1058,6 +1058,9 @@ class PreflightTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 "if [ \"${1:-}\" = bd ] && [ \"${2:-}\" = update ]; then\n"
                 "  printf '%s\\n' \"$*\" >> \"$FAKE_GC_UPDATES\"\n"
+                "  if [ \"${FAKE_GC_FAIL_STARTED_UPDATE:-}\" = true ] && printf '%s\\n' \"$*\" | grep -Fq 'delivery.deploy_status=started'; then\n"
+                "    exit 1\n"
+                "  fi\n"
                 "  exit 0\n"
                 "fi\n"
                 "if [ \"${3:-}\" = root-1 ]; then\n"
@@ -1251,7 +1254,7 @@ class PreflightTests(unittest.TestCase):
             delivery_dir = repository / "artifacts" / "delivery"
             for path in delivery_dir.iterdir():
                 path.unlink()
-            for status in ("deployed", "failed"):
+            for status in ("started", "deployed", "failed", "verified"):
                 with self.subTest(existing_deploy_status=status):
                     if marker.exists():
                         marker.unlink()
@@ -1271,22 +1274,47 @@ class PreflightTests(unittest.TestCase):
                     self.assertIn("exact-once deployment forbids a rerun", repeated.stderr)
                     self.assertFalse(marker.exists())
 
+            for capture_name in ("deploy.log", "deploy.stdout.log", "deploy.stderr.log"):
+                with self.subTest(existing_final_capture=capture_name):
+                    if marker.exists():
+                        marker.unlink()
+                    for path in delivery_dir.iterdir():
+                        path.unlink()
+                    (delivery_dir / capture_name).write_text("partial evidence\n", encoding="utf-8")
+                    environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
+                        **base_metadata,
+                        "gc.var.deploy_command": success_command,
+                    }}])
+                    repeated = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(repeated.returncode, 1)
+                    self.assertIn("deploy evidence or capture already exists", repeated.stderr)
+                    self.assertFalse(marker.exists())
+
+            for path in delivery_dir.iterdir():
+                path.unlink()
             if marker.exists():
                 marker.unlink()
-            (delivery_dir / "deploy.log").write_text("existing evidence\n", encoding="utf-8")
+            environment["FAKE_GC_FAIL_STARTED_UPDATE"] = "true"
             environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
                 **base_metadata,
                 "gc.var.deploy_command": success_command,
             }}])
-            repeated = subprocess.run(
+            guard_failure = subprocess.run(
                 ["bash", str(RELEASE_VERIFIED_SCRIPT)],
                 capture_output=True,
                 text=True,
                 env=environment,
             )
-            self.assertEqual(repeated.returncode, 1)
-            self.assertIn("deploy evidence already exists", repeated.stderr)
+            self.assertEqual(guard_failure.returncode, 1)
+            self.assertIn("failed to atomically record deployment execution-started guard", guard_failure.stderr)
             self.assertFalse(marker.exists())
+            self.assertFalse(any(delivery_dir.iterdir()))
+            environment.pop("FAKE_GC_FAIL_STARTED_UPDATE")
 
             succeeded, evidence = run_deploy(success_command)
             self.assertEqual(succeeded.returncode, 0, succeeded.stderr)
