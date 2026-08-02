@@ -19,6 +19,12 @@ Formula check's existing three-attempt exhaustion evidence in `gc.attempt_log`:
 each failed wait or reconcile attempt records its blocker, and exhaustion closes
 with a non-pass outcome rather than resetting the count or merging.
 
+Immediately before selecting the merge flag and invoking the guarded command,
+re-read the PR's `base.ref` from GitHub. Require configured
+`gc.var.base_branch` to be nonempty and require the freshly read `base.ref` to
+equal it exactly. On a missing value or mismatch, fail closed and return to the
+prior gate; do not rely on the earlier base or invoke `gh pr merge`.
+
 Use this explicit selection immediately before the guarded merge command:
 
 ```bash
@@ -30,12 +36,6 @@ case "$MERGE_METHOD" in
 esac
 gh pr merge "$DELIVERY_PR_URL" "$MERGE_FLAG" --match-head-commit "$DELIVERY_HEAD_SHA"
 ```
-
-Immediately before that atomic merge command, re-read the PR's `base.ref` from
-GitHub. Require configured `gc.var.base_branch` to be nonempty and require the
-freshly read `base.ref` to equal it exactly. On a missing value or mismatch,
-fail closed and return to the prior gate; do not rely on the previously read
-base or attempt a merge.
 
 After GitHub reports the PR merged, read `merge_commit_sha`, verify it is
 reachable from the configured `gc.var.base_branch`, and record it as

@@ -382,7 +382,7 @@ max_attempts = 4
 [steps.check.check]
 mode = "exec"
 path = ".gc/scripts/checks/delivery-release-verified.sh"
-timeout = "60m"
+timeout = "125m"
 
 [[steps]]
 id = "report-complete"

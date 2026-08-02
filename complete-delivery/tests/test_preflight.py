@@ -523,16 +523,19 @@ class PreflightTests(unittest.TestCase):
             gc = bin_dir / "gc"
             gc.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_JSON"\n', encoding="utf-8")
             gc.chmod(0o755)
+            artifact_delivery = repository / "artifacts" / "delivery"
+            artifact_delivery.mkdir(parents=True)
             base_metadata = {
                 "gc.step_ref": "complete-delivery.verify-production",
                 "delivery.merge_sha": "a" * 40,
                 "delivery.deploy_status": "not_applicable",
                 "gc.var.deploy_mode": "not-applicable",
                 "gc.var.deploy_not_applicable_reason": "Documentation-only artifact",
+                "gc.var.artifact_root": "artifacts",
             }
             environment = os.environ.copy()
             environment.update({"GC_BEAD_ID": "step-1", "GC_WORK_DIR": str(repository), "PATH": f"{bin_dir}:{environment['PATH']}"})
-            for evidence, message in (("", "delivery.deploy_evidence_path is missing"), ("empty.log", "deploy evidence is missing, not a file, or empty")):
+            for evidence, message in (("", "delivery.deploy_evidence_path is missing"), ("artifacts/delivery/empty.log", "deploy evidence is missing, not a file, or empty")):
                 with self.subTest(evidence=evidence):
                     metadata = {**base_metadata, "delivery.deploy_evidence_path": evidence}
                     if evidence:
@@ -542,7 +545,7 @@ class PreflightTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 1)
                     self.assertIn(message, result.stderr)
 
-            directory_evidence = repository / "directory-evidence"
+            directory_evidence = artifact_delivery / "directory-evidence"
             directory_evidence.mkdir()
             (directory_evidence / "entry").write_text("not a regular file\n", encoding="utf-8")
             environment["FAKE_GC_JSON"] = json.dumps([{"metadata": {**base_metadata, "delivery.deploy_evidence_path": str(directory_evidence)}}])
@@ -550,7 +553,7 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("deploy evidence is missing, not a file, or empty", result.stderr)
 
-            evidence = repository / "deploy.log"
+            evidence = artifact_delivery / "deploy.log"
             evidence.write_text("not applicable evidence\n", encoding="utf-8")
             environment["FAKE_GC_JSON"] = json.dumps([{"metadata": {**base_metadata, "delivery.deploy_evidence_path": str(evidence)}}])
             result = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
@@ -558,13 +561,14 @@ class PreflightTests(unittest.TestCase):
 
             outside_evidence = root / "outside-deploy.log"
             outside_evidence.write_text("foreign evidence\n", encoding="utf-8")
-            linked_evidence = repository / "linked-deploy.log"
+            linked_evidence = artifact_delivery / "linked-deploy.log"
             linked_evidence.symlink_to(outside_evidence)
             for escaped_path in (
                 "../outside-deploy.log",
                 "nested/../../outside-deploy.log",
                 str(outside_evidence),
                 str(linked_evidence),
+                "artifacts/outside-deploy.log",
             ):
                 with self.subTest(escaped_evidence=escaped_path):
                     environment["FAKE_GC_JSON"] = json.dumps(
@@ -581,7 +585,7 @@ class PreflightTests(unittest.TestCase):
                     )
                     self.assertEqual(escaped.returncode, 1)
                     self.assertIn(
-                        "must resolve within the canonical delivery work directory",
+                        "must resolve within the canonical artifact delivery directory",
                         escaped.stderr,
                     )
 
@@ -714,6 +718,38 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(missing.returncode, 1)
             self.assertIn("deploy_verify_command is required for deploy_mode=command", missing.stderr)
+
+            identity_command = (
+                f'test "$DELIVERY_REPO" = example/repo && '
+                f'test "$DELIVERY_PR" = 123 && '
+                f'test "$DELIVERY_SHA" = {merge_sha}'
+            )
+            environment["FAKE_GC_JSON"] = json.dumps(
+                [{"metadata": {**base_metadata, "gc.var.deploy_verify_command": identity_command}}]
+            )
+            identity_verified = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(identity_verified.returncode, 0, identity_verified.stderr)
+
+            environment["FAKE_GC_JSON"] = json.dumps(
+                [{"metadata": {
+                    **base_metadata,
+                    "gc.var.deploy_verify_command": 'test "$DELIVERY_REPO" = wrong/repo',
+                }}]
+            )
+            wrong_identity = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(wrong_identity.returncode, 1)
+            self.assertIn("deploy_verify_command failed; see verification evidence", wrong_identity.stderr)
+            self.assertIn("outcome=command_failure", evidence.read_text(encoding="utf-8"))
 
             environment["FAKE_GC_JSON"] = json.dumps(
                 [
@@ -1631,9 +1667,19 @@ class PreflightTests(unittest.TestCase):
             self.assertIn(term, readiness)
 
         verification = (WORKFLOW_ROOT / "verify-production.md").read_text(encoding="utf-8")
-        self.assertIn("allow_no_smoke=false", verification)
-        self.assertIn("no_smoke_reason", verification)
-        self.assertIn("delivery.deployed_sha == delivery.merge_sha", verification)
+        for term in (
+            "allow_no_smoke=false",
+            "no_smoke_reason",
+            "smoke_timeout",
+            "DELIVERY_REPO=delivery.repo",
+            "DELIVERY_PR=delivery.pr_number",
+            "delivery.deployed_sha == delivery.merge_sha",
+            "independently verifiable",
+            "repository rollback guidance",
+            "separately authorized repository-owned bounded workflow",
+            "<artifact_root>/delivery",
+        ):
+            self.assertIn(term, verification)
 
         requirements = (WORKFLOW_ROOT / "requirements.md").read_text(encoding="utf-8")
         self.assertIn("Write requirements to `{{requirements_path}}`", requirements)
@@ -1658,6 +1704,7 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(formula["vars"]["deploy_timeout"]["default"], "5m")
         self.assertEqual(formula["vars"]["deploy_ci_workflow"]["default"], "")
         self.assertEqual(formula["vars"]["deploy_environment"]["default"], "")
+        self.assertEqual(steps["verify-production"]["check"]["check"]["timeout"], "125m")
 
         merge = (WORKFLOW_ROOT / "merge.md").read_text(encoding="utf-8")
         self.assertIn("DELIVERY_PR_URL", merge)
@@ -1666,6 +1713,11 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("MERGE_METHOD", merge)
         for flag in ("--squash", "--merge", "--rebase"):
             self.assertIn(flag, merge)
+        self.assertLess(merge.index("re-read the PR's `base.ref`"), merge.index('gh pr merge "$DELIVERY_PR_URL"'))
+
+        self.assertIn("no repair-redeployment lane", deploy)
+        self.assertIn("completed successful deployment for the exact merge SHA", deploy)
+        self.assertIn('"") DEPLOY_MODE="command"', RELEASE_VERIFIED_SCRIPT.read_text(encoding="utf-8"))
 
         source_artifact = SOURCE_ARTIFACT_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("python3 -c 'import yaml'", source_artifact)
@@ -1843,7 +1895,7 @@ class SourceArtifactTests(unittest.TestCase):
                 path.write_text(text, encoding="utf-8")
                 return path, value
 
-            artifact, artifact_path_value = write_artifact(
+            _artifact, artifact_path_value = write_artifact(
                 artifact_kind, artifact_text, artifact_path_variant
             )
             bin_dir = root / "bin"

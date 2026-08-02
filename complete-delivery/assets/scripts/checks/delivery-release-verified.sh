@@ -63,6 +63,30 @@ delivery_command_is_nonblank() {
   [[ "$1" =~ [^[:space:]] ]]
 }
 
+delivery_resolve_artifact_delivery_evidence() {
+  local value="$1"
+  local label="$2"
+  local artifact_root delivery_dir resolved
+
+  artifact_root="$(delivery_var artifact_root '')"
+  [ -n "$artifact_root" ] || delivery_fail "gc.var.artifact_root is required for $label"
+  artifact_root="$(delivery_resolve_contained_path "$artifact_root" "artifact_root")"
+  delivery_dir="$(delivery_resolve_contained_path "$artifact_root/delivery" "artifact delivery directory")"
+  resolved="$(delivery_resolve_contained_path "$value" "$label")"
+  python3 - "$delivery_dir" "$resolved" <<'PY'
+import sys
+from pathlib import Path
+
+delivery_dir = Path(sys.argv[1]).resolve(strict=True)
+candidate = Path(sys.argv[2]).resolve(strict=False)
+try:
+    candidate.relative_to(delivery_dir)
+except ValueError:
+    raise SystemExit(1)
+print(candidate)
+PY
+}
+
 delivery_command_label() {
   python3 - "$1" <<'PY'
 import hashlib
@@ -689,7 +713,7 @@ NO_SMOKE_REASON="$(delivery_var no_smoke_reason '')"
 # steps. Empty metadata retains the formula's declared command default, while
 # an unknown value must fail before either step can report success.
 case "$DEPLOY_MODE" in
-  "") DEPLOY_MODE=command ;;
+  "") DEPLOY_MODE="command" ;;
   command|ci|not-applicable) ;;
   *) delivery_fail "deploy_mode must be command, ci, or not-applicable" ;;
 esac
@@ -728,7 +752,8 @@ if [ "$DEPLOY_STATUS" = "not_applicable" ]; then
   delivery_command_is_nonblank "$NA_REASON" || \
     delivery_fail "not-applicable deployment requires a nonblank deploy_not_applicable_reason"
   [ -n "$DEPLOY_EVIDENCE" ] || delivery_fail "delivery.deploy_evidence_path is missing"
-  DEPLOY_EVIDENCE="$(delivery_resolve_contained_path "$DEPLOY_EVIDENCE" "deployment evidence path")"
+  DEPLOY_EVIDENCE="$(delivery_resolve_artifact_delivery_evidence "$DEPLOY_EVIDENCE" "deployment evidence path")" || \
+    delivery_fail "deployment evidence path must resolve within the canonical artifact delivery directory"
   if [ ! -f "$DEPLOY_EVIDENCE" ] || [ ! -s "$DEPLOY_EVIDENCE" ]; then
     delivery_fail "deploy evidence is missing, not a file, or empty: $DEPLOY_EVIDENCE"
   fi

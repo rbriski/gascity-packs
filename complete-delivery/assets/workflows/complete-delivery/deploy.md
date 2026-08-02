@@ -2,8 +2,13 @@ Deploy the exact `delivery.merge_sha` through the repository-owned path.
 
 The deploy-stage graph check owns command-mode execution and evidence. Do not
 run `deploy_command` yourself and do not pre-create `deploy.log`: doing either
-would make the exact-once deployment attestation ambiguous. Before closing,
-record only the required CI or explicit non-applicable evidence, then follow
+would make the exact-once deployment attestation ambiguous. This Formula has
+no repair-redeployment lane: if deployment or later production verification
+fails, record the failure and rollback guidance, leave the workflow blocked,
+and do not rerun `deploy_command` for that iteration. A later, separately
+authorized Formula iteration may deploy only its reviewed intended SHA through
+this same graph check. Before closing, record only the required CI or explicit
+non-applicable evidence, then follow
 `deploy_mode`:
 
 - `command`: the graph check validates the nonblank `deploy_command` and its
@@ -32,7 +37,10 @@ Do not yet set `verified` or
 `delivery.deployed_sha`; the next stage owns production proof. Preserve the
 last known good production state on failure and include rollback guidance.
 
-Close with `gc.outcome=pass` only after either a real command or CI deployment
-trigger succeeds, or a valid explicit non-applicable record has captured the
-concrete non-deployable-artifact reason and deploy evidence.
+Close with `gc.outcome=pass` only after either a real command succeeds or CI
+evidence proves a completed successful deployment for the exact merge SHA,
+including its successful deployment status and structured evidence. The
+explicit non-applicable path passes only after it records the concrete
+non-deployable-artifact reason and deploy evidence; a successful CI trigger
+alone is never sufficient.
 Do not invoke provider-native subagents.
