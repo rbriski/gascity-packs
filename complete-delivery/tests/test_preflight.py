@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -222,6 +223,7 @@ class PreflightTests(unittest.TestCase):
                 **{
                     "gc.var.smoke_command": "",
                     "gc.var.allow_no_smoke": "true",
+                    "gc.var.no_smoke_reason": "No production endpoint is exposed",
                     "gc.var.smoke_timeout": "0s",
                 }
             )
@@ -233,6 +235,33 @@ class PreflightTests(unittest.TestCase):
         )
         self.assertEqual(with_smoke.returncode, 1)
         self.assertIn("smoke_timeout must be a positive finite duration", with_smoke.stderr)
+
+    def test_allow_no_smoke_requires_a_nonblank_reason(self) -> None:
+        for reason in ("", " \t "):
+            with self.subTest(reason=repr(reason)):
+                result = self.run_preflight(
+                    self.metadata(
+                        **{
+                            "gc.var.allow_no_smoke": "true",
+                            "gc.var.no_smoke_reason": reason,
+                        }
+                    )
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "no_smoke_reason is required and must be nonblank",
+                    result.stderr,
+                )
+
+        valid = self.run_preflight(
+            self.metadata(
+                **{
+                    "gc.var.allow_no_smoke": "true",
+                    "gc.var.no_smoke_reason": "No production endpoint is exposed",
+                }
+            )
+        )
+        self.assertEqual(valid.returncode, 0, valid.stderr)
 
     def test_not_applicable_requires_reason_but_not_smoke(self) -> None:
         values = self.metadata(
@@ -428,6 +457,7 @@ class PreflightTests(unittest.TestCase):
                 "delivery.pr_number": "123",
                 "gc.var.deploy_mode": "ci",
                 "gc.var.allow_no_smoke": "true",
+                "gc.var.no_smoke_reason": "No production endpoint is exposed",
             }
             environment = os.environ.copy()
             environment.update(
@@ -540,10 +570,26 @@ class PreflightTests(unittest.TestCase):
                 env=environment,
             )
             self.assertEqual(without_smoke.returncode, 0, without_smoke.stderr)
-            self.assertIn(
-                "command=smoke outcome=not_run reason=allow_no_smoke_true exception=redacted_no_smoke",
-                evidence.read_text(encoding="utf-8"),
+            recorded_evidence = evidence.read_text(encoding="utf-8")
+            self.assertIn("command=smoke outcome=not_run reason=allow_no_smoke_true", recorded_evidence)
+            self.assertIn("no_smoke_reason_sha256=", recorded_evidence)
+            self.assertNotIn("No production endpoint is exposed", recorded_evidence)
+
+            environment["FAKE_GC_JSON"] = json.dumps(
+                [{"metadata": {
+                    **base_metadata,
+                    "gc.var.no_smoke_reason": " \t ",
+                    "gc.var.deploy_verify_command": "/bin/true",
+                }}]
             )
+            missing_reason = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(missing_reason.returncode, 1)
+            self.assertIn("no_smoke_reason is required and must be nonblank", missing_reason.stderr)
 
             environment["FAKE_GC_JSON"] = json.dumps(
                 [
@@ -644,6 +690,7 @@ class PreflightTests(unittest.TestCase):
                 "delivery.pr_number": "123",
                 "gc.var.deploy_mode": "ci",
                 "gc.var.allow_no_smoke": "true",
+                "gc.var.no_smoke_reason": "No production endpoint is exposed",
             }
             environment = os.environ.copy()
             environment.update(
@@ -816,12 +863,24 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("full final `tested_commit`", local_gates)
 
         readiness = (WORKFLOW_ROOT / "release-readiness.md").read_text(encoding="utf-8")
-        for term in ("deploy_mode=command", "deploy_mode=not-applicable", "deploy_not_applicable_reason", "allow_no_smoke=true", "merge-SHA proof"):
+        for term in ("deploy_mode=command", "deploy_mode=not-applicable", "deploy_not_applicable_reason", "allow_no_smoke=true", "no_smoke_reason", "verify-production"):
             self.assertIn(term, readiness)
 
         verification = (WORKFLOW_ROOT / "verify-production.md").read_text(encoding="utf-8")
         self.assertIn("allow_no_smoke=false", verification)
-        self.assertIn("no-smoke exception", verification)
+        self.assertIn("no_smoke_reason", verification)
+        self.assertIn("delivery.deployed_sha == delivery.merge_sha", verification)
+
+        requirements = (WORKFLOW_ROOT / "requirements.md").read_text(encoding="utf-8")
+        self.assertIn("Write requirements to `{{requirements_path}}`", requirements)
+        self.assertIn("gc.build.requirements_path", requirements)
+
+        merge = (WORKFLOW_ROOT / "merge.md").read_text(encoding="utf-8")
+        self.assertIn("DELIVERY_PR_URL", merge)
+        self.assertIn('gh pr merge "$DELIVERY_PR_URL"', merge)
+
+        source_artifact = SOURCE_ARTIFACT_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("python3 -c 'import yaml'", source_artifact)
 
         finalizer = (WORKFLOW_ROOT / "finalize.md").read_text(encoding="utf-8")
         self.assertIn("source trace is resolved", finalizer)
@@ -916,7 +975,7 @@ class SourceArtifactTests(unittest.TestCase):
         )
 
     def run_check(
-        self, artifact_text: str, *, artifact_kind: str = "requirements"
+        self, artifact_text: str, *, artifact_kind: str = "requirements", missing_pyyaml: bool = False
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -936,6 +995,17 @@ class SourceArtifactTests(unittest.TestCase):
                 encoding="utf-8",
             )
             gc.chmod(0o755)
+            if missing_pyyaml:
+                python3 = bin_dir / "python3"
+                python3.write_text(
+                    "#!/bin/sh\n"
+                    "if [ \"${1:-}\" = \"-c\" ] && [ \"${2:-}\" = \"import yaml\" ]; then\n"
+                    "  exit 1\n"
+                    "fi\n"
+                    f"exec {sys.executable} \"$@\"\n",
+                    encoding="utf-8",
+                )
+                python3.chmod(0o755)
             artifact_path_key = f"gc.build.{artifact_kind}_path"
             step = [{"id": "step-1", "metadata": {
                 "gc.root_bead_id": "root-1",
@@ -984,6 +1054,11 @@ class SourceArtifactTests(unittest.TestCase):
                 result = self.run_check(artifact)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
+
+    def test_source_artifact_requires_pyyaml_at_runtime(self) -> None:
+        result = self.run_check(self.artifact(), missing_pyyaml=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PyYAML is required for Complete Delivery", result.stderr)
 
     def test_source_intent_heading_inside_fence_is_rejected(self) -> None:
         source_id = "fi-123"

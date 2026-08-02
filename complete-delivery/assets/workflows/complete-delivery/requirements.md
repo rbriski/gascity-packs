@@ -16,9 +16,10 @@ autonomous mode, write the best requirements artifact from available context
 and record assumptions. Never ask questions in headless mode; record
 unresolved ambiguity in the artifact.
 
-Write requirements to the requested requirements path when present. Include
-goal, demand evidence, current workaround, target user, narrowest wedge,
-future-fit, constraints, acceptance criteria, non-goals, and open questions.
+Write requirements to `{{requirements_path}}` and record that exact path on the
+workflow root as `gc.build.requirements_path`. Include goal, demand evidence,
+current workaround, target user, narrowest wedge, future-fit, constraints,
+acceptance criteria, non-goals, and open questions.
 In YAML front matter, record `source.id`, `source.title`, and
 `source.anchor: gc:<source-id>` using the exact durable values resolved above.
 Start the body with the exact unfenced H2 heading `## Source Intent` and place

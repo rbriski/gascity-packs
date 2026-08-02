@@ -43,6 +43,8 @@ SOURCE_ID="$(delivery_var source_bead_id "")"
 SOURCE_TITLE="$(delivery_var source_title "")"
 [ -n "$SOURCE_ID" ] || delivery_fail "gc.var.source_bead_id is missing"
 [ -n "$SOURCE_TITLE" ] || delivery_fail "gc.var.source_title is missing"
+python3 -c 'import yaml' >/dev/null 2>&1 || \
+  delivery_fail "PyYAML is required for Complete Delivery source-artifact validation"
 
 SOURCE_JSON="$(delivery_read_bead_json "$SOURCE_ID")" || \
   delivery_fail "source $SOURCE_ID is unreadable"

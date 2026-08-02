@@ -68,6 +68,7 @@ OPEN_PR="$(delivery_var open_pr true)"
 ALLOW_NO_CI="$(delivery_var allow_no_ci false)"
 ALLOW_NO_LOCAL="$(delivery_var allow_no_local_gates false)"
 ALLOW_NO_SMOKE="$(delivery_var allow_no_smoke false)"
+NO_SMOKE_REASON="$(delivery_var no_smoke_reason '')"
 CODERABBIT="$(delivery_var coderabbit required)"
 REQUIRED_CHECKS="$(delivery_var required_checks auto)"
 MERGE_METHOD="$(delivery_var merge_method squash)"
@@ -91,6 +92,10 @@ require_bool allow_no_smoke "$ALLOW_NO_SMOKE"
 require_enum coderabbit "$CODERABBIT" required optional off
 require_enum merge_method "$MERGE_METHOD" squash merge rebase
 require_enum deploy_mode "$DEPLOY_MODE" command ci not-applicable
+
+if [ "$ALLOW_NO_SMOKE" = "true" ] && ! [[ "$NO_SMOKE_REASON" =~ [^[:space:]] ]]; then
+  errors+=("no_smoke_reason is required and must be nonblank when allow_no_smoke=true")
+fi
 
 [ -n "$SOURCE_BEAD_ID" ] || errors+=("source_bead_id is required; launch from a durable work bead or convoy")
 [ -n "$SOURCE_TITLE" ] || errors+=("source_title is required; resolve the durable source title before launch")

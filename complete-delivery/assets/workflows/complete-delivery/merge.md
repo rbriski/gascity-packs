@@ -4,8 +4,10 @@ Re-run the PR gate against the current head immediately before merge. Read
 `delivery.head_sha` from durable workflow-root metadata, require it to be a
 nonempty full 40-character lowercase Git SHA, and assign it explicitly as
 `DELIVERY_HEAD_SHA`. Require the PR-gate SHA to equal that value, then pass it as the atomic
-expected-head guard: `gh pr merge <pr> --match-head-commit "$DELIVERY_HEAD_SHA"`
-with the configured `merge_method` (`squash`, `merge`, or `rebase`). Never use
+expected-head guard. Resolve the previously validated durable `delivery.pr_url`
+into a nonempty `DELIVERY_PR_URL` and run
+`gh pr merge "$DELIVERY_PR_URL" --match-head-commit "$DELIVERY_HEAD_SHA"` with
+the configured `merge_method` (`squash`, `merge`, or `rebase`). Never use
 `--admin`, a force push, or a direct push to the protected base. If the head
 moves, checks restart, approval is dismissed, or mergeability is unknown,
 wait/reconcile through the prior gate rather than bypassing it. Preserve the

@@ -136,6 +136,10 @@ default = "5m"
 description = "Explicit exception when a production smoke test cannot apply."
 default = "false"
 
+[vars.no_smoke_reason]
+description = "Required nonempty reason when allow_no_smoke=true."
+default = ""
+
 [vars.deploy_not_applicable_reason]
 description = "Required reason when deploy_mode is not-applicable."
 default = ""

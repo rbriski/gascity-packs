@@ -40,6 +40,15 @@ print(f"sha256:{hashlib.sha256(sys.argv[1].encode()).hexdigest()}")
 PY
 }
 
+delivery_value_sha256() {
+  python3 - "$1" <<'PY'
+import hashlib
+import sys
+
+print(hashlib.sha256(sys.argv[1].encode()).hexdigest())
+PY
+}
+
 delivery_run_bounded_command() {
   local name="$1"
   local command="$2"
@@ -149,8 +158,13 @@ cd "$DELIVERY_WORK_DIR"
 VERIFY_COMMAND="$(delivery_var deploy_verify_command "")"
 SMOKE_COMMAND="$(delivery_var smoke_command "")"
 ALLOW_NO_SMOKE="$(delivery_var allow_no_smoke false)"
+NO_SMOKE_REASON="$(delivery_var no_smoke_reason '')"
 VERIFY_TIMEOUT="$(delivery_var deploy_verify_timeout 5m)"
 SMOKE_TIMEOUT="$(delivery_var smoke_timeout 5m)"
+
+if [ "$ALLOW_NO_SMOKE" = "true" ] && ! [[ "$NO_SMOKE_REASON" =~ [^[:space:]] ]]; then
+  delivery_fail "no_smoke_reason is required and must be nonblank when allow_no_smoke=true"
+fi
 
 delivery_command_is_nonblank "$VERIFY_COMMAND" || \
   delivery_fail "deploy_verify_command is required for deploy_mode=$DEPLOY_MODE"
@@ -170,7 +184,8 @@ if [ -n "$SMOKE_COMMAND" ]; then
 elif [ "$ALLOW_NO_SMOKE" != "true" ]; then
   delivery_fail "smoke_command is required unless allow_no_smoke=true"
 else
-  printf 'command=smoke outcome=not_run reason=allow_no_smoke_true exception=redacted_no_smoke\n' >>"$VERIFY_EVIDENCE" || \
+  NO_SMOKE_REASON_SHA256="$(delivery_value_sha256 "$NO_SMOKE_REASON")"
+  printf 'command=smoke outcome=not_run reason=allow_no_smoke_true no_smoke_reason_sha256=%s\n' "$NO_SMOKE_REASON_SHA256" >>"$VERIFY_EVIDENCE" || \
     delivery_fail "failed to record no-smoke verification exception"
 fi
 

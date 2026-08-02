@@ -6,7 +6,9 @@ strictly positive, finite configured timeout of no more than one hour; it must
 prove the deployed revision is that exact SHA. Then run `smoke_command` under
 the same bounded-timeout contract with the
 same `DELIVERY_SHA` when `allow_no_smoke=false`. When `allow_no_smoke=true`,
-record the explicit no-smoke exception instead; it never waives deployment
+require the nonempty `gc.var.no_smoke_reason`, record it on the workflow root
+as `delivery.no_smoke_reason` using an argument-safe metadata update, and
+record its SHA-256 label in verification evidence; it never waives deployment
 verification or exact-SHA attestation. Treat either command timeout as a failed
 repair-redeploy-reverify attempt and record it in the verification evidence.
 Capture full evidence at
@@ -25,12 +27,14 @@ repository path and leave the workflow blocked rather than declaring the
 requested release complete.
 
 After proof, record `delivery.deployed_sha=<merge-sha>`,
-`delivery.deploy_status=verified`, and `delivery.verify_evidence_path`. For an
-explicit non-applicable artifact, preserve `delivery.deploy_status=not_applicable`,
-its nonempty regular-file deployment evidence, and the documented reason. Close
-with `gc.outcome=pass` only after the graph check: for `verified` it reruns the
-configured verification and applicable smoke commands and compares SHAs; for
-`not_applicable` it validates the reason and evidence instead of running those
-commands.
+`delivery.deploy_status=verified`, and `delivery.verify_evidence_path`. This
+stage, rather than release-readiness, owns the merge-SHA attestation: for real
+deployments it requires `delivery.deployed_sha == delivery.merge_sha`; for an
+explicit non-applicable artifact it validates the documented reason and its
+nonempty regular-file deployment evidence as the non-deployment attestation.
+Close with `gc.outcome=pass` only after that graph check: for `verified` it
+reruns the configured verification and applicable smoke commands and compares
+SHAs; for `not_applicable` it validates the reason and evidence instead of
+running those commands.
 
 Do not invoke provider-native subagents.
