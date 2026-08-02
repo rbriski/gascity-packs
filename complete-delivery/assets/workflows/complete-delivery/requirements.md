@@ -19,7 +19,9 @@ unresolved ambiguity in the artifact.
 Write requirements to the requested requirements path when present. Include
 goal, demand evidence, current workaround, target user, narrowest wedge,
 future-fit, constraints, acceptance criteria, non-goals, and open questions.
-Start with a `Source intent` section containing the source ID and title, then
+In YAML front matter, record `source.id`, `source.title`, and
+`source.anchor: gc:<source-id>` using the exact durable values resolved above.
+Start with a `Source Intent` section containing the source ID and title, then
 trace each requested description/acceptance point into the requirements. Use
 repository state only to validate or scope that intent. Do not copy raw source
 notes into an owner-facing report; summarize only non-sensitive constraints
@@ -29,7 +31,8 @@ code, current-head CI and CodeRabbit, protected merge, exact-SHA deployment,
 production verification, and a current living report are part of done.
 
 Close with `gc.outcome=pass` and the requirements artifact path. The graph's
-`build-artifact-valid.sh` check validates schema `gc.build.requirements.v1`.
+source-artifact check validates schema `gc.build.requirements.v1` and requires
+the exact durable source fields; missing or mismatched grounding is non-pass.
 On a repair attempt, read `gc.attempt_log` and repair in place.
 
 Do not invoke provider-native subagents. This Gas City lane is the

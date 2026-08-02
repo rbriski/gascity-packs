@@ -10,9 +10,13 @@ import unittest
 
 
 PACK_ROOT = pathlib.Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = PACK_ROOT.parent
 SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-preflight.sh"
 RELEASE_VERIFIED_SCRIPT = (
     PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-release-verified.sh"
+)
+SOURCE_ARTIFACT_SCRIPT = (
+    PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-source-artifact-valid.sh"
 )
 FORMULA_PATH = PACK_ROOT / "formulas" / "complete-delivery.formula.toml"
 WORKFLOW_ROOT = PACK_ROOT / "assets" / "workflows" / "complete-delivery"
@@ -344,6 +348,11 @@ class PreflightTests(unittest.TestCase):
             steps["delivery-preflight"]["check"]["check"]["path"],
             ".gc/scripts/checks/delivery-preflight.sh",
         )
+        for step_id in ("requirements", "plan", "decompose"):
+            self.assertEqual(
+                steps[step_id]["check"]["check"]["path"],
+                ".gc/scripts/checks/delivery-source-artifact-valid.sh",
+            )
 
         external_review = (WORKFLOW_ROOT / "external-review.md").read_text(encoding="utf-8")
         for term in ("delivery.head_sha", "delivery.repo", "delivery.branch", "delivery.pr_number", "delivery.pr_url", "local_gates.status: \"passed\"", "tested_commit"):
@@ -360,6 +369,130 @@ class PreflightTests(unittest.TestCase):
         verification = (WORKFLOW_ROOT / "verify-production.md").read_text(encoding="utf-8")
         self.assertIn("allow_no_smoke=false", verification)
         self.assertIn("no-smoke exception", verification)
+
+
+class SourceArtifactTests(unittest.TestCase):
+    def artifact(
+        self,
+        *,
+        source_id: str = "fi-123",
+        source_title: str = "Requested delivery",
+        source_anchor: str = "gc:fi-123",
+        include_source: bool = True,
+    ) -> str:
+        source = ""
+        if include_source:
+            source = (
+                "source:\n"
+                f"  id: {source_id}\n"
+                f"  title: {source_title}\n"
+                f"  anchor: {source_anchor}\n"
+            )
+        sections = ["## Source Intent\n\nfi-123 — Requested delivery"]
+        for name in (
+            "Problem Statement",
+            "W6H",
+            "User Stories",
+            "Technical Stories",
+            "Behavior Requirements",
+            "Example Mapping",
+            "Acceptance Criteria",
+            "Out Of Scope",
+            "Open Questions",
+        ):
+            body = f"{name} content."
+            if name == "Example Mapping":
+                body += "\n\n| ID | Status |\n| --- | --- |\n| REQ-1 | covered |"
+            sections.append(f"## {name}\n\n{body}")
+        return (
+            "---\n"
+            "schema: gc.build.requirements.v1\n"
+            "workflow:\n"
+            "  id: workflow-1\n"
+            "  formula: complete-delivery\n"
+            "methodology:\n"
+            "  pack: complete-delivery\n"
+            "  name: complete-delivery\n"
+            "producer:\n"
+            "  formula: complete-delivery\n"
+            "  stage: requirements\n"
+            "  attempt: 1\n"
+            "status: approved\n"
+            f"{source}"
+            "trace:\n"
+            "  upstream:\n"
+            "    - path: source.md\n"
+            "      hash: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            "      ids: [REQ-1]\n"
+            "  coverage:\n"
+            "    - id: REQ-1\n"
+            "      status: covered\n"
+            "---\n\n"
+            + "\n\n".join(sections)
+            + "\n"
+        )
+
+    def run_check(self, artifact_text: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            artifact = root / "requirements.md"
+            artifact.write_text(artifact_text, encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gc = bin_dir / "gc"
+            gc.write_text(
+                "#!/bin/sh\n"
+                "case \"${3:-}\" in\n"
+                "  step-1) printf '%s\\n' \"$FAKE_STEP_JSON\" ;;\n"
+                "  root-1) printf '%s\\n' \"$FAKE_ROOT_JSON\" ;;\n"
+                "  fi-123) printf '%s\\n' \"$FAKE_SOURCE_JSON\" ;;\n"
+                "  *) exit 1 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            step = [{"id": "step-1", "metadata": {
+                "gc.root_bead_id": "root-1",
+                "gc.build.artifact_schema": "gc.build.requirements.v1",
+                "gc.build.artifact_path_keys": "gc.build.requirements_path",
+            }}]
+            workflow_root = [{"id": "root-1", "metadata": {
+                "gc.build.requirements_path": str(artifact),
+                "gc.var.source_bead_id": "fi-123",
+                "gc.var.source_title": "Requested delivery",
+            }}]
+            source = [{"id": "fi-123", "title": "Requested delivery"}]
+            environment = os.environ.copy()
+            environment.update({
+                "GC_BEAD_ID": "step-1",
+                "GC_WORK_DIR": str(REPOSITORY_ROOT),
+                "FAKE_STEP_JSON": json.dumps(step),
+                "FAKE_ROOT_JSON": json.dumps(workflow_root),
+                "FAKE_SOURCE_JSON": json.dumps(source),
+                "PATH": f"{bin_dir}:{environment['PATH']}",
+            })
+            return subprocess.run(
+                ["bash", str(SOURCE_ARTIFACT_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+
+    def test_source_artifact_requires_exact_durable_binding(self) -> None:
+        valid = self.run_check(self.artifact())
+        self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+        self.assertIn("source artifact valid", valid.stdout)
+
+        for artifact, message in (
+            (self.artifact(include_source=False), "requires a source mapping"),
+            (self.artifact(source_id="fi-wrong"), "source.id must equal"),
+            (self.artifact(source_title="Wrong title"), "source.title must equal"),
+            (self.artifact(source_anchor="gc:fi-wrong"), "source.anchor must equal"),
+        ):
+            with self.subTest(message=message):
+                result = self.run_check(artifact)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
 
 
 if __name__ == "__main__":

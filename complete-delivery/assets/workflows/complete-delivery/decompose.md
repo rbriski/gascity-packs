@@ -8,6 +8,10 @@ HEAD change into the delivery outcome. Record the source ID in the convoy and
 link source-anchor beads back to the workflow root so the final trace remains
 auditable.
 
+In the decomposition artifact YAML front matter, record `source.id`,
+`source.title`, and `source.anchor: gc:<source-id>` using the exact durable
+values. Start its body with a `Source Intent` section naming that same source.
+
 Each bead must map to one vertical slice and include acceptance criteria, likely
 files/modules, a first verification command, and expected proof command. Do
 not copy review procedure or sensitive source notes into implementation beads.
@@ -17,6 +21,7 @@ convoy, and ensure it is discoverable from the workflow root. Close with
 `gc.outcome=pass`. Do not invoke provider-native subagents.
 
 Artifact validation: this stage is gated by
-`.gc/scripts/checks/build-artifact-valid.sh`, which validates the artifact
-recorded at `gc.build.decomposition_path` (fallback
-`gc.var.decomposition_path`) against schema `gc.build.decomposition.v1`.
+`.gc/scripts/checks/delivery-source-artifact-valid.sh`, which validates the
+artifact recorded at `gc.build.decomposition_path` (fallback
+`gc.var.decomposition_path`) against schema `gc.build.decomposition.v1` and
+the exact durable source fields.
