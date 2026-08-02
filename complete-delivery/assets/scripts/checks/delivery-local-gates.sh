@@ -149,37 +149,49 @@ def inline_program_present(executable: str, options: list[str]) -> bool:
     """Recognize each supported interpreter's program-bearing argv forms."""
     if executable in {"node", "nodejs"}:
         flags = ("-e", "-p", "--eval", "--print")
+        option_operands = ("-r", "--require", "--import")
     elif executable == "python" or executable.startswith("python3"):
         flags = ("-c",)
+        option_operands = ("-X", "-W")
     elif executable.startswith("perl"):
         flags = ("-e", "-E")
+        option_operands = ("-I", "-M", "-m", "-C", "-0", "-F", "-x")
     elif executable.startswith("ruby"):
         flags = ("-e",)
+        option_operands = ("-I", "-r", "-C", "-E", "-F", "-T", "-W")
     elif executable in {"awk", "gawk", "mawk", "nawk"}:
         flags = ("-e", "--execute", "--source")
+        option_operands = ("-v", "--assign", "-i", "--include", "-l", "--load")
     else:
         return False
 
-    selected = False
-    index = 0
+    awk = executable in {"awk", "gawk", "mawk", "nawk"}; selected = index = 0
     while index < len(options):
         argument = options[index]
-        if selected and executable not in {"awk", "gawk", "mawk", "nawk"}:
+        if selected and not awk:
             return False
         if argument == "--":
-            selected = True
-        elif any(argument == flag or argument.startswith(flag + "=") or (
+            return False
+        if executable.startswith("perl") and argument.startswith("-") and not argument.startswith("--"):
+            for flag in argument[1:]:
+                if flag in "eE":
+                    return True
+                if flag in "IMmCFx0":
+                    break
+        if any(argument == flag or argument.startswith(flag + "=") or (
             flag.startswith("-") and not flag.startswith("--") and argument.startswith(flag)
         ) for flag in flags):
-            return not selected
-        elif executable in {"awk", "gawk", "mawk", "nawk"} and (
+            return True
+        if awk and (
             argument in {"-f", "--file", "-E", "--exec"}
             or argument.startswith(("-f", "--file=", "-E", "--exec="))
         ):
             selected = True
             if argument in {"-f", "--file", "-E", "--exec"}:
                 index += 1
-        elif executable in {"awk", "gawk", "mawk", "nawk"} and not argument.startswith("-"):
+        elif argument in option_operands:
+            index += 1
+        elif awk and not selected and not argument.startswith("-"):
             # awk's first positional argument is its program unless -f/-E selected a file.
             return True
         elif executable == "python" or executable.startswith("python3"):

@@ -457,8 +457,8 @@ class PrGateContractTests(unittest.TestCase):
 
     def test_local_gates_reject_interpreter_inline_program_forms_before_execution(self) -> None:
         forms = (
-            "node -e", "node --eval=", "node -p", "node --print=",
-            "python3 -c", "perl -e", "perl -E", "ruby -e",
+            "node -e", "node --eval=", "node -p", "node --print=", "node --require node:path -p",
+            "python3 -c", "python3 -X dev -c", "perl -e", "perl -E", "perl -we", "perl -pe", "ruby -e",
             "awk -e", "awk --source=", "awk",
         )
         for form in forms:
@@ -471,6 +471,14 @@ class PrGateContractTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("terminal remote approval gate", result.stderr)
                 self.assertFalse(marker.exists())
+
+    def test_local_gates_allow_awk_program_files_with_positional_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory); program = root / "program.awk"; input_file = root / "input.txt"
+            program.write_text("{ print }\n", encoding="utf-8"); input_file.write_text("benign input\n", encoding="utf-8")
+            result, _ = self.run_local_gates(f"awk -f {shlex.quote(str(program))} {shlex.quote(str(input_file))}")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("benign input", result.stdout)
 
     def test_local_gates_allow_python_arguments_after_script_or_module_selection(self) -> None:
         for command in ("python3 script.py -e value", "python3 -m pytest -c pyproject.toml"):
