@@ -44,23 +44,52 @@ delivery_run_bounded_command() {
   local name="$1"
   local command="$2"
   local timeout_value="$3"
-  local status outcome label
+  local status outcome label status_dir status_marker wrapper_status
 
   label="$(delivery_command_label "$command")"
-  if timeout --kill-after=5s "$timeout_value" bash -euo pipefail -c "$command"; then
-    status=0
-    outcome=passed
+  status_dir="$(mktemp -d "${TMPDIR:-/tmp}/delivery-command-status.XXXXXX")" || \
+    delivery_fail "failed to create $name status directory"
+  status_marker="$status_dir/status"
+
+  # GNU timeout uses 124, 125, and 137 for its own outcomes, but a managed
+  # command may legitimately return any of those statuses.  The inner Bash
+  # writes a marker only after the strict managed command has returned; the
+  # outer wrapper can therefore distinguish its own result from the child's.
+  if timeout --kill-after=5s "$timeout_value" bash -u -o pipefail -c '
+    set +e
+    bash -euo pipefail -c "$1"
+    child_status=$?
+    if ! printf "%s\\n" "$child_status" >"$2/status.tmp"; then
+      exit 125
+    fi
+    if ! mv "$2/status.tmp" "$2/status"; then
+      exit 125
+    fi
+    exit "$child_status"
+  ' delivery-bounded-command "$command" "$status_dir"; then
+    wrapper_status=0
   else
-    status=$?
-    case "$status" in
+    wrapper_status=$?
+  fi
+
+  if [ -f "$status_marker" ]; then
+    status="$(<"$status_marker")"
+    if [ "$status" -eq 0 ]; then
+      outcome=passed
+    else
+      outcome=command_failure
+    fi
+  else
+    status="$wrapper_status"
+    case "$wrapper_status" in
       124|137) outcome=timeout ;;
-      125) outcome=timeout_utility_failure ;;
-      *) outcome=command_failure ;;
+      *) outcome=timeout_utility_failure ;;
     esac
   fi
   printf 'command=%s label=%s timeout=%s outcome=%s status=%s\n' \
     "$name" "$label" "$timeout_value" "$outcome" "$status" >>"$VERIFY_EVIDENCE" || \
-    delivery_fail "failed to record $name verification evidence"
+    { rm -rf -- "$status_dir"; delivery_fail "failed to record $name verification evidence"; }
+  rm -rf -- "$status_dir" || delivery_fail "failed to clean $name status directory"
   [ "$status" -eq 0 ]
 }
 

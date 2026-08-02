@@ -564,6 +564,86 @@ class PreflightTests(unittest.TestCase):
                 invalid_smoke.stderr,
             )
 
+    def test_release_verification_disambiguates_child_and_timeout_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            evidence = root / "evidence.txt"
+            evidence.write_text("verified\n", encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gc = bin_dir / "gc"
+            gc.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_JSON"\n', encoding="utf-8")
+            gc.chmod(0o755)
+            base_metadata = {
+                "delivery.merge_sha": "a" * 40,
+                "delivery.deployed_sha": "a" * 40,
+                "delivery.deploy_status": "verified",
+                "delivery.deploy_evidence_path": str(evidence),
+                "delivery.verify_evidence_path": str(evidence),
+                "delivery.repo": "example/repo",
+                "delivery.pr_number": "123",
+                "gc.var.deploy_mode": "ci",
+                "gc.var.allow_no_smoke": "true",
+            }
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GC_BEAD_ID": "step-1",
+                    "GC_WORK_DIR": str(repository),
+                    "PATH": f"{bin_dir}:{environment['PATH']}",
+                }
+            )
+
+            def run(command: str, timeout: str = "1s") -> tuple[subprocess.CompletedProcess[str], str]:
+                evidence.write_text("verified\n", encoding="utf-8")
+                environment["FAKE_GC_JSON"] = json.dumps(
+                    [
+                        {
+                            "metadata": {
+                                **base_metadata,
+                                "gc.var.deploy_verify_command": command,
+                                "gc.var.deploy_verify_timeout": timeout,
+                            }
+                        }
+                    ]
+                )
+                result = subprocess.run(
+                    ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+                return result, evidence.read_text(encoding="utf-8")
+
+            for child_status in (124, 125, 137):
+                command = f"exit {child_status}"
+                with self.subTest(child_status=child_status):
+                    result, recorded_evidence = run(command)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("outcome=command_failure", recorded_evidence)
+                    self.assertIn(f"status={child_status}", recorded_evidence)
+                    self.assertNotIn(command, recorded_evidence)
+
+            timed_out, recorded_evidence = run("sleep 1", "0.01s")
+            self.assertEqual(timed_out.returncode, 1)
+            self.assertIn("outcome=timeout", recorded_evidence)
+            self.assertNotIn("sleep 1", recorded_evidence)
+
+            succeeded, recorded_evidence = run("/bin/true")
+            self.assertEqual(succeeded.returncode, 0, succeeded.stderr)
+            self.assertIn("outcome=passed", recorded_evidence)
+            self.assertNotIn("/bin/true", recorded_evidence)
+
+            fake_timeout = bin_dir / "timeout"
+            fake_timeout.write_text("#!/bin/sh\nexit 125\n", encoding="utf-8")
+            fake_timeout.chmod(0o755)
+            wrapper_failed, recorded_evidence = run("/bin/true")
+            self.assertEqual(wrapper_failed.returncode, 1)
+            self.assertIn("outcome=timeout_utility_failure", recorded_evidence)
+            self.assertNotIn("/bin/true", recorded_evidence)
+
     def test_pr_open_validates_full_recorded_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
