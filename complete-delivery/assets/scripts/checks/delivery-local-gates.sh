@@ -238,7 +238,10 @@ PY
     LOCAL_GATE_ARGV+=("$argument")
   done <"$output"
   rm -f "$output"
-  if [ "${#LOCAL_GATE_ARGV[@]}" -eq 0 ]; then
+  # Bash 3.2 and 4.2 can regard an assigned empty array as unset under
+  # nounset. Check its declaration before expanding its length so malformed
+  # parser output reaches the pack's fail-closed diagnostic.
+  if [ "${LOCAL_GATE_ARGV+x}" != x ] || [ "${#LOCAL_GATE_ARGV[@]}" -eq 0 ]; then
     delivery_fail "local gate command could not be parsed safely: $command"
   fi
 }

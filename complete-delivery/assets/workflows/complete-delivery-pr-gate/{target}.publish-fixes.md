@@ -1,9 +1,10 @@
 Publish this iteration's verified review fixes.
 
 Read `<artifact_root>/delivery/external-review-handoff.json`; before every
-attempt, replace it with current-attempt state and invalidate old
-`tested_commit`, `local_gates`, `published_head`, and equality success evidence.
-Require passed local gates for its exact commit, a clean checkout, and
+attempt, replace stale prior-attempt state while retaining and validating the
+current attempt's `tested_commit` and passed `local_gates`. Clear only stale
+`published_head` and equality success evidence before push or refresh. Require
+passed local gates for its exact commit, a clean checkout, and
 `HEAD == tested_commit`; do not mutate after testing. A newly discovered
 source fix returns to `rerun-local-gates` for a fresh committed candidate and
 complete retest. Acquire one shared repository-scoped publication lock before
@@ -25,9 +26,10 @@ non-actionable thread only when its disposition evidence was published. Still
 under that lock, every resolution requires `published_head` is exactly equal to
 the artifact's `tested_commit` (`published_head == tested_commit`) and
 `published_head_matches_tested_commit` is true. Commit containment alone is not sufficient.
-On failed, blocked, skipped, unavailable, malformed, or stale push/refresh,
-record a publication failure, write blocker-only state, keep every mapped thread open, and do not record
-passing publication evidence, then reacquire a current PR head that is a full SHA before
+On failed, blocked, skipped, unavailable, malformed, or stale push/refresh that
+invalidates the whole handoff, clear `tested_commit` and `local_gates`, record a
+publication failure, write blocker-only state, keep every mapped thread open,
+and do not record passing publication evidence, then reacquire a current PR head that is a full SHA before
 another inspection or gate run. Only when a successful refresh returns a
 different full-SHA may that `published_head` be next-iteration state, not a
 publication failure; it keeps every mapped thread open and cannot authorize

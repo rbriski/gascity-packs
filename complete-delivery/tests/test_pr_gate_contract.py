@@ -281,7 +281,7 @@ class PrGateContractTests(unittest.TestCase):
             self.assertNotRegex(normalized, r"containment(?: alone)? is sufficient")
 
     def run_local_gates(
-        self, command: str, *, session_id: str = ""
+        self, command: str, *, session_id: str = "", empty_parser_output: bool = False
     ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
@@ -296,6 +296,15 @@ class PrGateContractTests(unittest.TestCase):
             encoding="utf-8",
         )
         gc.chmod(0o755)
+        if empty_parser_output:
+            python = bin_dir / "python3"
+            python.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"-\" ]; then exit 0; fi\n"
+                "exec \"$REAL_PYTHON\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
         metadata = {
             "gc.var.allow_no_local_gates": "false",
             "gc.var.test_command": command,
@@ -308,6 +317,7 @@ class PrGateContractTests(unittest.TestCase):
                 "GC_SESSION_ID": session_id,
                 "FAKE_GC_STEP_JSON": json.dumps([{"metadata": metadata}]),
                 "PATH": f"{bin_dir}:{environment['PATH']}",
+                "REAL_PYTHON": sys.executable,
             }
         )
         return (
@@ -320,45 +330,34 @@ class PrGateContractTests(unittest.TestCase):
             root,
         )
 
+    def test_empty_local_gate_parser_output_fails_closed_under_nounset(self) -> None:
+        result, _ = self.run_local_gates("true", empty_parser_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("local gate command could not be parsed safely: true", result.stderr)
+        script = LOCAL_GATES_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('[ "${LOCAL_GATE_ARGV+x}" != x ] ||', script)
+
     def test_local_gates_reject_remote_approval_commands_before_bash_can_run_them(self) -> None:
         policy_commands = (
-            "delivery_gate.py",
-            "delivery-pr-approved.sh",
-            r"delivery_gat\e.py",
-            r"delivery-pr-approv\ed.sh",
-            "gh pr checks",
-            "/usr/bin/gh api repos/example/repo/pulls/8",
-            "coderabbit review",
-            "./remote-approval-wrapper",
-            "curl https://api.github.com/repos/example/repo/pulls/8",
-            '"delivery_gate.py"',
-            "'delivery_gate.py'",
-            '"gh" pr checks',
-            "'gh' pr checks",
-            "timeout 60 gh pr checks",
-            "nice gh pr checks",
-            "xargs -a /dev/null coderabbit review",
-            "python3 /tmp/gh",
-            "python3 /tmp/remote-approval-wrapper",
+            "delivery_gate.py", "delivery-pr-approved.sh", r"delivery_gat\e.py",
+            r"delivery-pr-approv\ed.sh", "gh pr checks", "/usr/bin/gh api repos/example/repo/pulls/8",
+            "coderabbit review", "./remote-approval-wrapper", "curl https://api.github.com/repos/example/repo/pulls/8",
+            '"delivery_gate.py"', "'delivery_gate.py'", '"gh" pr checks', "'gh' pr checks",
+            "timeout 60 gh pr checks", "nice gh pr checks", "xargs -a /dev/null coderabbit review",
+            "python3 /tmp/gh", "python3 /tmp/remote-approval-wrapper",
             "python3 -c \"import subprocess; subprocess.run(['gh', 'pr', 'checks'])\"",
             "node -e \"require('child_process').execSync('gh pr checks')\"",
-            "perl -e \"system 'gh', 'pr', 'checks'\"",
-            "ruby -e \"system 'gh', 'pr', 'checks'\"",
+            "perl -e \"system 'gh', 'pr', 'checks'\"", "ruby -e \"system 'gh', 'pr', 'checks'\"",
             "awk --execute \"system(\\\"gh pr checks\\\")\"",
         )
         syntax_commands = (
-            "delivery_gate." + "\\\n" + "py",
-            chr(96) + "delivery_gate.py" + chr(96),
-            "{delivery_gate.py,x}",
-            "{gh,x} pr checks",
-            "delivery_gate.py</dev/null",
-            "delivery_gate.py>/dev/null",
-            "gh>/dev/null pr checks",
+            "delivery_gate." + "\\\n" + "py", chr(96) + "delivery_gate.py" + chr(96),
+            "{delivery_gate.py,x}", "{gh,x} pr checks", "delivery_gate.py</dev/null",
+            "delivery_gate.py>/dev/null", "gh>/dev/null pr checks",
         )
         for terminal_command in policy_commands:
             with self.subTest(terminal_command=terminal_command):
                 result, _ = self.run_local_gates(terminal_command)
-
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(
                     "invokes a terminal remote approval gate or provider command",
@@ -371,7 +370,6 @@ class PrGateContractTests(unittest.TestCase):
                     marker = pathlib.Path(directory) / "side-effect"
                     command = f"{terminal_command}; touch {shlex.quote(str(marker))}"
                     result, _ = self.run_local_gates(command)
-
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("local gate command could not be parsed safely", result.stderr)
                     self.assertFalse(marker.exists())
@@ -383,7 +381,6 @@ class PrGateContractTests(unittest.TestCase):
                 result, _ = self.run_local_gates(
                     f"{wrapper} touch {shlex.quote(str(marker))}"
                 )
-
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("terminal remote approval gate", result.stderr)
                 self.assertFalse(marker.exists())
@@ -394,14 +391,12 @@ class PrGateContractTests(unittest.TestCase):
             ("su -c", "gh pr checks"),
             ("runuser -u nobody --", "delivery-pr-approved.sh"),
         )
-
         for wrapper in direct_wrappers:
             with self.subTest(wrapper=wrapper), tempfile.TemporaryDirectory() as directory:
                 marker = pathlib.Path(directory) / "side-effect"
                 result, _ = self.run_local_gates(
                     f"{wrapper} touch {shlex.quote(str(marker))}"
                 )
-
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("terminal remote approval gate", result.stderr)
                 self.assertFalse(marker.exists())
@@ -415,7 +410,6 @@ class PrGateContractTests(unittest.TestCase):
                 result, _ = self.run_local_gates(
                     f"{wrapper} {shlex.quote(f'{nested_command}; touch {marker}')}"
                 )
-
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("terminal remote approval gate", result.stderr)
                 self.assertFalse(marker.exists())
@@ -432,11 +426,9 @@ class PrGateContractTests(unittest.TestCase):
                     )
                     script.write_text(source.format(marker=marker_value), encoding="utf-8")
                     script.chmod(0o755)
-
                     result, _ = self.run_local_gates(
                         f"{interpreter} {shlex.quote(str(script))}"
                     )
-
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("terminal remote approval gate", result.stderr)
                     self.assertFalse(marker.exists())
@@ -454,7 +446,6 @@ class PrGateContractTests(unittest.TestCase):
                 attached_code = form.endswith(("=", "-e", "-p", "-c", "-E"))
                 command = f"{form}{code}" if attached_code else f"{form} {code}"
                 result, _ = self.run_local_gates(command)
-
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("terminal remote approval gate", result.stderr)
                 self.assertFalse(marker.exists())
@@ -497,7 +488,6 @@ class PrGateContractTests(unittest.TestCase):
                         marker = pathlib.Path(directory) / "side-effect"
                         command = f"{terminal_command}; touch {shlex.quote(str(marker))}"
                         result, _ = self.run_local_gates(command)
-
                         self.assertNotEqual(result.returncode, 0)
                         self.assertIn("command substitution", result.stderr)
                         self.assertFalse(marker.exists())
@@ -520,7 +510,6 @@ class PrGateContractTests(unittest.TestCase):
                     result, _ = self.run_local_gates(
                         f"{command}; touch {shlex.quote(str(marker))}"
                     )
-
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("terminal remote approval gate", result.stderr)
                     self.assertFalse(marker.exists())
@@ -529,7 +518,6 @@ class PrGateContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             marker = pathlib.Path(directory) / "quoted marker"
             result, _ = self.run_local_gates(f"touch {shlex.quote(str(marker))}")
-
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(marker.exists())
 
@@ -537,7 +525,6 @@ class PrGateContractTests(unittest.TestCase):
             marker = pathlib.Path(directory) / "escaped marker"
             escaped_marker = str(marker).replace(" ", "\\ ")
             result, _ = self.run_local_gates(f"touch {escaped_marker}")
-
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(marker.exists())
 
@@ -549,7 +536,6 @@ class PrGateContractTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((marker_root / "session-42").exists())
-
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             capture = root / "capture-argv"
@@ -560,7 +546,6 @@ class PrGateContractTests(unittest.TestCase):
                 result, _ = self.run_local_gates(f"{shlex.quote(str(capture))} {shlex.quote(str(output))} {argument}")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(output.read_text(encoding="utf-8"), expected)
-
         for command in ("printf '%s' $HOME", 'printf \'%s\' "$HOME"'):
             with self.subTest(command=command):
                 result, _ = self.run_local_gates(command)
@@ -579,7 +564,6 @@ class PrGateContractTests(unittest.TestCase):
                     marker = pathlib.Path(directory) / "side-effect"
                     command = f"{terminal_command}; touch {shlex.quote(str(marker))}"
                     result, _ = self.run_local_gates(command)
-
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("terminal remote approval gate", result.stderr)
                     self.assertFalse(marker.exists())
@@ -596,7 +580,6 @@ class PrGateContractTests(unittest.TestCase):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 marker = pathlib.Path(directory) / name
                 result, _ = self.run_local_gates(f"touch {shlex.quote(str(marker))}")
-
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(marker.exists())
 
@@ -604,7 +587,6 @@ class PrGateContractTests(unittest.TestCase):
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
         setup = (workflows / "{target}.setup-external-review.md").read_text(encoding="utf-8")
         inspect = (workflows / "{target}.inspect-current-head.md").read_text(encoding="utf-8")
-
         for prerequisite in ("authenticated `gh`", "delivery_gate.py", "writable"):
             self.assertIn(prerequisite, setup)
         self.assert_prose_contains(setup, "never set `gc.outcome=pass`")
@@ -679,11 +661,24 @@ class PrGateContractTests(unittest.TestCase):
                 ):
                     self.assertIn(field, text)
 
+    def test_publication_retains_current_test_evidence_until_an_invalidating_failure(self) -> None:
+        workflow = (
+            PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate" / "{target}.publish-fixes.md"
+        ).read_text(encoding="utf-8")
+        self.assert_prose_contains(
+            workflow, "retaining and validating the current attempt's `tested_commit` and passed `local_gates`"
+        )
+        self.assert_prose_contains(
+            workflow, "Clear only stale `published_head` and equality success evidence before push or refresh"
+        )
+        self.assert_prose_contains(
+            workflow, "that invalidates the whole handoff, clear `tested_commit` and `local_gates`"
+        )
+
     def test_local_gates_execute_an_allowed_local_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             marker = pathlib.Path(directory) / "local-gate-ran"
             result, _ = self.run_local_gates(f"touch {shlex.quote(str(marker))}")
-
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(marker.exists())
 
@@ -691,7 +686,6 @@ class PrGateContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             marker = pathlib.Path(directory) / "test_coderabbit.py"
             result, _ = self.run_local_gates(f"touch {shlex.quote(str(marker))}")
-
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(marker.exists())
 
@@ -802,7 +796,6 @@ class PrGateContractTests(unittest.TestCase):
                         },
                     }
                 )
-
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("proven passing local-gate evidence", result.stderr)
 
@@ -819,7 +812,6 @@ class PrGateContractTests(unittest.TestCase):
                 },
             }
         )
-
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("proven passing local-gate evidence", result.stderr)
 
@@ -839,7 +831,6 @@ class PrGateContractTests(unittest.TestCase):
                 if candidate_commit is not None:
                     handoff["candidate_commit"] = candidate_commit
                 result = self.run_terminal_gate(handoff)
-
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("proven passing local-gate evidence", result.stderr)
 
@@ -855,7 +846,6 @@ class PrGateContractTests(unittest.TestCase):
             },
             {"passed": True, "head_sha": commit},
         )
-
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_terminal_gate_canonicalizes_valid_full_sha_evidence_before_comparison(self) -> None:
@@ -870,7 +860,6 @@ class PrGateContractTests(unittest.TestCase):
             },
             {"passed": True, "head_sha": commit.upper()},
         )
-
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_terminal_gate_rejects_failed_or_wrong_head_delivery_gate_report(self) -> None:
@@ -888,7 +877,6 @@ class PrGateContractTests(unittest.TestCase):
         ):
             with self.subTest(report=report):
                 result = self.run_terminal_gate(handoff, report)
-
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("delivery_gate.py", result.stderr)
 
