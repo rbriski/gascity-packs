@@ -83,6 +83,7 @@ class PrGateContractTests(unittest.TestCase):
         )
         self.assert_prose_contains(precheck, "proven publication whose canonical full-SHA `published_head` exactly equals the updated workflow-root `delivery.head_sha`")
         self.assert_prose_contains(precheck, "prior-inspected-head `pr-gate.json` is not current-head evidence")
+        self.assert_prose_contains(precheck, "root-head-mismatched other than the exact proven publication transition above")
         self.assertIn("child report pre-terminal", loop)
         self.assertIn("leave `external-review` `active`", loop)
         self.assertIn("must not publish `passed` or a protected-merge next action", loop)
