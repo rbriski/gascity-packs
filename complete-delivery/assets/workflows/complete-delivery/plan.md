@@ -8,7 +8,8 @@ must not replace it. If the source is missing or ambiguous, fail closed rather
 than planning from the checkout.
 
 Write the plan to `{{plan_path}}` and record that exact resolved path on the
-workflow root as `gc.build.plan_path`. In YAML front matter, record `source.id`,
+workflow root as `gc.build.plan_path`. In YAML front matter, set
+`schema: gc.build.plan.v1`, `status: approved`, and record `source.id`,
 `source.title`, `source.anchor: gc:<source-id>`, and
 `source.acceptance_criteria_sha256` using the exact durable values resolved
 above. The hash is `sha256:` plus the SHA-256 digest of the exact JSON

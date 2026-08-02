@@ -1600,6 +1600,26 @@ class PreflightTests(unittest.TestCase):
                     self.assertIn("must resolve within", escaped.stderr)
             environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": verified_metadata}])
 
+            misplaced_evidence = repository / "misplaced-evidence.log"
+            misplaced_evidence.write_text("misplaced\n", encoding="utf-8")
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
+                **verified_metadata,
+                "delivery.deploy_evidence_path": str(misplaced_evidence),
+            }}])
+            misplaced = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(misplaced.returncode, 1)
+            self.assertIn("complete-delivery-check:", misplaced.stderr)
+            self.assertIn(
+                "deployment evidence path must resolve within the canonical artifact delivery directory",
+                misplaced.stderr,
+            )
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": verified_metadata}])
+
             deploy_log.write_text("verified\n", encoding="utf-8")
             forged = subprocess.run(
                 ["bash", str(RELEASE_VERIFIED_SCRIPT)],
@@ -2142,6 +2162,9 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(release_verified.count("timeout --kill-after=5s 30s gh api"), 4)
         self.assertIn("trap - HUP INT TERM", release_verified)
 
+        self.assertEqual(MERGED_SCRIPT.read_text(encoding="utf-8").count("timeout --kill-after=5s 30s gh api"), 2)
+        self.assertEqual(PR_OPEN_SCRIPT.read_text(encoding="utf-8").count("timeout --kill-after=5s 30s gh api"), 1)
+
         for prompt in ("requirements.md", "plan.md", "decompose.md"):
             prompt_text = (WORKFLOW_ROOT / prompt).read_text(encoding="utf-8")
             self.assertIn("exact unfenced H2 heading `## Source Intent`", prompt_text)
@@ -2151,6 +2174,15 @@ class PreflightTests(unittest.TestCase):
             self.assertIn("byte-for-byte", prompt_text)
             self.assertIn("trimming", prompt_text)
             self.assertIn("reformatting", prompt_text)
+
+        for prompt, schema in (
+            ("requirements.md", "gc.build.requirements.v1"),
+            ("plan.md", "gc.build.plan.v1"),
+            ("decompose.md", "gc.build.decomposition.v1"),
+        ):
+            prompt_text = (WORKFLOW_ROOT / prompt).read_text(encoding="utf-8")
+            self.assertIn(f"schema: {schema}", prompt_text)
+            self.assertIn("status: approved", prompt_text)
 
 
 class SourceArtifactTests(unittest.TestCase):
@@ -2441,6 +2473,17 @@ class SourceArtifactTests(unittest.TestCase):
                 result = self.run_check(artifact)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
+
+    def test_source_artifact_normalizes_durable_title_like_preflight(self) -> None:
+        result = self.run_check(
+            self.artifact(),
+            source_json=[{
+                "id": "fi-123",
+                "title": "  Requested delivery  ",
+                "acceptance_criteria": "The requested outcome is delivered.",
+            }],
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_source_and_upstream_artifacts_cannot_escape_work_directory(self) -> None:
         for variant in ("parent", "nested-parent", "absolute-outside", "symlink"):

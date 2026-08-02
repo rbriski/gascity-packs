@@ -33,7 +33,7 @@ class PrGateContractTests(unittest.TestCase):
         self,
         metadata: dict[str, str],
         history: list[dict],
-        mode: str,
+        mode: str | None,
         extra_env: dict[str, str] | None = None,
     ):
         with tempfile.TemporaryDirectory() as directory:
@@ -49,11 +49,14 @@ class PrGateContractTests(unittest.TestCase):
                 "state = os.environ['FAKE_GC_STATE']\n"
                 "history = os.environ['FAKE_GC_HISTORY']\n"
                 "args = sys.argv[1:]\n"
-                "if args[:2] == ['bd', 'show']:\n"
+                "subcommand = args[1] if len(args) > 1 and args[0] == 'bd' else ''\n"
+                "if subcommand == 'show':\n"
                 " print(open(state).read())\n"
-                "elif args[:2] == ['bd', 'history']:\n"
+                "elif subcommand == 'history':\n"
+                " import time\n"
+                " if os.environ.get('FAKE_GC_HANG_SUBCOMMAND') == subcommand: time.sleep(2)\n"
                 " print(open(history).read())\n"
-                "elif args[:2] == ['bd', 'update']:\n"
+                "elif subcommand == 'update':\n"
                 " data = json.load(open(state)); meta = data[0]['metadata']\n"
                 " for index, value in enumerate(args):\n"
                 "  if value == '--set-metadata':\n"
@@ -76,9 +79,10 @@ class PrGateContractTests(unittest.TestCase):
             })
             if extra_env:
                 env.update(extra_env)
-            result = subprocess.run(
-                ["bash", str(DEADLINE_SCRIPT), mode], capture_output=True, text=True, env=env
-            )
+            command = ["bash", str(DEADLINE_SCRIPT)]
+            if mode is not None:
+                command.append(mode)
+            result = subprocess.run(command, capture_output=True, text=True, env=env)
             return result, json.loads(state.read_text(encoding="utf-8")), json.loads(history_path.read_text(encoding="utf-8"))
 
     def test_external_review_deadline_is_first_write_immutable_and_fail_closed(self) -> None:
@@ -151,6 +155,20 @@ class PrGateContractTests(unittest.TestCase):
             'NOW="${DELIVERY_NOW_UTC', DEADLINE_SCRIPT.read_text(encoding="utf-8")
         )
 
+    def test_deadline_defaults_to_validation_and_bounds_discovery_reads(self) -> None:
+        defaulted, state, history = self.run_deadline({}, [], None)
+        self.assertNotEqual(defaulted.returncode, 0)
+        self.assertIn("missing", defaulted.stderr)
+        self.assertEqual(state[0]["metadata"], {})
+        self.assertEqual(history, [])
+
+        timed_out, _, _ = self.run_deadline(
+            {}, [], "--initialize", {"FAKE_GC_HANG_SUBCOMMAND": "history"}
+        )
+        self.assertNotEqual(timed_out.returncode, 0)
+        self.assertIn("during deadline discovery", timed_out.stderr)
+        self.assertIn('timeout --signal=KILL 1s gc bd history', DEADLINE_SCRIPT.read_text(encoding="utf-8"))
+
     def test_external_review_actions_and_terminal_gate_require_deadline_validation(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
         for filename in (
@@ -166,6 +184,12 @@ class PrGateContractTests(unittest.TestCase):
                 self.assertIn(".gc/scripts/checks/delivery-external-review-deadline.sh --validate", (workflows / filename).read_text(encoding="utf-8"))
         self.assertIn(".gc/scripts/checks/delivery-external-review-deadline.sh --initialize", (workflows / "{target}.setup-external-review.md").read_text(encoding="utf-8"))
         self.assertIn("delivery-external-review-deadline.sh\" --validate", TERMINAL_GATE_SCRIPT.read_text(encoding="utf-8"))
+        formula = tomllib.loads(FORMULA_PATH.read_text(encoding="utf-8"))
+        setup = next(template for template in formula["template"] if template["id"] == "{target}.setup-external-review")
+        self.assertEqual(setup["check"]["check"]["path"], ".gc/scripts/checks/delivery-external-review-deadline.sh")
+        self.assertNotIn("args", setup["check"]["check"])
+        loop = (workflows / "{target}.external-review-loop.md").read_text(encoding="utf-8")
+        self.assertIn("Immediately before every source-editing repair mutation and every commit", loop)
     @classmethod
     def setUpClass(cls) -> None:
         with FORMULA_PATH.open("rb") as formula_file:

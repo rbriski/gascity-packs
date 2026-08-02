@@ -112,6 +112,7 @@ if not isinstance(source_id, str) or not source_id.strip():
     raise SystemExit(1)
 if not isinstance(title, str) or not title.strip():
     raise SystemExit(1)
+title = title.strip()
 if (
     not isinstance(acceptance_criteria, str) or not acceptance_criteria.strip()
 ):

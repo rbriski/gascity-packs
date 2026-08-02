@@ -79,7 +79,8 @@ delivery_resolve_artifact_delivery_evidence() {
   artifact_root="$(delivery_resolve_contained_path "$artifact_root" "artifact_root")"
   delivery_dir="$(delivery_resolve_contained_path "$artifact_root/delivery" "artifact delivery directory")"
   resolved="$(delivery_resolve_contained_path "$value" "$label")"
-  python3 - "$delivery_dir" "$resolved" <<'PY'
+  python3 - "$delivery_dir" "$resolved" <<'PY' || \
+    delivery_fail "$label must resolve within the canonical artifact delivery directory"
 import sys
 from pathlib import Path
 

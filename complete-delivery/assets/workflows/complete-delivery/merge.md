@@ -6,12 +6,11 @@ nonempty full 40-character lowercase Git SHA, and assign it explicitly as
 `DELIVERY_HEAD_SHA`. Require the PR-gate SHA to equal that value, then pass it as the atomic
 expected-head guard. Resolve the previously validated durable `delivery.pr_url`
 into a nonempty `DELIVERY_PR_URL`. Merge only with the canonical guarded
-command below after selecting its method flag. Read
-`gc.var.merge_method`, require one of those three exact values, and assign it
-explicitly as `MERGE_METHOD`. Map that validated value before merging: `squash`
-to `--squash`, `merge` to `--merge`, and `rebase` to `--rebase`; reject every
-other value. Use the
-selected flag together with `--match-head-commit`. Never use
+command below after selecting its method flag. Read `gc.var.merge_method` and
+require exactly one of `squash`, `merge`, or `rebase`. Assign it explicitly as
+`MERGE_METHOD`. Map that validated value before merging: `squash` to
+`--squash`, `merge` to `--merge`, and `rebase` to `--rebase`; reject every
+other value. Never use
 `--admin`, a force push, or a direct push to the protected base. If the head
 moves, checks restart, approval is dismissed, or mergeability is unknown,
 wait/reconcile through the prior gate rather than bypassing it. Preserve the

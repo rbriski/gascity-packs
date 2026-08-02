@@ -10,8 +10,9 @@ auditable.
 
 Write the decomposition artifact to `{{decomposition_path}}` (declared by the
 inherited `gstack-build` formula) and record that exact path on the workflow
-root as `gc.build.decomposition_path`. In its YAML front matter, record
-`source.id`, `source.title`, `source.anchor: gc:<source-id>`, and
+root as `gc.build.decomposition_path`. In its YAML front matter, set
+`schema: gc.build.decomposition.v1`, `status: approved`, and record `source.id`,
+`source.title`, `source.anchor: gc:<source-id>`, and
 `source.acceptance_criteria_sha256` using the exact durable values. The hash is
 `sha256:` plus the SHA-256 digest of the exact JSON `acceptance_criteria`
 string returned by `gc bd show <source-id> --json`, byte-for-byte without

@@ -4,22 +4,60 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=delivery-common.sh
 source "$SCRIPT_DIR/delivery-common.sh"
+command -v timeout >/dev/null 2>&1 || delivery_fail "timeout is required on PATH"
+# Context has to be read before this gate can discover a durable deadline.
+# Bound those bootstrap reads tightly; once a deadline is known, all later gc
+# calls use its remaining time instead.
+DELIVERY_GC_TIMEOUT=1s
 delivery_initialize_context
+unset DELIVERY_GC_TIMEOUT
 
-MODE="${1:---initialize}"
+MODE="${1:---validate}"
 case "$MODE" in
   --initialize|--validate) ;;
   *) delivery_fail "usage: delivery-external-review-deadline.sh [--initialize|--validate]" ;;
 esac
 
-STARTED_AT="$(delivery_root_metadata delivery.external_review_started_at)"
-DEADLINE="$(delivery_root_metadata delivery.external_review_deadline)"
-HISTORY="$(gc bd history "$DELIVERY_ROOT_ID" --json)" || \
-  delivery_fail "cannot read workflow-root metadata history"
 # This is a fail-closed production gate.  Do not accept a caller-provided
 # clock: a stale/expired deadline must not become valid merely because a
 # caller freezes time in its environment.
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+STARTED_AT="$(delivery_root_metadata delivery.external_review_started_at)"
+DEADLINE="$(delivery_root_metadata delivery.external_review_deadline)"
+
+delivery_remaining_deadline_timeout() {
+  python3 - "$DEADLINE" <<'PY'
+import datetime as dt
+import sys
+
+try:
+    deadline = dt.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+except ValueError:
+    raise SystemExit("external-review deadline must be canonical UTC YYYY-MM-DDTHH:MM:SSZ")
+# Subtract one full second so a command's timeout cannot extend beyond the
+# immutable canonical-second deadline while the clock advances during launch.
+remaining = int((deadline - dt.datetime.now(dt.timezone.utc)).total_seconds()) - 1
+if remaining <= 0:
+    raise SystemExit("external-review deadline has expired")
+print(f"{remaining}s")
+PY
+}
+
+delivery_history_before_deadline() {
+  local remaining
+  remaining="$(delivery_remaining_deadline_timeout)" || return 1
+  timeout --signal=KILL "$remaining" gc bd history "$DELIVERY_ROOT_ID" --json
+}
+
+if [ -n "$DEADLINE" ]; then
+  known_timeout="$(delivery_remaining_deadline_timeout 2>&1)" || \
+    delivery_fail "$known_timeout"
+  HISTORY="$(timeout --signal=KILL "$known_timeout" gc bd history "$DELIVERY_ROOT_ID" --json)" || \
+    delivery_fail "cannot read workflow-root metadata history before external-review deadline"
+else
+  HISTORY="$(timeout --signal=KILL 1s gc bd history "$DELIVERY_ROOT_ID" --json)" || \
+    delivery_fail "cannot read workflow-root metadata history during deadline discovery"
+fi
 
 if [ "$MODE" = "--initialize" ] && [ -z "$STARTED_AT" ] && [ -z "$DEADLINE" ]; then
   INITIAL_OUTPUT="$(python3 - "$NOW" "$HISTORY" <<'PY'
@@ -57,14 +95,16 @@ print((now + dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
 PY
   )" || delivery_fail "cannot initialize external-review deadline"
   readarray -t INITIAL <<<"$INITIAL_OUTPUT"
-  gc bd update "$DELIVERY_ROOT_ID" \
-    --set-metadata "delivery.external_review_started_at=${INITIAL[0]}" \
-    --set-metadata "delivery.external_review_deadline=${INITIAL[1]}" || \
-    delivery_fail "cannot persist external-review deadline on workflow root"
   STARTED_AT="${INITIAL[0]}"
   DEADLINE="${INITIAL[1]}"
-  HISTORY="$(gc bd history "$DELIVERY_ROOT_ID" --json)" || \
-    delivery_fail "cannot re-read persisted workflow-root deadline"
+  gc_update_timeout="$(delivery_remaining_deadline_timeout)" || \
+    delivery_fail "external-review deadline expired before persistence"
+  timeout --signal=KILL "$gc_update_timeout" gc bd update "$DELIVERY_ROOT_ID" \
+    --set-metadata "delivery.external_review_started_at=${INITIAL[0]}" \
+    --set-metadata "delivery.external_review_deadline=${INITIAL[1]}" || \
+    delivery_fail "cannot persist external-review deadline on workflow root before expiration"
+  HISTORY="$(delivery_history_before_deadline)" || \
+    delivery_fail "cannot re-read persisted workflow-root deadline before expiration"
 fi
 
 python3 - "$NOW" "$STARTED_AT" "$DEADLINE" "$HISTORY" <<'PY' || \

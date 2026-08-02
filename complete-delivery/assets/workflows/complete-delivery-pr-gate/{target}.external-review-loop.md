@@ -5,6 +5,11 @@ Before admitting any child action or running the terminal check, require
 The terminal checker independently repeats this validation before its provider
 action; no expired or rewritten deadline may authorize another iteration.
 
+Immediately before every source-editing repair mutation and every commit, run
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate` again.
+Earlier iteration or evidence validation does not authorize a later edit or
+commit after the immutable deadline has elapsed.
+
 The children inspect evidence, resolve valid findings, rerun exact local gates,
 publish fixes, and update the living report. The loop check then evaluates
 required CI, CodeRabbit completion, all live unresolved review threads, human
