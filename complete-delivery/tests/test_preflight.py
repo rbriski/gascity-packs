@@ -393,7 +393,7 @@ class PreflightTests(unittest.TestCase):
                 self.assertIn(f"{missing_key} is missing", result.stderr)
                 self.assertFalse(command_marker.exists())
 
-    def test_not_applicable_release_verification_requires_nonempty_deploy_evidence(self) -> None:
+    def test_not_applicable_release_verification_requires_evidence_and_no_smoke_reason(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             repository = root / "repo"
@@ -433,6 +433,44 @@ class PreflightTests(unittest.TestCase):
             evidence.write_text("not applicable evidence\n", encoding="utf-8")
             environment["FAKE_GC_JSON"] = json.dumps([{"metadata": {**base_metadata, "delivery.deploy_evidence_path": str(evidence)}}])
             result = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            for reason in ("", " \t "):
+                with self.subTest(no_smoke_reason=repr(reason)):
+                    environment["FAKE_GC_JSON"] = json.dumps(
+                        [{"metadata": {
+                            **base_metadata,
+                            "delivery.deploy_evidence_path": str(evidence),
+                            "gc.var.allow_no_smoke": "true",
+                            "gc.var.no_smoke_reason": reason,
+                        }}]
+                    )
+                    result = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn(
+                        "no_smoke_reason is required and must be nonblank",
+                        result.stderr,
+                    )
+
+            environment["FAKE_GC_JSON"] = json.dumps(
+                [{"metadata": {
+                    **base_metadata,
+                    "delivery.deploy_evidence_path": str(evidence),
+                    "gc.var.allow_no_smoke": "true",
+                    "gc.var.no_smoke_reason": "No production smoke surface exists",
+                }}]
+            )
+            result = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_release_verification_requires_exact_sha_command_and_bounds_timeouts(self) -> None:

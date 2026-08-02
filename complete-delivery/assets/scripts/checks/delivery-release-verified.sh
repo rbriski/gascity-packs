@@ -110,6 +110,12 @@ VERIFY_EVIDENCE="$(delivery_root_metadata delivery.verify_evidence_path)"
 DEPLOY_MODE="$(delivery_var deploy_mode command)"
 DEPLOY_COMMAND="$(delivery_var deploy_command "")"
 NA_REASON="$(delivery_var deploy_not_applicable_reason "")"
+ALLOW_NO_SMOKE="$(delivery_var allow_no_smoke false)"
+NO_SMOKE_REASON="$(delivery_var no_smoke_reason '')"
+
+if [ "$ALLOW_NO_SMOKE" = "true" ] && ! [[ "$NO_SMOKE_REASON" =~ [^[:space:]] ]]; then
+  delivery_fail "no_smoke_reason is required and must be nonblank when allow_no_smoke=true"
+fi
 
 [ -n "$MERGE_SHA" ] || delivery_fail "delivery.merge_sha is missing"
 [[ "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || \
@@ -157,14 +163,8 @@ cd "$DELIVERY_WORK_DIR"
 
 VERIFY_COMMAND="$(delivery_var deploy_verify_command "")"
 SMOKE_COMMAND="$(delivery_var smoke_command "")"
-ALLOW_NO_SMOKE="$(delivery_var allow_no_smoke false)"
-NO_SMOKE_REASON="$(delivery_var no_smoke_reason '')"
 VERIFY_TIMEOUT="$(delivery_var deploy_verify_timeout 5m)"
 SMOKE_TIMEOUT="$(delivery_var smoke_timeout 5m)"
-
-if [ "$ALLOW_NO_SMOKE" = "true" ] && ! [[ "$NO_SMOKE_REASON" =~ [^[:space:]] ]]; then
-  delivery_fail "no_smoke_reason is required and must be nonblank when allow_no_smoke=true"
-fi
 
 delivery_command_is_nonblank "$VERIFY_COMMAND" || \
   delivery_fail "deploy_verify_command is required for deploy_mode=$DEPLOY_MODE"
