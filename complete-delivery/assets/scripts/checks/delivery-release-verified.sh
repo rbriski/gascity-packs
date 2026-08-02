@@ -60,14 +60,21 @@ cd "$DELIVERY_WORK_DIR"
 VERIFY_COMMAND="$(delivery_var deploy_verify_command "")"
 SMOKE_COMMAND="$(delivery_var smoke_command "")"
 ALLOW_NO_SMOKE="$(delivery_var allow_no_smoke false)"
+VERIFY_TIMEOUT="$(delivery_var deploy_verify_timeout 5m)"
+SMOKE_TIMEOUT="$(delivery_var smoke_timeout 5m)"
 
-if [ -n "$VERIFY_COMMAND" ]; then
-  echo "complete-delivery deploy verification: $VERIFY_COMMAND"
-  bash -lc "$VERIFY_COMMAND" || delivery_fail "deploy_verify_command failed"
-fi
+[ -n "$VERIFY_COMMAND" ] || \
+  delivery_fail "deploy_verify_command is required for deploy_mode=$DEPLOY_MODE"
+[ -n "$VERIFY_TIMEOUT" ] || delivery_fail "deploy_verify_timeout is required"
+[ -n "$SMOKE_TIMEOUT" ] || delivery_fail "smoke_timeout is required"
+
+echo "complete-delivery deploy verification: $VERIFY_COMMAND"
+timeout "$VERIFY_TIMEOUT" bash -lc "$VERIFY_COMMAND" || \
+  delivery_fail "deploy_verify_command failed or timed out"
 if [ -n "$SMOKE_COMMAND" ]; then
   echo "complete-delivery production smoke: $SMOKE_COMMAND"
-  bash -lc "$SMOKE_COMMAND" || delivery_fail "smoke_command failed"
+  timeout "$SMOKE_TIMEOUT" bash -lc "$SMOKE_COMMAND" || \
+    delivery_fail "smoke_command failed or timed out"
 elif [ "$ALLOW_NO_SMOKE" != "true" ]; then
   delivery_fail "smoke_command is required unless allow_no_smoke=true"
 fi

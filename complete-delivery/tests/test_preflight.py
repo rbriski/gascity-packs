@@ -15,6 +15,7 @@ SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-preflight.sh"
 RELEASE_VERIFIED_SCRIPT = (
     PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-release-verified.sh"
 )
+PR_OPEN_SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-pr-open.sh"
 SOURCE_ARTIFACT_SCRIPT = (
     PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-source-artifact-valid.sh"
 )
@@ -108,9 +109,9 @@ class PreflightTests(unittest.TestCase):
                     or json.dumps([{"metadata": metadata}]),
                     "FAKE_GC_ROOT_ID": "root-1" if root_json is not None else "",
                     "FAKE_GC_ROOT_JSON": root_json or "",
-                    "FAKE_GC_SOURCE_ID": self.metadata().get("gc.var.source_bead_id", ""),
+                    "FAKE_GC_SOURCE_ID": metadata.get("gc.var.source_bead_id", ""),
                     "FAKE_GC_SOURCE_JSON": source_json
-                    or json.dumps([{"title": self.metadata()["gc.var.source_title"]}]),
+                    or json.dumps([{"title": metadata.get("gc.var.source_title", "")}]),
                     "FAKE_GH_PROTECTED": str(protected).lower(),
                     "FAKE_GC_FAILURES_FILE": str(failures_file),
                     "PATH": f"{bin_dir}:{environment['PATH']}",
@@ -157,6 +158,18 @@ class PreflightTests(unittest.TestCase):
         )
         self.assertEqual(mismatched.returncode, 1)
         self.assertIn("source_title must exactly match the resolved durable source title", mismatched.stderr)
+
+    def test_source_fixture_uses_overridden_metadata(self) -> None:
+        result = self.run_preflight(
+            self.metadata(
+                **{
+                    "gc.var.source_bead_id": "alternate-456",
+                    "gc.var.source_title": "Alternate delivery",
+                }
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("source=alternate-456", result.stdout)
 
     def test_zero_local_gates_fail_closed_without_opt_out(self) -> None:
         result = self.run_preflight(self.metadata(**{"gc.var.setup_command": ""}))
@@ -339,6 +352,130 @@ class PreflightTests(unittest.TestCase):
             environment["FAKE_GC_JSON"] = json.dumps([{"metadata": {**base_metadata, "delivery.deploy_evidence_path": str(evidence)}}])
             result = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_release_verification_requires_exact_sha_command_and_bounds_timeouts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            evidence = root / "evidence.txt"
+            evidence.write_text("verified\n", encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gc = bin_dir / "gc"
+            gc.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_JSON"\n', encoding="utf-8")
+            gc.chmod(0o755)
+            base_metadata = {
+                "delivery.merge_sha": "a" * 40,
+                "delivery.deployed_sha": "a" * 40,
+                "delivery.deploy_status": "verified",
+                "delivery.deploy_evidence_path": str(evidence),
+                "delivery.verify_evidence_path": str(evidence),
+                "delivery.repo": "example/repo",
+                "delivery.pr_number": "123",
+                "gc.var.deploy_mode": "ci",
+                "gc.var.allow_no_smoke": "true",
+            }
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GC_BEAD_ID": "step-1",
+                    "GC_WORK_DIR": str(repository),
+                    "PATH": f"{bin_dir}:{environment['PATH']}",
+                }
+            )
+            environment["FAKE_GC_JSON"] = json.dumps([{"metadata": base_metadata}])
+            missing = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(missing.returncode, 1)
+            self.assertIn("deploy_verify_command is required for deploy_mode=ci", missing.stderr)
+
+            environment["FAKE_GC_JSON"] = json.dumps(
+                [
+                    {
+                        "metadata": {
+                            **base_metadata,
+                            "gc.var.deploy_verify_command": "sleep 1",
+                            "gc.var.deploy_verify_timeout": "0.01s",
+                        }
+                    }
+                ]
+            )
+            timed_out = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(timed_out.returncode, 1)
+            self.assertIn("deploy_verify_command failed or timed out", timed_out.stderr)
+
+    def test_pr_open_validates_full_recorded_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gc = bin_dir / "gc"
+            gc.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_JSON"\n', encoding="utf-8")
+            gc.chmod(0o755)
+            gh = bin_dir / "gh"
+            gh.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_PR_JSON"\n', encoding="utf-8")
+            gh.chmod(0o755)
+            metadata = {
+                "delivery.repo": "example/repo",
+                "delivery.pr_number": "123",
+                "delivery.head_sha": "a" * 40,
+                "delivery.pr_url": "https://github.com/example/repo/pull/123",
+                "gc.var.base_branch": "main",
+            }
+            pull = {
+                "state": "open",
+                "draft": False,
+                "head": {"sha": "a" * 40},
+                "base": {"ref": "main", "repo": {"full_name": "example/repo"}},
+                "number": 123,
+                "html_url": metadata["delivery.pr_url"],
+            }
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GC_BEAD_ID": "step-1",
+                    "GC_WORK_DIR": str(root),
+                    "FAKE_GC_JSON": json.dumps([{"metadata": metadata}]),
+                    "FAKE_PR_JSON": json.dumps(pull),
+                    "PATH": f"{bin_dir}:{environment['PATH']}",
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(PR_OPEN_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for mutation, message in (
+                ({"state": "closed"}, "PR is not open"),
+                ({"draft": True}, "PR is still a draft"),
+                ({"head": {"sha": "b" * 40}}, "does not match GitHub head"),
+                ({"base": {"ref": "wrong-base", "repo": {"full_name": "example/repo"}}}, "does not match configured base branch"),
+                ({"base": {"ref": "main", "repo": {"full_name": "other/repo"}}}, "does not match recorded repository"),
+                ({"number": 456}, "does not match recorded PR number"),
+                ({"html_url": "https://github.com/example/repo/pull/456"}, "does not match recorded URL"),
+            ):
+                with self.subTest(message=message):
+                    environment["FAKE_PR_JSON"] = json.dumps({**pull, **mutation})
+                    result = subprocess.run(
+                        ["bash", str(PR_OPEN_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn(message, result.stderr)
 
     def test_lifecycle_prompts_preserve_current_head_and_mode_contracts(self) -> None:
         with FORMULA_PATH.open("rb") as formula_file:

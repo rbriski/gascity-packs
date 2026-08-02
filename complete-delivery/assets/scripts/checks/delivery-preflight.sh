@@ -54,6 +54,8 @@ DEPLOY_MODE="$(delivery_var deploy_mode command)"
 DEPLOY_COMMAND="$(delivery_var deploy_command '')"
 VERIFY_COMMAND="$(delivery_var deploy_verify_command '')"
 SMOKE_COMMAND="$(delivery_var smoke_command '')"
+VERIFY_TIMEOUT="$(delivery_var deploy_verify_timeout 5m)"
+SMOKE_TIMEOUT="$(delivery_var smoke_timeout 5m)"
 NA_REASON="$(delivery_var deploy_not_applicable_reason '')"
 PRODUCTION_URL="$(delivery_var production_url '')"
 BASE_BRANCH="$(delivery_var base_branch main)"
@@ -138,6 +140,8 @@ case "$DEPLOY_MODE" in
     [ -n "$NA_REASON" ] || errors+=("deploy_not_applicable_reason is required for deploy_mode=not-applicable")
     ;;
 esac
+[ -n "$VERIFY_TIMEOUT" ] || errors+=("deploy_verify_timeout is required")
+[ -n "$SMOKE_TIMEOUT" ] || errors+=("smoke_timeout is required")
 if [ "$DEPLOY_MODE" != "not-applicable" ] && [ -z "$SMOKE_COMMAND" ] && \
   [ "$ALLOW_NO_SMOKE" != "true" ]; then
   errors+=("smoke_command is required unless allow_no_smoke=true")

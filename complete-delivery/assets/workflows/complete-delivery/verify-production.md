@@ -1,10 +1,14 @@
 Verify production behavior and exact-SHA attestation.
 
-For a real deployment, run `deploy_verify_command` when configured, then run
-`smoke_command` with `DELIVERY_SHA=delivery.merge_sha` when
-`allow_no_smoke=false`. When `allow_no_smoke=true`, record the explicit
-no-smoke exception instead; it never waives deployment verification or
-exact-SHA attestation. Capture full evidence at
+For every real deployment mode (`command` or `ci`), require and run
+`deploy_verify_command` with `DELIVERY_SHA=delivery.merge_sha` under its
+explicit configured timeout; it must prove the deployed revision is that exact
+SHA. Then run `smoke_command` under its explicit configured timeout with the
+same `DELIVERY_SHA` when `allow_no_smoke=false`. When `allow_no_smoke=true`,
+record the explicit no-smoke exception instead; it never waives deployment
+verification or exact-SHA attestation. Treat either command timeout as a failed
+repair-redeploy-reverify attempt and record it in the verification evidence.
+Capture full evidence at
 `<artifact_root>/delivery/verify.log`. The verification path must prove the
 deployed revision is the merge SHA; a local checkout SHA, a successful build,
 or an HTTP 200 without revision evidence is insufficient when the service can

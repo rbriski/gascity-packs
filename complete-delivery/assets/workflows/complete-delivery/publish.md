@@ -19,8 +19,11 @@ metadata fields before closing:
 - `delivery.pr_url`
 
 If a PR already exists for the branch, update it instead of opening a
-duplicate. Never bypass branch protection or claim external review is green.
-Close with `gc.outcome=pass`; the graph check independently verifies the open
-PR and exact head.
+duplicate. Before `gc.outcome=pass`, run `delivery-pr-open.sh` and require it
+to prove the PR is open and non-draft, its head equals `delivery.head_sha`, its
+base equals `gc.var.base_branch`, and its repository, number, and URL exactly
+equal `delivery.repo`, `delivery.pr_number`, and `delivery.pr_url`. Never
+bypass branch protection or claim external review is green. The graph check
+independently repeats this identity and exact-head validation.
 
 Do not invoke provider-native subagents.

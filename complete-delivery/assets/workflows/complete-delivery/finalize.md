@@ -15,11 +15,16 @@ review, merge, deploy, and verification still follow. Record the absolute path
 on the workflow root as `gc.build.final_report_path`.
 
 Before finalizing, read `gc.var.source_bead_id` and the durable source bead or
-convoy. Add a `Source trace` subsection that records its ID and title and links
-the approved requirements, plan, and decomposition back to the source
-acceptance criteria. This trace proves the delivered outcome is the requested
-work rather than a coincidental repository-HEAD change. Do not reproduce raw
-source notes or sensitive source text in the public living report.
+convoy. Fail closed if the source ID is absent, the durable bead or convoy
+cannot be read, its title or acceptance criteria are absent, or the approved
+requirements, plan, and decomposition cannot be linked back to those criteria.
+In any of those cases, record the unresolved trace as a blocker and close with
+a non-pass outcome; do not write a passing final report or set
+`gc.outcome=pass`. Only after every value resolves may the `Source trace`
+subsection record the exact ID and title and link the approved artifacts back to
+the source acceptance criteria. This trace proves the delivered outcome is the
+requested work rather than a coincidental repository-HEAD change. Do not
+reproduce raw source notes or sensitive source text in the public living report.
 
 On repair attempts, read validator errors from `gc.attempt_log` and repair the
 artifact in place. Close with `gc.outcome=pass`; the graph's shared artifact
