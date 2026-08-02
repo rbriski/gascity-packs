@@ -1,42 +1,35 @@
 Publish this iteration's verified review fixes.
 
 Read `<artifact_root>/delivery/external-review-handoff.json`; before every
-publication or no-push refresh attempt, invalidate old `published_head` and
-`published_head_matches_tested_commit` success evidence, and invalidate
-`tested_commit` and `local_gates` if their candidate is no longer the exact
-current attempt. Require its local gates to have passed for its recorded exact
-commit before publishing. Require a
-clean checkout and require `HEAD` to still exactly equal `tested_commit`; do
-not commit, amend, or otherwise mutate the tree after testing. A newly
-discovered source fix must return to `rerun-local-gates` for a fresh committed
-candidate and complete retest. Push exactly `tested_commit` normally to the
-existing PR branch, and never force-push. If no source changed, perform no
-empty commit or push. In every iteration, including a no-push iteration,
-refresh the PR and persist its full-SHA `published_head`, `tested_commit`, and boolean
-`published_head_matches_tested_commit` in the handoff artifact. Record the
-current head on the workflow root as `delivery.head_sha`; a new head
-deliberately invalidates old CI and CodeRabbit evidence for the next loop
-check.
-
-For every mapped finding in the durable handoff artifact, resolve a valid
-thread only when its recorded fix evidence has passed, and resolve an invalid,
-superseded, or otherwise non-actionable thread only when its recorded
-disposition evidence has been published. Every such resolution additionally
-requires that `published_head` is exactly equal to the
-artifact's `tested_commit`; only resolve when `published_head == tested_commit` and
-`published_head_matches_tested_commit` is true. If the push or head refresh
-fails, is blocked, skipped, unavailable, malformed, or stale, record a
-publication failure, keep every mapped thread open, clear or explicitly
-overwrite every tested/local-gate and published/equality success field as
-failed, and do not record passing publication evidence. Before another
-inspection or local-gate execution, reacquire a current PR head that is a full
-SHA. Separately, only when a successful refresh returns a different full-SHA
-`published_head` may that differing-head state be recorded for the next Formula
-iteration to inspect and retest that exact refreshed head; it still keeps every
-mapped thread open and cannot produce passing publication evidence. A
-successful differing head is not a publication-refresh failure.
-Commit
-containment alone is not sufficient to resolve a thread.
+attempt, replace it with current-attempt state and invalidate old
+`tested_commit`, `local_gates`, `published_head`, and equality success evidence.
+Require passed local gates for its exact commit, a clean checkout, and
+`HEAD == tested_commit`; do not mutate after testing. A newly discovered
+source fix returns to `rerun-local-gates` for a fresh committed candidate and
+complete retest. Acquire one shared repository-scoped publication lock before
+any push, no-push refresh, final head check, or `resolveReviewThread` call;
+every path that can push this PR must acquire that same lock. While holding it,
+Push exactly `tested_commit` normally (never force-push), or make no empty
+commit/push when source did not change; refresh the PR, persist its full-SHA
+`published_head`, `tested_commit`, and boolean
+`published_head_matches_tested_commit`, then perform all permitted thread
+resolutions before releasing the lock. No push may occur after that final head
+check and before all resolution calls finish. Record the current head on the
+workflow root as `delivery.head_sha`; a new head invalidates old CI and
+CodeRabbit evidence for the next loop check.
+For every current-attempt mapped finding, resolve a valid thread only when its
+fix evidence passed, and resolve an invalid, superseded, or otherwise
+non-actionable thread only when its disposition evidence was published. Still
+under that lock, every resolution requires `published_head` is exactly equal to
+the artifact's `tested_commit` (`published_head == tested_commit`) and
+`published_head_matches_tested_commit` is true. Commit containment alone is not sufficient.
+On failed, blocked, skipped, unavailable, malformed, or stale push/refresh,
+record a publication failure, write blocker-only state, keep every mapped thread open, and do not record
+passing publication evidence, then reacquire a current PR head that is a full SHA before
+another inspection or gate run. Only when a successful refresh returns a
+different full-SHA may that `published_head` be next-iteration state, not a
+publication failure; it keeps every mapped thread open and cannot authorize
+resolution.
 
 Close with `gc.outcome=pass`. Do not merge or invoke provider-native
 subagents.

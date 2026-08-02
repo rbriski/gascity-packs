@@ -134,7 +134,7 @@ class PrGateContractTests(unittest.TestCase):
         )
 
         self.assert_prose_contains(prompt, "Never push or resolve a thread in this lane")
-        self.assertIn("resolve valid mapped threads when `published_head == tested_commit`", prompt)
+        self.assertIn("resolve only a current mapped thread", prompt)
         self.assertIn("Only the Formula v2 `external-review-loop` terminal check", prompt)
         self.assertNotIn("After fixes are pushed and applicable review threads are resolved", prompt)
 
@@ -173,7 +173,7 @@ class PrGateContractTests(unittest.TestCase):
             self.assertIn("Never run such a gate before publication", content)
 
         self.assert_prose_contains(
-            publish_fixes, "`published_head` is exactly equal to the artifact's `tested_commit`"
+            publish_fixes, "`published_head == tested_commit`"
         )
         self.assert_prose_contains(publish_fixes, "Commit containment alone is not sufficient")
         self.assertIn("Formula iteration to inspect and retest that exact refreshed head", prompt)
@@ -213,13 +213,15 @@ class PrGateContractTests(unittest.TestCase):
             self.assertIn("inspected_head", content)
             self.assertIn("no source", content)
             self.assertIn("final committed `HEAD`", content)
-            self.assertIn("separate `fix_commit`", content)
-        self.assertIn("candidate_commit", rerun_local_gates)
-        self.assertIn("tested_commit", rerun_local_gates)
-        self.assertIn("final committed `HEAD`", rerun_local_gates)
-        self.assertIn("individual thread `fix_commit`", rerun_local_gates)
+            self.assertTrue(all(term in content for term in ("`fix_commit`", "clean worktree", "HEAD == inspected_head", "blocker-only")))
         for content in (prompt, publish_fixes):
-            self.assertIn("no-push iteration", content)
+            normalized = " ".join(content.split())
+            self.assertTrue(all(term in normalized for term in ("shared repository-scoped", "resolveReviewThread")))
+            self.assertTrue("between that final check and all" in normalized or "after that final head check and before all" in normalized)
+        self.assertTrue(all(term in resolve_findings for term in ("replace the entire handoff object", "only blocker state")))
+        self.assertTrue(all(term in rerun_local_gates for term in ("candidate_commit", "tested_commit", "final committed `HEAD`", "individual thread `fix_commit`")))
+        for content in (prompt, publish_fixes):
+            self.assert_prose_contains(content, "no empty commit/push")
             self.assertIn("published_head_matches_tested_commit", content)
 
     def test_handoff_instructions_require_immutable_test_and_publish_tree(self) -> None:
@@ -236,7 +238,7 @@ class PrGateContractTests(unittest.TestCase):
         self.assertIn("candidate_commit", rerun_local_gates)
         self.assertIn("remain clean", rerun_local_gates)
         self.assertIn("still equal `candidate_commit`", rerun_local_gates)
-        self.assertIn("still exactly equal `tested_commit`", publish_fixes)
+        self.assertIn("`HEAD == tested_commit`", publish_fixes)
         self.assertIn("Push exactly `tested_commit`", publish_fixes)
 
     def test_non_actionable_thread_resolution_requires_published_disposition_evidence(self) -> None:
@@ -246,7 +248,7 @@ class PrGateContractTests(unittest.TestCase):
         )
 
         self.assert_prose_contains(publish_fixes, "invalid, superseded, or otherwise non-actionable")
-        self.assertIn("disposition evidence has been published", publish_fixes)
+        self.assertIn("disposition evidence was published", publish_fixes)
         self.assertIn("published_head_matches_tested_commit` is true", publish_fixes)
 
     def test_every_thread_resolution_instruction_requires_exact_head_equality(self) -> None:
@@ -465,7 +467,8 @@ class PrGateContractTests(unittest.TestCase):
             with self.subTest(form=form), tempfile.TemporaryDirectory() as directory:
                 marker = pathlib.Path(directory) / "inline-ran"
                 code = shlex.quote(f"touch {marker}")
-                command = f"{form}{code}" if form.endswith("=") or form.endswith("-e") or form.endswith("-p") or form.endswith("-c") or form.endswith("-E") else f"{form} {code}"
+                attached_code = form.endswith(("=", "-e", "-p", "-c", "-E"))
+                command = f"{form}{code}" if attached_code else f"{form} {code}"
                 result, _ = self.run_local_gates(command)
 
                 self.assertNotEqual(result.returncode, 0)
@@ -474,8 +477,11 @@ class PrGateContractTests(unittest.TestCase):
 
     def test_local_gates_allow_awk_program_files_with_positional_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory); program = root / "program.awk"; input_file = root / "input.txt"
-            program.write_text("{ print }\n", encoding="utf-8"); input_file.write_text("benign input\n", encoding="utf-8")
+            root = pathlib.Path(directory)
+            program = root / "program.awk"
+            input_file = root / "input.txt"
+            program.write_text("{ print }\n", encoding="utf-8")
+            input_file.write_text("benign input\n", encoding="utf-8")
             result, _ = self.run_local_gates(f"awk -f {shlex.quote(str(program))} {shlex.quote(str(input_file))}")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("benign input", result.stdout)
@@ -638,17 +644,12 @@ class PrGateContractTests(unittest.TestCase):
                 "invalidate stale `tested_commit`, `local_gates`, `published_head`, "
                 "and `published_head_matches_tested_commit`"
             ),
-            "{target}.resolve-findings.md": (
-                "no non-success path may retain success from an earlier attempt"
-            ),
+            "{target}.resolve-findings.md": "write only blocker state",
             "{target}.rerun-local-gates.md": (
                 "must leave all of those success fields cleared or explicitly "
                 "overwritten as failed"
             ),
-            "{target}.publish-fixes.md": (
-                "clear or explicitly overwrite every tested/local-gate and "
-                "published/equality success field as failed"
-            ),
+            "{target}.publish-fixes.md": "write blocker-only state",
             "{target}.report-external-review.md": (
                 "otherwise invalidate `tested_commit`, `local_gates`, `published_head`, "
                 "and `published_head_matches_tested_commit`"

@@ -1,9 +1,12 @@
 Resolve valid findings from the current-head gate snapshot.
 
-Read the gate JSON, failed-check logs, every unresolved review thread in full,
-and current diff. Reproduce each concern. Apply the smallest correct fix and
-focused regression coverage for valid findings. For invalid or already
-superseded findings, respond with concrete evidence.
+Read the gate JSON and, before reading the diff, logs, or threads, require a
+clean worktree (`git status --porcelain` empty) and canonical full-SHA
+`HEAD == inspected_head`. If either fails, replace the handoff with blocker-only
+state and restart inspection; do not reproduce, edit, or commit. Then read
+every unresolved thread in full and reproduce each concern. Apply the smallest
+correct fix and focused regression coverage for valid findings. For invalid or
+already superseded findings, respond with concrete evidence.
 
 Keep every thread open while editing and committing. Write the durable handoff
 artifact `<artifact_root>/delivery/external-review-handoff.json` before closing
@@ -15,14 +18,14 @@ use the final committed `HEAD` after every valid source fix in this iteration.
 Never use an individual thread's `fix_commit` as `candidate_commit` when later
 fixes exist.
 
-Before starting a new resolution attempt, clear any prior successful
-`tested_commit`, `local_gates`, `published_head`, and
-`published_head_matches_tested_commit` evidence from that artifact. If review
-input is missing, malformed, stale, blocked, skipped, unavailable, or does not
-match the current inspected head, keep that evidence cleared (or explicitly
-overwrite it as failed) and record the blocker; no non-success path may retain
-success from an earlier attempt.
-
+Before every resolution attempt, replace the entire handoff object rather than
+clearing selected fields. A successful object contains only this attempt's
+`inspected_head`, fresh `candidate_commit`, and current thread IDs,
+dispositions, and `fix_commit` values. If review input is missing, malformed,
+stale, blocked, skipped, unavailable, or mismatches `inspected_head`, write
+only blocker state: no candidate, thread mapping, disposition, `fix_commit`,
+`tested_commit`, `local_gates`, `published_head`, or equality evidence may
+remain to authorize later work.
 This lane must never push or resolve a thread. `rerun-local-gates` tests the
 recorded `candidate_commit` and records it as `tested_commit` in the same
 artifact; `publish-fixes` alone reads the published disposition evidence and
