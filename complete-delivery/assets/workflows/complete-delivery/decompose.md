@@ -10,7 +10,8 @@ auditable.
 
 In the decomposition artifact YAML front matter, record `source.id`,
 `source.title`, and `source.anchor: gc:<source-id>` using the exact durable
-values. Start its body with a `Source Intent` section naming that same source.
+values. Start its body with the exact unfenced H2 heading `## Source Intent`
+and place that same resolved source ID and title immediately below it.
 
 Each bead must map to one vertical slice and include acceptance criteria, likely
 files/modules, a first verification command, and expected proof command. Do

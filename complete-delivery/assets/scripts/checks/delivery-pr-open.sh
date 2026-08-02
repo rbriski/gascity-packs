@@ -11,11 +11,12 @@ REPO="$(delivery_root_metadata delivery.repo)"
 PR_NUMBER="$(delivery_root_metadata delivery.pr_number)"
 RECORDED_SHA="$(delivery_root_metadata delivery.head_sha)"
 RECORDED_URL="$(delivery_root_metadata delivery.pr_url)"
-BASE_BRANCH="$(delivery_var base_branch main)"
+BASE_BRANCH="$(delivery_var base_branch '')"
 [ -n "$REPO" ] || delivery_fail "workflow root metadata delivery.repo is missing"
 [ -n "$PR_NUMBER" ] || delivery_fail "workflow root metadata delivery.pr_number is missing"
 [ -n "$RECORDED_SHA" ] || delivery_fail "workflow root metadata delivery.head_sha is missing"
 [ -n "$RECORDED_URL" ] || delivery_fail "workflow root metadata delivery.pr_url is missing"
+[ -n "$BASE_BRANCH" ] || delivery_fail "configured base_branch is required"
 
 PR_JSON="$(gh api "repos/$REPO/pulls/$PR_NUMBER")" || delivery_fail "failed to read PR $REPO#$PR_NUMBER"
 RESULT="$(printf '%s' "$PR_JSON" | python3 -c '

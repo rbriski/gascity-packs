@@ -215,6 +215,24 @@ class PreflightTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_smoke_timeout_is_validated_only_when_smoke_runs(self) -> None:
+        without_smoke = self.run_preflight(
+            self.metadata(
+                **{
+                    "gc.var.smoke_command": "",
+                    "gc.var.allow_no_smoke": "true",
+                    "gc.var.smoke_timeout": "0s",
+                }
+            )
+        )
+        self.assertEqual(without_smoke.returncode, 0, without_smoke.stderr)
+
+        with_smoke = self.run_preflight(
+            self.metadata(**{"gc.var.smoke_timeout": "0s"})
+        )
+        self.assertEqual(with_smoke.returncode, 1)
+        self.assertIn("smoke_timeout must be a positive finite duration", with_smoke.stderr)
+
     def test_not_applicable_requires_reason_but_not_smoke(self) -> None:
         values = self.metadata(
             **{
@@ -465,6 +483,49 @@ class PreflightTests(unittest.TestCase):
                         invalid.stderr,
                     )
 
+            environment["FAKE_GC_JSON"] = json.dumps(
+                [
+                    {
+                        "metadata": {
+                            **base_metadata,
+                            "gc.var.deploy_verify_command": "/bin/true",
+                            "gc.var.smoke_timeout": "0s",
+                        }
+                    }
+                ]
+            )
+            without_smoke = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(without_smoke.returncode, 0, without_smoke.stderr)
+
+            environment["FAKE_GC_JSON"] = json.dumps(
+                [
+                    {
+                        "metadata": {
+                            **base_metadata,
+                            "gc.var.deploy_verify_command": "/bin/true",
+                            "gc.var.smoke_command": "/bin/true",
+                            "gc.var.smoke_timeout": "0s",
+                        }
+                    }
+                ]
+            )
+            invalid_smoke = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(invalid_smoke.returncode, 1)
+            self.assertIn(
+                "smoke_timeout must be a positive finite duration no greater than 1h",
+                invalid_smoke.stderr,
+            )
+
     def test_pr_open_validates_full_recorded_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -528,6 +589,18 @@ class PreflightTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 1)
                     self.assertIn(message, result.stderr)
 
+            environment["FAKE_GC_JSON"] = json.dumps(
+                [{"metadata": {**metadata, "gc.var.base_branch": ""}}]
+            )
+            missing_base = subprocess.run(
+                ["bash", str(PR_OPEN_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(missing_base.returncode, 1)
+            self.assertIn("configured base_branch is required", missing_base.stderr)
+
     def test_lifecycle_prompts_preserve_current_head_and_mode_contracts(self) -> None:
         with FORMULA_PATH.open("rb") as formula_file:
             formula = tomllib.load(formula_file)
@@ -569,6 +642,17 @@ class PreflightTests(unittest.TestCase):
         verification = (WORKFLOW_ROOT / "verify-production.md").read_text(encoding="utf-8")
         self.assertIn("allow_no_smoke=false", verification)
         self.assertIn("no-smoke exception", verification)
+
+        finalizer = (WORKFLOW_ROOT / "finalize.md").read_text(encoding="utf-8")
+        self.assertIn("source trace is resolved", finalizer)
+        self.assertIn("shared artifact validator accepts the final report", finalizer)
+        self.assertIn("no blockers remain", finalizer)
+
+        for prompt in ("requirements.md", "plan.md", "decompose.md"):
+            self.assertIn(
+                "exact unfenced H2 heading `## Source Intent`",
+                (WORKFLOW_ROOT / prompt).read_text(encoding="utf-8"),
+            )
 
 
 class SourceArtifactTests(unittest.TestCase):
@@ -615,7 +699,7 @@ class SourceArtifactTests(unittest.TestCase):
                 "Work Items",
             ),
         }
-        sections = ["## Source Intent\n\nfi-123 — Requested delivery"]
+        sections = [f"## Source Intent\n\n{source_id} — {source_title}"]
         sections.extend(
             f"## {name}\n\n{name} content."
             for name in required_sections[artifact_kind]

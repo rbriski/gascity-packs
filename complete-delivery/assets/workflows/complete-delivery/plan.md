@@ -9,8 +9,9 @@ than planning from the checkout.
 
 Write the plan to `{{plan_path}}`. In YAML front matter, record `source.id`,
 `source.title`, and `source.anchor: gc:<source-id>` using the exact durable
-values resolved above. Start with `Source Intent`, naming the source ID and
-title, and map every requested acceptance criterion to a planned change or
+values resolved above. Start the body with the exact unfenced H2 heading `## Source Intent`
+and place the resolved source ID and title immediately below it, then map every
+requested acceptance criterion to a planned change or
 explicit verification. Include at least two implementation approaches, the
 recommendation, task boundaries, tests, release risks, and out-of-scope work.
 Preserve the source ID in the plan's traceability section. Do not copy raw

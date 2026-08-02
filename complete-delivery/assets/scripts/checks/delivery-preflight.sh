@@ -165,8 +165,10 @@ if [ "$DEPLOY_MODE" != "not-applicable" ]; then
   command -v timeout >/dev/null 2>&1 || errors+=("timeout is required on PATH for deployment verification")
   delivery_timeout_is_bounded "$VERIFY_TIMEOUT" || \
     errors+=("deploy_verify_timeout must be a positive finite duration no greater than 1h")
-  delivery_timeout_is_bounded "$SMOKE_TIMEOUT" || \
-    errors+=("smoke_timeout must be a positive finite duration no greater than 1h")
+  if [ -n "$SMOKE_COMMAND" ]; then
+    delivery_timeout_is_bounded "$SMOKE_TIMEOUT" || \
+      errors+=("smoke_timeout must be a positive finite duration no greater than 1h")
+  fi
 fi
 if [ "$DEPLOY_MODE" != "not-applicable" ] && [ -z "$SMOKE_COMMAND" ] && \
   [ "$ALLOW_NO_SMOKE" != "true" ]; then

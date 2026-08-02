@@ -89,13 +89,13 @@ SMOKE_TIMEOUT="$(delivery_var smoke_timeout 5m)"
 command -v timeout >/dev/null 2>&1 || delivery_fail "timeout is required on PATH"
 delivery_timeout_is_bounded "$VERIFY_TIMEOUT" || \
   delivery_fail "deploy_verify_timeout must be a positive finite duration no greater than 1h"
-delivery_timeout_is_bounded "$SMOKE_TIMEOUT" || \
-  delivery_fail "smoke_timeout must be a positive finite duration no greater than 1h"
 
 echo "complete-delivery deploy verification: $VERIFY_COMMAND"
 timeout --kill-after=5s "$VERIFY_TIMEOUT" bash -lc "$VERIFY_COMMAND" || \
   delivery_fail "deploy_verify_command failed or timed out"
 if [ -n "$SMOKE_COMMAND" ]; then
+  delivery_timeout_is_bounded "$SMOKE_TIMEOUT" || \
+    delivery_fail "smoke_timeout must be a positive finite duration no greater than 1h"
   echo "complete-delivery production smoke: $SMOKE_COMMAND"
   timeout --kill-after=5s "$SMOKE_TIMEOUT" bash -lc "$SMOKE_COMMAND" || \
     delivery_fail "smoke_command failed or timed out"

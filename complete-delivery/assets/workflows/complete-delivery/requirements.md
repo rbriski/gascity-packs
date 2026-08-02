@@ -21,8 +21,9 @@ goal, demand evidence, current workaround, target user, narrowest wedge,
 future-fit, constraints, acceptance criteria, non-goals, and open questions.
 In YAML front matter, record `source.id`, `source.title`, and
 `source.anchor: gc:<source-id>` using the exact durable values resolved above.
-Start with a `Source Intent` section containing the source ID and title, then
-trace each requested description/acceptance point into the requirements. Use
+Start the body with the exact unfenced H2 heading `## Source Intent` and place
+the resolved source ID and title immediately below it, then trace each
+requested description/acceptance point into the requirements. Use
 repository state only to validate or scope that intent. Do not copy raw source
 notes into an owner-facing report; summarize only non-sensitive constraints
 needed to make the plan executable.

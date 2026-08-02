@@ -26,7 +26,4 @@ the source acceptance criteria. This trace proves the delivered outcome is the
 requested work rather than a coincidental repository-HEAD change. Do not
 reproduce raw source notes or sensitive source text in the public living report.
 
-On repair attempts, read validator errors from `gc.attempt_log` and repair the
-artifact in place. Close with `gc.outcome=pass`; the graph's shared artifact
-validator is authoritative. Do not publish or invoke provider-native
-subagents from this stage.
+On repair attempts, read validator errors from `gc.attempt_log` and repair the artifact in place. Close with `gc.outcome=pass` only when the source trace is resolved, the shared artifact validator accepts the final report, and no blockers remain; otherwise close with a non-pass outcome. The graph's shared artifact validator is authoritative. Do not publish or invoke provider-native subagents from this stage.
