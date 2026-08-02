@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -805,6 +806,152 @@ class PreflightTests(unittest.TestCase):
             self.assertIn("outcome=timeout_utility_failure", recorded_evidence)
             self.assertNotIn("/bin/true", recorded_evidence)
 
+    def test_deploy_check_executes_once_and_release_rejects_forged_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            updates = root / "updates.log"
+            marker = root / "command-ran"
+            gc = bin_dir / "gc"
+            gc.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = bd ] && [ \"${2:-}\" = update ]; then\n"
+                "  printf '%s\\n' \"$*\" >> \"$FAKE_GC_UPDATES\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"${3:-}\" = root-1 ]; then\n"
+                "  printf '%s\\n' \"$FAKE_GC_ROOT_JSON\"\n"
+                "else\n"
+                "  printf '%s\\n' \"$FAKE_GC_STEP_JSON\"\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            merge_sha = "a" * 40
+            base_metadata = {
+                "delivery.merge_sha": merge_sha,
+                "delivery.repo": "example/repo",
+                "delivery.pr_number": "123",
+                "gc.var.artifact_root": "artifacts",
+                "gc.var.deploy_mode": "command",
+                "gc.var.deploy_timeout": "1s",
+            }
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GC_BEAD_ID": "deploy-step",
+                    "GC_WORK_DIR": str(repository),
+                    "FAKE_GC_UPDATES": str(updates),
+                    "FAKE_GC_STEP_JSON": json.dumps(
+                        [{"metadata": {"gc.root_bead_id": "root-1", "gc.step_id": "deploy"}}]
+                    ),
+                    "PATH": f"{bin_dir}:{environment['PATH']}",
+                    "COMMAND_MARKER": str(marker),
+                }
+            )
+
+            def run_deploy(command: str, timeout: str = "1s") -> tuple[subprocess.CompletedProcess[str], str]:
+                delivery_dir = repository / "artifacts" / "delivery"
+                if delivery_dir.exists():
+                    for path in delivery_dir.iterdir():
+                        path.unlink()
+                if marker.exists():
+                    marker.unlink()
+                if updates.exists():
+                    updates.unlink()
+                environment["FAKE_GC_ROOT_JSON"] = json.dumps(
+                    [{"metadata": {**base_metadata, "gc.var.deploy_command": command, "gc.var.deploy_timeout": timeout}}]
+                )
+                result = subprocess.run(
+                    ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+                return result, (delivery_dir / "deploy.log").read_text(encoding="utf-8")
+
+            success_command = 'printf "%s\\n" "$DELIVERY_SHA" >> "$COMMAND_MARKER"'
+            succeeded, evidence = run_deploy(success_command)
+            self.assertEqual(succeeded.returncode, 0, succeeded.stderr + evidence)
+            self.assertEqual(marker.read_text(encoding="utf-8"), f"{merge_sha}\n")
+            self.assertEqual(evidence.count("schema=complete-delivery.deploy.v1"), 1)
+            self.assertIn("outcome=passed", evidence)
+            self.assertIn("child_status=0", evidence)
+            self.assertIn("wrapper_status=0", evidence)
+            self.assertIn("merge_sha=" + merge_sha, evidence)
+            self.assertIn("delivery.deploy_status=deployed", updates.read_text(encoding="utf-8"))
+
+            nonzero, evidence = run_deploy("exit 42")
+            self.assertEqual(nonzero.returncode, 1)
+            self.assertIn("outcome=command_failure", evidence)
+            self.assertIn("child_status=42", evidence)
+
+            timed_out, evidence = run_deploy("sleep 1", "0.01s")
+            self.assertEqual(timed_out.returncode, 1)
+            self.assertIn("outcome=timeout", evidence)
+            self.assertIn("child_status=unavailable", evidence)
+
+            for status in (124, 125, 137):
+                with self.subTest(child_status=status):
+                    child_failed, evidence = run_deploy(f"exit {status}")
+                    self.assertEqual(child_failed.returncode, 1)
+                    self.assertIn("outcome=command_failure", evidence)
+                    self.assertIn(f"child_status={status}", evidence)
+
+            succeeded, evidence = run_deploy(success_command)
+            self.assertEqual(succeeded.returncode, 0, succeeded.stderr)
+            delivery_dir = repository / "artifacts" / "delivery"
+            deploy_log = delivery_dir / "deploy.log"
+            stdout = delivery_dir / "deploy.stdout.log"
+            stderr = delivery_dir / "deploy.stderr.log"
+            verify_log = delivery_dir / "verify.log"
+            verify_log.write_text("verification evidence\n", encoding="utf-8")
+            command_label = "sha256:" + hashlib.sha256(success_command.encode()).hexdigest()
+            verified_metadata = {
+                **base_metadata,
+                "delivery.deployed_sha": merge_sha,
+                "delivery.deploy_status": "verified",
+                "delivery.deploy_evidence_path": str(deploy_log),
+                "delivery.verify_evidence_path": str(verify_log),
+                "delivery.deploy_command_label": command_label,
+                "delivery.deploy_timeout": "1s",
+                "delivery.deploy_outcome": "passed",
+                "delivery.deploy_child_status": "0",
+                "delivery.deploy_wrapper_status": "0",
+                "delivery.deploy_merge_sha": merge_sha,
+                "delivery.deploy_stdout_path": str(stdout),
+                "delivery.deploy_stderr_path": str(stderr),
+                "gc.var.deploy_command": success_command,
+                "gc.var.deploy_verify_command": "/bin/true",
+                "gc.var.allow_no_smoke": "true",
+                "gc.var.no_smoke_reason": "No production endpoint is exposed",
+            }
+            environment["GC_BEAD_ID"] = "verify-step"
+            environment["FAKE_GC_STEP_JSON"] = json.dumps(
+                [{"metadata": {"gc.root_bead_id": "root-1", "gc.step_id": "verify-production"}}]
+            )
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": verified_metadata}])
+            release = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(release.returncode, 0, release.stderr)
+
+            deploy_log.write_text("verified\n", encoding="utf-8")
+            forged = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(forged.returncode, 1)
+            self.assertIn("deploy evidence is forged, stale, or incomplete", forged.stderr)
+
     def test_pr_open_validates_full_recorded_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -939,6 +1086,10 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("deploy_timeout", deploy)
         self.assertIn("timeout --kill-after=5s", deploy)
         self.assertIn("DELIVERY_SHA", deploy)
+        self.assertEqual(
+            steps["deploy"]["check"]["check"]["path"],
+            ".gc/scripts/checks/delivery-release-verified.sh",
+        )
 
         self.assertEqual(formula["vars"]["deploy_timeout"]["default"], "5m")
 

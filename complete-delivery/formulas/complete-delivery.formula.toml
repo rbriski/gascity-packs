@@ -349,6 +349,14 @@ needs = ["report-merged"]
 metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
 description_file = "../assets/workflows/complete-delivery/deploy.md"
 
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/delivery-release-verified.sh"
+timeout = "65m"
+
 [[steps]]
 id = "verify-production"
 title = "Verify production and exact-SHA attestation"
