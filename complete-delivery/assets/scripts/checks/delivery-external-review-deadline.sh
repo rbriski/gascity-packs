@@ -16,7 +16,10 @@ STARTED_AT="$(delivery_root_metadata delivery.external_review_started_at)"
 DEADLINE="$(delivery_root_metadata delivery.external_review_deadline)"
 HISTORY="$(gc bd history "$DELIVERY_ROOT_ID" --json)" || \
   delivery_fail "cannot read workflow-root metadata history"
-NOW="${DELIVERY_NOW_UTC:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+# This is a fail-closed production gate.  Do not accept a caller-provided
+# clock: a stale/expired deadline must not become valid merely because a
+# caller freezes time in its environment.
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 if [ "$MODE" = "--initialize" ] && [ -z "$STARTED_AT" ] && [ -z "$DEADLINE" ]; then
   INITIAL_OUTPUT="$(python3 - "$NOW" "$HISTORY" <<'PY'

@@ -11,6 +11,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+from datetime import datetime, timedelta, timezone
 
 
 PACK_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -28,7 +29,13 @@ DEADLINE_SCRIPT = (
 
 
 class PrGateContractTests(unittest.TestCase):
-    def run_deadline(self, metadata: dict[str, str], history: list[dict], mode: str, now: str):
+    def run_deadline(
+        self,
+        metadata: dict[str, str],
+        history: list[dict],
+        mode: str,
+        extra_env: dict[str, str] | None = None,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             state = root / "state.json"
@@ -63,42 +70,86 @@ class PrGateContractTests(unittest.TestCase):
             env.update({
                 "GC_BEAD_ID": "root-1",
                 "GC_WORK_DIR": str(root),
-                "DELIVERY_NOW_UTC": now,
                 "FAKE_GC_STATE": str(state),
                 "FAKE_GC_HISTORY": str(history_path),
                 "PATH": f"{root}:{env['PATH']}",
             })
+            if extra_env:
+                env.update(extra_env)
             result = subprocess.run(
                 ["bash", str(DEADLINE_SCRIPT), mode], capture_output=True, text=True, env=env
             )
             return result, json.loads(state.read_text(encoding="utf-8")), json.loads(history_path.read_text(encoding="utf-8"))
 
     def test_external_review_deadline_is_first_write_immutable_and_fail_closed(self) -> None:
-        now = "2026-08-02T22:00:00Z"
-        initialized, state, history = self.run_deadline({}, [], "--initialize", now)
+        before = datetime.now(timezone.utc).replace(microsecond=0)
+        initialized, state, history = self.run_deadline({}, [], "--initialize")
+        after = datetime.now(timezone.utc).replace(microsecond=0)
         self.assertEqual(initialized.returncode, 0, initialized.stderr)
         metadata = state[0]["metadata"]
-        self.assertEqual(metadata["delivery.external_review_started_at"], now)
-        self.assertEqual(metadata["delivery.external_review_deadline"], "2026-08-03T00:00:00Z")
+        started = datetime.strptime(
+            metadata["delivery.external_review_started_at"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        deadline = datetime.strptime(
+            metadata["delivery.external_review_deadline"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        self.assertLessEqual(before, started)
+        self.assertLessEqual(started, after)
+        self.assertEqual(deadline, started + timedelta(hours=2))
         self.assertEqual(len(history), 1)
 
-        resumed, state, resumed_history = self.run_deadline(metadata, history, "--initialize", "2026-08-02T22:10:00Z")
+        resumed, state, resumed_history = self.run_deadline(metadata, history, "--initialize")
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
         self.assertEqual(state[0]["metadata"], metadata)
         self.assertEqual(resumed_history, history)
 
         for label, changed_metadata, changed_history, expected in (
             ("missing", {}, [], "missing"),
-            ("malformed", {"delivery.external_review_started_at": now, "delivery.external_review_deadline": "tomorrow"}, [], "canonical UTC"),
-            ("expired", metadata, history, "expired"),
-            ("moved-forward", {**metadata, "delivery.external_review_deadline": "2026-08-03T00:30:00Z"}, [{"Issue": {"metadata": metadata}}], "no later than two hours"),
-            ("reset", {**metadata, "delivery.external_review_deadline": "2026-08-02T23:30:00Z"}, [{"Issue": {"metadata": metadata}}], "does not match immutable first entry"),
+            ("malformed", {"delivery.external_review_started_at": metadata["delivery.external_review_started_at"], "delivery.external_review_deadline": "tomorrow"}, [], "canonical UTC"),
+            (
+                "moved-forward",
+                {
+                    **metadata,
+                    "delivery.external_review_deadline": (
+                        deadline + timedelta(minutes=30)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+                [{"Issue": {"metadata": metadata}}],
+                "no later than two hours",
+            ),
+            (
+                "reset",
+                {
+                    **metadata,
+                    "delivery.external_review_deadline": (
+                        deadline - timedelta(minutes=30)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+                [{"Issue": {"metadata": metadata}}],
+                "does not match immutable first entry",
+            ),
         ):
             with self.subTest(label=label):
-                when = "2026-08-03T00:00:00Z" if label == "expired" else "2026-08-02T22:30:00Z"
-                result, _, _ = self.run_deadline(changed_metadata, changed_history, "--validate", when)
+                result, _, _ = self.run_deadline(changed_metadata, changed_history, "--validate")
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected, result.stderr)
+
+    def test_forged_clock_override_cannot_rescue_an_expired_deadline(self) -> None:
+        expired = {
+            "delivery.external_review_started_at": "2000-01-01T00:00:00Z",
+            "delivery.external_review_deadline": "2000-01-01T02:00:00Z",
+        }
+        result, _, _ = self.run_deadline(
+            expired,
+            [{"Issue": {"metadata": expired}}],
+            "--validate",
+            {"DELIVERY_NOW_UTC": "1970-01-01T00:00:00Z"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expired", result.stderr)
+        self.assertNotIn(
+            'NOW="${DELIVERY_NOW_UTC', DEADLINE_SCRIPT.read_text(encoding="utf-8")
+        )
 
     def test_external_review_actions_and_terminal_gate_require_deadline_validation(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
@@ -798,12 +849,13 @@ class PrGateContractTests(unittest.TestCase):
             bin_dir = root / "bin"
             bin_dir.mkdir()
             gc = bin_dir / "gc"
+            started = datetime.now(timezone.utc).replace(microsecond=0)
             metadata = {
                 "delivery.repo": "owner/repo",
                 "delivery.pr_number": "8",
                 "gc.var.artifact_root": str(artifact_root),
-                "delivery.external_review_started_at": "2026-08-02T22:00:00Z",
-                "delivery.external_review_deadline": "2026-08-03T00:00:00Z",
+                "delivery.external_review_started_at": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "delivery.external_review_deadline": (started + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
             gc.write_text(
                 '#!/bin/sh\nif [ "${2:-}" = history ]; then\n  printf "%s\\n" "$FAKE_GC_HISTORY_JSON"\nelse\n  printf "%s\\n" "$FAKE_GC_STEP_JSON"\nfi\n',
@@ -843,7 +895,6 @@ class PrGateContractTests(unittest.TestCase):
                     "GC_BEAD_ID": "step-1",
                     "FAKE_GC_STEP_JSON": json.dumps([{"metadata": metadata}]),
                     "FAKE_GC_HISTORY_JSON": json.dumps([{"Issue": {"metadata": metadata}}]),
-                    "DELIVERY_NOW_UTC": "2026-08-02T22:30:00Z",
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                     "REAL_PYTHON": sys.executable,
                 }
