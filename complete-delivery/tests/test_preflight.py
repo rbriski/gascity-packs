@@ -1506,6 +1506,30 @@ class SourceArtifactTests(unittest.TestCase):
         self.assertNotEqual(fenced.returncode, 0)
         self.assertIn("requires an unfenced Source trace section", fenced.stderr)
 
+        exact_artifact = self.artifact(artifact_kind="final-report")
+        exact_hash = "sha256:" + hashlib.sha256(
+            b"The requested outcome is delivered."
+        ).hexdigest()
+        malformed_lines = (
+            exact_artifact.replace(
+                "Source ID: `fi-123`",
+                "prefix Source ID: `fi-123`",
+            ),
+            exact_artifact.replace(
+                "Source title: Requested delivery",
+                "Source title: Requested delivery suffix",
+            ),
+            exact_artifact.replace(
+                f"Acceptance criteria SHA-256: {exact_hash}",
+                "Acceptance criteria SHA-256: sha256:" + "0" * 64,
+            ),
+        )
+        for malformed in malformed_lines:
+            with self.subTest(malformed=malformed):
+                result = self.run_check(malformed, artifact_kind="final-report")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Source trace must bind exact durable source", result.stderr)
+
     def test_final_report_requires_exact_acceptance_hash(self) -> None:
         for hash_value in ("", "sha256:" + "0" * 64):
             with self.subTest(hash_value=hash_value or "missing"):

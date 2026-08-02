@@ -173,7 +173,7 @@ elif schema == "gc.build.final-report.v1":
         f"Source title: {expected_title}",
         f"Acceptance criteria SHA-256: {acceptance_hash}",
     ):
-        if value not in trace:
+        if not re.search(rf"^{re.escape(value)}[ \t]*$", trace, re.MULTILINE):
             raise SystemExit(
                 "complete-delivery-check: Source trace must bind exact durable source "
                 f"value {value!r}"
