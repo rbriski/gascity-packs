@@ -96,7 +96,31 @@ for key, value in expected.items():
         raise SystemExit(
             f"complete-delivery-check: source.{key} must equal {value!r}"
         )
-if not re.search(r"^##\s+Source Intent\s*$", match.group("body"), re.MULTILINE):
+def markdown_outside_fences(markdown: str) -> str:
+    visible = []
+    fence = None
+    for line in markdown.splitlines():
+        if fence is not None:
+            character, minimum = fence
+            if re.fullmatch(
+                rf" {{0,3}}{re.escape(character)}{{{minimum},}}[ \t]*", line
+            ):
+                fence = None
+            continue
+        opening = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if opening:
+            marker = opening.group(1)
+            fence = (marker[0], len(marker))
+            continue
+        visible.append(line)
+    return "\n".join(visible)
+
+
+if not re.search(
+    r"^##\s+Source Intent\s*$",
+    markdown_outside_fences(match.group("body")),
+    re.MULTILINE,
+):
     raise SystemExit("complete-delivery-check: source-bound artifact requires a Source Intent section")
 PY
 

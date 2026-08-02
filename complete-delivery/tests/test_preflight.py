@@ -375,6 +375,7 @@ class SourceArtifactTests(unittest.TestCase):
     def artifact(
         self,
         *,
+        artifact_kind: str = "requirements",
         source_id: str = "fi-123",
         source_title: str = "Requested delivery",
         source_anchor: str = "gc:fi-123",
@@ -388,25 +389,43 @@ class SourceArtifactTests(unittest.TestCase):
                 f"  title: {source_title}\n"
                 f"  anchor: {source_anchor}\n"
             )
+        required_sections = {
+            "requirements": (
+                "Problem Statement",
+                "W6H",
+                "User Stories",
+                "Technical Stories",
+                "Behavior Requirements",
+                "Example Mapping",
+                "Acceptance Criteria",
+                "Out Of Scope",
+                "Open Questions",
+            ),
+            "plan": (
+                "Summary",
+                "Current System",
+                "Proposed Implementation",
+                "Non-Goals",
+                "Verification",
+            ),
+            "decomposition": (
+                "Summary",
+                "Selected Downstream Formulas",
+                "Implementation Convoy",
+                "Work Items",
+            ),
+        }
         sections = ["## Source Intent\n\nfi-123 — Requested delivery"]
-        for name in (
-            "Problem Statement",
-            "W6H",
-            "User Stories",
-            "Technical Stories",
-            "Behavior Requirements",
-            "Example Mapping",
-            "Acceptance Criteria",
-            "Out Of Scope",
-            "Open Questions",
-        ):
-            body = f"{name} content."
-            if name == "Example Mapping":
-                body += "\n\n| ID | Status |\n| --- | --- |\n| REQ-1 | covered |"
-            sections.append(f"## {name}\n\n{body}")
+        sections.extend(
+            f"## {name}\n\n{name} content."
+            for name in required_sections[artifact_kind]
+        )
+        sections.append(
+            "## Coverage\n\n| ID | Status |\n| --- | --- |\n| REQ-1 | covered |"
+        )
         return (
             "---\n"
-            "schema: gc.build.requirements.v1\n"
+            f"schema: gc.build.{artifact_kind}.v1\n"
             "workflow:\n"
             "  id: workflow-1\n"
             "  formula: complete-delivery\n"
@@ -415,7 +434,7 @@ class SourceArtifactTests(unittest.TestCase):
             "  name: complete-delivery\n"
             "producer:\n"
             "  formula: complete-delivery\n"
-            "  stage: requirements\n"
+            f"  stage: {artifact_kind}\n"
             "  attempt: 1\n"
             "status: approved\n"
             f"{source}"
@@ -432,10 +451,12 @@ class SourceArtifactTests(unittest.TestCase):
             + "\n"
         )
 
-    def run_check(self, artifact_text: str) -> subprocess.CompletedProcess[str]:
+    def run_check(
+        self, artifact_text: str, *, artifact_kind: str = "requirements"
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            artifact = root / "requirements.md"
+            artifact = root / f"{artifact_kind}.md"
             artifact.write_text(artifact_text, encoding="utf-8")
             bin_dir = root / "bin"
             bin_dir.mkdir()
@@ -451,13 +472,14 @@ class SourceArtifactTests(unittest.TestCase):
                 encoding="utf-8",
             )
             gc.chmod(0o755)
+            artifact_path_key = f"gc.build.{artifact_kind}_path"
             step = [{"id": "step-1", "metadata": {
                 "gc.root_bead_id": "root-1",
-                "gc.build.artifact_schema": "gc.build.requirements.v1",
-                "gc.build.artifact_path_keys": "gc.build.requirements_path",
+                "gc.build.artifact_schema": f"gc.build.{artifact_kind}.v1",
+                "gc.build.artifact_path_keys": artifact_path_key,
             }}]
             workflow_root = [{"id": "root-1", "metadata": {
-                "gc.build.requirements_path": str(artifact),
+                artifact_path_key: str(artifact),
                 "gc.var.source_bead_id": "fi-123",
                 "gc.var.source_title": "Requested delivery",
             }}]
@@ -479,9 +501,14 @@ class SourceArtifactTests(unittest.TestCase):
             )
 
     def test_source_artifact_requires_exact_durable_binding(self) -> None:
-        valid = self.run_check(self.artifact())
-        self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
-        self.assertIn("source artifact valid", valid.stdout)
+        for artifact_kind in ("requirements", "plan", "decomposition"):
+            with self.subTest(artifact_kind=artifact_kind):
+                valid = self.run_check(
+                    self.artifact(artifact_kind=artifact_kind),
+                    artifact_kind=artifact_kind,
+                )
+                self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+                self.assertIn("source artifact valid", valid.stdout)
 
         for artifact, message in (
             (self.artifact(include_source=False), "requires a source mapping"),
@@ -493,6 +520,17 @@ class SourceArtifactTests(unittest.TestCase):
                 result = self.run_check(artifact)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
+
+    def test_source_intent_heading_inside_fence_is_rejected(self) -> None:
+        for artifact_kind in ("requirements", "plan", "decomposition"):
+            artifact = self.artifact(artifact_kind=artifact_kind).replace(
+                "## Source Intent\n\nfi-123 — Requested delivery",
+                "```markdown\n## Source Intent\n\nfi-123 — Requested delivery\n```",
+            )
+            with self.subTest(artifact_kind=artifact_kind):
+                result = self.run_check(artifact, artifact_kind=artifact_kind)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("requires a Source Intent section", result.stderr)
 
 
 if __name__ == "__main__":
