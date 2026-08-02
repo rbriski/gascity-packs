@@ -1221,7 +1221,12 @@ class PreflightTests(unittest.TestCase):
                 ]
             )
 
-            def run_deploy(command: str, timeout: str = "1s") -> tuple[subprocess.CompletedProcess[str], str]:
+            def run_deploy(
+                command: str,
+                timeout: str = "1s",
+                *,
+                allow_missing_evidence: bool = False,
+            ) -> tuple[subprocess.CompletedProcess[str], str]:
                 delivery_dir = repository / "artifacts" / "delivery"
                 if delivery_dir.exists():
                     for path in delivery_dir.iterdir():
@@ -1240,9 +1245,13 @@ class PreflightTests(unittest.TestCase):
                     env=environment,
                 )
                 evidence = delivery_dir / "deploy.log"
-                return result, (
-                    evidence.read_text(encoding="utf-8") if evidence.exists() else ""
-                )
+                if not evidence.exists():
+                    self.assertTrue(
+                        allow_missing_evidence,
+                        "deploy.log unexpectedly missing outside an injected publication failure",
+                    )
+                    return result, ""
+                return result, evidence.read_text(encoding="utf-8")
 
             success_command = 'printf "%s\\n" "$DELIVERY_SHA" >> "$COMMAND_MARKER"'
             succeeded, evidence = run_deploy(success_command)
@@ -1360,7 +1369,9 @@ class PreflightTests(unittest.TestCase):
                     environment["FAKE_MV_FAIL_DEST"] = str(
                         delivery_dir / failed_destination
                     )
-                    failed, _ = run_deploy(success_command)
+                    failed, _ = run_deploy(
+                        success_command, allow_missing_evidence=True
+                    )
                     environment.pop("FAKE_MV_FAIL_DEST")
                     self.assertEqual(failed.returncode, 1)
                     self.assertFalse(
@@ -1415,7 +1426,9 @@ class PreflightTests(unittest.TestCase):
                 if mv_log.exists():
                     mv_log.unlink()
                 environment["FAKE_GC_FAIL_FINAL_UPDATE"] = "true"
-                failed, _ = run_deploy(success_command)
+                failed, _ = run_deploy(
+                    success_command, allow_missing_evidence=True
+                )
                 environment.pop("FAKE_GC_FAIL_FINAL_UPDATE")
                 self.assertEqual(failed.returncode, 1)
                 self.assertFalse(
