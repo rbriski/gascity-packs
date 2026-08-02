@@ -194,8 +194,25 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("deploy_command is required", result.stderr)
         self.assertIn("deploy_verify_command is required", result.stderr)
 
+    def test_whitespace_only_commands_fail_closed(self) -> None:
+        for key in (
+            "gc.var.deploy_command",
+            "gc.var.deploy_verify_command",
+            "gc.var.smoke_command",
+        ):
+            with self.subTest(key=key):
+                result = self.run_preflight(self.metadata(**{key: " \t "}))
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    f"{key.removeprefix('gc.var.')} is required", result.stderr
+                )
+
     def test_timeouts_must_be_positive_finite_and_at_most_one_hour(self) -> None:
-        for key in ("gc.var.deploy_verify_timeout", "gc.var.smoke_timeout"):
+        for key in (
+            "gc.var.deploy_timeout",
+            "gc.var.deploy_verify_timeout",
+            "gc.var.smoke_timeout",
+        ):
             for value in ("0", "0s", "inf", "infinity", "-1s", "5x", "--foreground", "3601s", "2h"):
                 with self.subTest(key=key, value=value):
                     result = self.run_preflight(self.metadata(**{key: value}))
@@ -210,6 +227,7 @@ class PreflightTests(unittest.TestCase):
                 result = self.run_preflight(
                     self.metadata(
                         **{
+                            "gc.var.deploy_timeout": value,
                             "gc.var.deploy_verify_timeout": value,
                             "gc.var.smoke_timeout": value,
                         }
@@ -912,6 +930,17 @@ class PreflightTests(unittest.TestCase):
         requirements = (WORKFLOW_ROOT / "requirements.md").read_text(encoding="utf-8")
         self.assertIn("Write requirements to `{{requirements_path}}`", requirements)
         self.assertIn("gc.build.requirements_path", requirements)
+
+        plan = (WORKFLOW_ROOT / "plan.md").read_text(encoding="utf-8")
+        self.assertIn("Write the plan to `{{plan_path}}`", plan)
+        self.assertIn("gc.build.plan_path", plan)
+
+        deploy = (WORKFLOW_ROOT / "deploy.md").read_text(encoding="utf-8")
+        self.assertIn("deploy_timeout", deploy)
+        self.assertIn("timeout --kill-after=5s", deploy)
+        self.assertIn("DELIVERY_SHA", deploy)
+
+        self.assertEqual(formula["vars"]["deploy_timeout"]["default"], "5m")
 
         merge = (WORKFLOW_ROOT / "merge.md").read_text(encoding="utf-8")
         self.assertIn("DELIVERY_PR_URL", merge)

@@ -26,6 +26,10 @@ require_bool() {
   fi
 }
 
+delivery_command_is_nonblank() {
+  [[ "$1" =~ [^[:space:]] ]]
+}
+
 delivery_timeout_is_bounded() {
   python3 - "$1" <<'PY'
 import re
@@ -76,6 +80,7 @@ DEPLOY_MODE="$(delivery_var deploy_mode command)"
 DEPLOY_COMMAND="$(delivery_var deploy_command '')"
 VERIFY_COMMAND="$(delivery_var deploy_verify_command '')"
 SMOKE_COMMAND="$(delivery_var smoke_command '')"
+DEPLOY_TIMEOUT="$(delivery_var deploy_timeout 5m)"
 VERIFY_TIMEOUT="$(delivery_var deploy_verify_timeout 5m)"
 SMOKE_TIMEOUT="$(delivery_var smoke_timeout 5m)"
 NA_REASON="$(delivery_var deploy_not_applicable_reason '')"
@@ -156,11 +161,11 @@ fi
 
 case "$DEPLOY_MODE" in
   command)
-    [ -n "$DEPLOY_COMMAND" ] || errors+=("deploy_command is required for deploy_mode=command")
-    [ -n "$VERIFY_COMMAND" ] || errors+=("deploy_verify_command is required for deploy_mode=command")
+    delivery_command_is_nonblank "$DEPLOY_COMMAND" || errors+=("deploy_command is required for deploy_mode=command")
+    delivery_command_is_nonblank "$VERIFY_COMMAND" || errors+=("deploy_verify_command is required for deploy_mode=command")
     ;;
   ci)
-    [ -n "$VERIFY_COMMAND" ] || errors+=("deploy_verify_command is required for deploy_mode=ci")
+    delivery_command_is_nonblank "$VERIFY_COMMAND" || errors+=("deploy_verify_command is required for deploy_mode=ci")
     ;;
   not-applicable)
     [ -n "$NA_REASON" ] || errors+=("deploy_not_applicable_reason is required for deploy_mode=not-applicable")
@@ -168,6 +173,10 @@ case "$DEPLOY_MODE" in
 esac
 if [ "$DEPLOY_MODE" != "not-applicable" ]; then
   command -v timeout >/dev/null 2>&1 || errors+=("timeout is required on PATH for deployment verification")
+  if [ "$DEPLOY_MODE" = "command" ]; then
+    delivery_timeout_is_bounded "$DEPLOY_TIMEOUT" || \
+      errors+=("deploy_timeout must be a positive finite duration no greater than 1h")
+  fi
   delivery_timeout_is_bounded "$VERIFY_TIMEOUT" || \
     errors+=("deploy_verify_timeout must be a positive finite duration no greater than 1h")
   if [ -n "$SMOKE_COMMAND" ]; then
@@ -175,7 +184,7 @@ if [ "$DEPLOY_MODE" != "not-applicable" ]; then
       errors+=("smoke_timeout must be a positive finite duration no greater than 1h")
   fi
 fi
-if [ "$DEPLOY_MODE" != "not-applicable" ] && [ -z "$SMOKE_COMMAND" ] && \
+if [ "$DEPLOY_MODE" != "not-applicable" ] && ! delivery_command_is_nonblank "$SMOKE_COMMAND" && \
   [ "$ALLOW_NO_SMOKE" != "true" ]; then
   errors+=("smoke_command is required unless allow_no_smoke=true")
 fi

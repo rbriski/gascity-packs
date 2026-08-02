@@ -116,6 +116,10 @@ default = "command"
 description = "Repository-owned command that deploys DELIVERY_SHA."
 default = ""
 
+[vars.deploy_timeout]
+description = "Positive finite timeout for deploy_command, no greater than one hour."
+default = "5m"
+
 [vars.deploy_verify_command]
 description = "Command that proves the deployment completed for DELIVERY_SHA."
 default = ""

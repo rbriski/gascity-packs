@@ -3,8 +3,11 @@ Deploy the exact `delivery.merge_sha` through the repository-owned path.
 Create `<artifact_root>/delivery/deploy.log`, export `DELIVERY_SHA`,
 `DELIVERY_REPO`, and `DELIVERY_PR`, then follow `deploy_mode`:
 
-- `command`: require and run `deploy_command`; capture stdout/stderr and exit
-  status. The command must consume or independently resolve `DELIVERY_SHA`.
+- `command`: require a strictly positive, finite `deploy_timeout` of no more
+  than one hour, then run `deploy_command` with `timeout --kill-after=5s
+  "$DEPLOY_TIMEOUT" bash -euo pipefail -c "$DEPLOY_COMMAND"`. Capture stdout,
+  stderr, the exact exit status, and whether the timeout fired in `deploy.log`.
+  The command must consume or independently resolve `DELIVERY_SHA`.
 - `ci`: prove the merge triggered the documented CI deployment and record the
   run URL/id; do not merely assume push-to-main means production is current.
 - `not-applicable`: require a concrete `deploy_not_applicable_reason`; this is

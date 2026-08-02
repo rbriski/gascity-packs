@@ -7,7 +7,8 @@ requested outcome; code already present in the checkout is evidence only and
 must not replace it. If the source is missing or ambiguous, fail closed rather
 than planning from the checkout.
 
-Write the plan to `{{plan_path}}`. In YAML front matter, record `source.id`,
+Write the plan to `{{plan_path}}` and record that exact resolved path on the
+workflow root as `gc.build.plan_path`. In YAML front matter, record `source.id`,
 `source.title`, and `source.anchor: gc:<source-id>` using the exact durable
 values resolved above. Start the body with the exact unfenced H2 heading `## Source Intent`
 and place the resolved source ID and title immediately below it, then map every
