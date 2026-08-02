@@ -240,6 +240,8 @@ class PrGateContractTests(unittest.TestCase):
         self.assertIn("still equal `candidate_commit`", rerun_local_gates)
         self.assertIn("`HEAD == tested_commit`", publish_fixes)
         self.assertIn("Push exactly `tested_commit`", publish_fixes)
+        self.assert_prose_contains(publish_fixes, "After acquiring it, recheck the clean tree and canonical `HEAD == tested_commit` while holding it")
+        self.assert_prose_contains(publish_fixes, "unavailable lock, dirty tree, or mismatch fails closed before push, refresh, or resolution")
 
     def test_non_actionable_thread_resolution_requires_published_disposition_evidence(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
@@ -387,14 +389,7 @@ class PrGateContractTests(unittest.TestCase):
                 self.assertFalse(marker.exists())
 
     def test_local_gates_reject_privilege_user_switch_wrappers_before_execution(self) -> None:
-        direct_wrappers = (
-            "doas",
-            "pkexec",
-            "runuser",
-            "setpriv",
-            "su",
-            "sudo",
-        )
+        direct_wrappers = ("doas", "pkexec", "runuser", "setpriv", "su", "sudo")
         nested_command_wrappers = (
             ("su -c", "gh pr checks"),
             ("runuser -u nobody --", "delivery-pr-approved.sh"),
@@ -426,18 +421,7 @@ class PrGateContractTests(unittest.TestCase):
                 self.assertFalse(marker.exists())
 
     def test_local_gates_reject_terminal_scripts_in_interpreter_arguments_before_execution(self) -> None:
-        cases = (
-            (
-                "python3",
-                "delivery_gate.py",
-                "import pathlib\npathlib.Path({marker!r}).touch()\n",
-            ),
-            (
-                "bash",
-                "delivery-pr-approved.sh",
-                "#!/usr/bin/env bash\ntouch {marker}\n",
-            ),
-        )
+        cases = (("python3", "delivery_gate.py", "import pathlib\npathlib.Path({marker!r}).touch()\n"), ("bash", "delivery-pr-approved.sh", "#!/usr/bin/env bash\ntouch {marker}\n"))
         for interpreter, script_name, source in cases:
             with self.subTest(interpreter=interpreter, script_name=script_name):
                 with tempfile.TemporaryDirectory() as directory:
@@ -566,19 +550,22 @@ class PrGateContractTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((marker_root / "session-42").exists())
 
-        result, _ = self.run_local_gates("printf '%s' '$HOME'")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("$HOME", result.stdout)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            capture = root / "capture-argv"
+            capture.write_text("#!/usr/bin/env python3\nimport sys\nopen(sys.argv[1], 'w').write(sys.argv[2])\n", encoding="utf-8")
+            capture.chmod(0o755)
+            for expected, argument in (("$HOME", "'$HOME'"), (r"literal\q", r'"literal\q"')):
+                output = root / expected.replace("$", "dollar").replace("\\", "backslash")
+                result, _ = self.run_local_gates(f"{shlex.quote(str(capture))} {shlex.quote(str(output))} {argument}")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output.read_text(encoding="utf-8"), expected)
 
         for command in ("printf '%s' $HOME", 'printf \'%s\' "$HOME"'):
             with self.subTest(command=command):
                 result, _ = self.run_local_gates(command)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("parameter, arithmetic, or command expansion", result.stderr)
-
-        result, _ = self.run_local_gates(r'printf "%s" "literal\q"')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(r"literal\q", result.stdout)
 
     def test_local_gates_reject_quote_split_terminal_commands_before_side_effects(self) -> None:
         for terminal_command in (
@@ -632,6 +619,20 @@ class PrGateContractTests(unittest.TestCase):
             "Never consume a pre-existing artifact after a command failure",
         ):
             self.assert_prose_contains(inspect, requirement)
+        self.assert_prose_contains(inspect, "First invalidate prior terminal-success evidence")
+        self.assert_prose_contains(inspect, "record it as `candidate_commit`")
+
+    def test_fresh_blocked_snapshots_and_post_lock_rechecks_preserve_no_stale_authority(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        snapshot_contents = ((workflows / "{target}.resolve-findings.md").read_text(encoding="utf-8"), (PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md").read_text(encoding="utf-8"))
+        for content in snapshot_contents:
+            self.assert_prose_contains(content, "fresh canonical head-matched blocked snapshot")
+            self.assertIn("prior terminal-success evidence", content)
+            self.assertTrue(all(term in content for term in ("inspected_head", "candidate_commit")))
+            self.assert_prose_contains(content, "blocker-only state")
+        for content in ((workflows / "{target}.publish-fixes.md").read_text(encoding="utf-8"), (PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md").read_text(encoding="utf-8")):
+            self.assert_prose_contains(content, "After acquiring it, recheck")
+            self.assert_prose_contains(content, "unavailable lock, dirty tree, or mismatch fails closed before push, refresh, or resolution")
 
     def test_every_non_success_transition_invalidates_prior_success_evidence(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"

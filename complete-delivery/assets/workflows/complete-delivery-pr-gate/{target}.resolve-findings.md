@@ -21,11 +21,13 @@ fixes exist.
 Before every resolution attempt, replace the entire handoff object rather than
 clearing selected fields. A successful object contains only this attempt's
 `inspected_head`, fresh `candidate_commit`, and current thread IDs,
-dispositions, and `fix_commit` values. If review input is missing, malformed,
-stale, blocked, skipped, unavailable, or mismatches `inspected_head`, write
-only blocker state: no candidate, thread mapping, disposition, `fix_commit`,
-`tested_commit`, `local_gates`, `published_head`, or equality evidence may
-remain to authorize later work.
+dispositions, and `fix_commit` values. A fresh canonical head-matched blocked
+snapshot is valid: first invalidate prior terminal-success evidence, retain its
+`inspected_head`, and use it as `candidate_commit` when no source fix exists.
+Only missing, malformed, stale, unavailable, or head-mismatched review input
+must write only blocker state (invalid): no `inspected_head`, candidate, thread
+mapping, disposition, `fix_commit`, `tested_commit`, `local_gates`,
+`published_head`, or equality evidence may remain to authorize later work.
 This lane must never push or resolve a thread. `rerun-local-gates` tests the
 recorded `candidate_commit` and records it as `tested_commit` in the same
 artifact; `publish-fixes` alone reads the published disposition evidence and
