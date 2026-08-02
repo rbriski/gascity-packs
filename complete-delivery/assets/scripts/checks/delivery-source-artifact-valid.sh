@@ -168,15 +168,23 @@ elif schema == "gc.build.final-report.v1":
             "complete-delivery-check: final report requires an unfenced Source trace section"
         )
     trace = trace_match.group("content")
-    for value in (
-        f"Source ID: `{expected_id}`",
-        f"Source title: {expected_title}",
-        f"Acceptance criteria SHA-256: {acceptance_hash}",
+    for label, value in (
+        ("Source ID", f"Source ID: `{expected_id}`"),
+        ("Source title", f"Source title: {expected_title}"),
+        (
+            "Acceptance criteria SHA-256",
+            f"Acceptance criteria SHA-256: {acceptance_hash}",
+        ),
     ):
-        if not re.search(rf"^{re.escape(value)}[ \t]*$", trace, re.MULTILINE):
+        occurrences = [
+            line.rstrip(" \t")
+            for line in trace.splitlines()
+            if re.search(rf"{re.escape(label)}[ \t]*:", line)
+        ]
+        if occurrences != [value]:
             raise SystemExit(
-                "complete-delivery-check: Source trace must bind exact durable source "
-                f"value {value!r}"
+                "complete-delivery-check: Source trace must contain exactly one "
+                f"exact durable source value {value!r}"
             )
 else:
     raise SystemExit(f"complete-delivery-check: unsupported schema {schema}")

@@ -1510,25 +1510,62 @@ class SourceArtifactTests(unittest.TestCase):
         exact_hash = "sha256:" + hashlib.sha256(
             b"The requested outcome is delivered."
         ).hexdigest()
-        malformed_lines = (
-            exact_artifact.replace(
+        source_id_line = "Source ID: `fi-123`"
+        source_title_line = "Source title: Requested delivery"
+        source_hash_line = f"Acceptance criteria SHA-256: {exact_hash}"
+        malformed_lines = {
+            "prefixed source id": exact_artifact.replace(
                 "Source ID: `fi-123`",
                 "prefix Source ID: `fi-123`",
             ),
-            exact_artifact.replace(
+            "suffixed source title": exact_artifact.replace(
                 "Source title: Requested delivery",
                 "Source title: Requested delivery suffix",
             ),
-            exact_artifact.replace(
+            "wrong visible hash": exact_artifact.replace(
                 f"Acceptance criteria SHA-256: {exact_hash}",
                 "Acceptance criteria SHA-256: sha256:" + "0" * 64,
             ),
-        )
-        for malformed in malformed_lines:
-            with self.subTest(malformed=malformed):
+            "duplicate source id": exact_artifact.replace(
+                source_id_line,
+                f"{source_id_line}\n{source_id_line}",
+            ),
+            "conflicting source id": exact_artifact.replace(
+                source_id_line,
+                f"{source_id_line}\nSource ID: `fi-forged`",
+            ),
+            "duplicate source title": exact_artifact.replace(
+                source_title_line,
+                f"{source_title_line}\n{source_title_line}",
+            ),
+            "conflicting source title": exact_artifact.replace(
+                source_title_line,
+                f"{source_title_line}\nSource title: Forged delivery",
+            ),
+            "duplicate source hash": exact_artifact.replace(
+                source_hash_line,
+                f"{source_hash_line}\n{source_hash_line}",
+            ),
+            "conflicting source hash": exact_artifact.replace(
+                source_hash_line,
+                source_hash_line
+                + "\nAcceptance criteria SHA-256: sha256:"
+                + "0" * 64,
+            ),
+            "indented source id": exact_artifact.replace(
+                source_id_line,
+                f"  {source_id_line}",
+            ),
+            "malformed source id label": exact_artifact.replace(
+                source_id_line,
+                "Source ID : `fi-123`",
+            ),
+        }
+        for name, malformed in malformed_lines.items():
+            with self.subTest(name=name):
                 result = self.run_check(malformed, artifact_kind="final-report")
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Source trace must bind exact durable source", result.stderr)
+                self.assertIn("Source trace must contain exactly one", result.stderr)
 
     def test_final_report_requires_exact_acceptance_hash(self) -> None:
         for hash_value in ("", "sha256:" + "0" * 64):
