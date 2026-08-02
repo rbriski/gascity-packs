@@ -8,9 +8,9 @@ that `HEAD` is its exact full-SHA `candidate_commit` before testing. The
 resolver must set that candidate to `inspected_head` when no source changed, or
 to the final committed `HEAD` after every valid source fix in the iteration
 otherwise; individual thread `fix_commit` values remain thread evidence, not
-the test candidate. A regression fix discovered while running this sequence
-must be committed, recorded as the new `candidate_commit`, and the complete
-sequence rerun from the start. Invoke
+the test candidate. Permit at most three complete regression-repair-and-rerun attempts per Formula iteration: count each regression repair, commit and record it as the new
+`candidate_commit`, then rerun the complete sequence from the start. If another repair is required after that budget, stop committing, clear or mark failed every success field,
+write blocker-only retry-exhausted evidence, and close with a non-pass outcome. Invoke
 `{{pack_root}}/assets/scripts/checks/delivery-local-gates.sh` with this claimed
 bead as `GC_BEAD_ID`. The complete nonterminal local-gate set is the configured
 `setup_command`, `lint_command`, `typecheck_command`, `test_command`,
