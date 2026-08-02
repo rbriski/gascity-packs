@@ -1,5 +1,9 @@
 Rerun the repository-native quality gates after review resolution.
 
+Before each regression-repair attempt and before starting the local-gate command,
+run `.gc/scripts/checks/delivery-external-review-deadline.sh --validate`.
+Do not repair or test when it fails.
+
 Read `<artifact_root>/delivery/external-review-handoff.json` and, before every
 test attempt, clear prior `tested_commit`, `local_gates`, `published_head`, and
 `published_head_matches_tested_commit` success evidence. Require a clean

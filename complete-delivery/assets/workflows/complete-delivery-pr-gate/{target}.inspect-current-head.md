@@ -1,5 +1,9 @@
 Snapshot the pull request's current-head delivery gate.
 
+Before every provider query, poll, wait, or gate invocation, run
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate`.
+Do not query or wait when it fails.
+
 Read and canonicalize workflow-root `delivery.head_sha` as a full 40-character
 SHA before invoking the gate. Remove any pre-existing `<artifact_root>/delivery/pr-gate.json` first, then run
 `{{pack_root}}/assets/scripts/delivery_gate.py` with workflow-root repo/PR,

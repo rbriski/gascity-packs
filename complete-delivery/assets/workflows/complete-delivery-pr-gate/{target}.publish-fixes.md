@@ -1,5 +1,9 @@
 Publish this iteration's verified review fixes.
 
+Before every lock acquisition, push, refresh, provider poll, or thread-resolution
+call, run `.gc/scripts/checks/delivery-external-review-deadline.sh --validate`.
+Do not publish, poll, or resolve when it fails.
+
 Read `<artifact_root>/delivery/external-review-handoff.json`; before every
 attempt, replace stale prior-attempt state while retaining and validating the
 current attempt's `tested_commit` and passed `local_gates`. Clear only stale

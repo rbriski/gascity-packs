@@ -1,5 +1,10 @@
 Run one bounded current-head external-review iteration.
 
+Before admitting any child action or running the terminal check, require
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate`.
+The terminal checker independently repeats this validation before its provider
+action; no expired or rewritten deadline may authorize another iteration.
+
 The children inspect evidence, resolve valid findings, rerun exact local gates,
 publish fixes, and update the living report. The loop check then evaluates
 required CI, CodeRabbit completion, all live unresolved review threads, human

@@ -556,29 +556,32 @@ class PreflightTests(unittest.TestCase):
             }
             environment = os.environ.copy()
             environment.update({"GC_BEAD_ID": "step-1", "GC_WORK_DIR": str(repository), "PATH": f"{bin_dir}:{environment['PATH']}"})
+            def run_for_both_steps(metadata: dict[str, str]) -> list[subprocess.CompletedProcess[str]]:
+                results = []
+                for step_ref in ("complete-delivery.deploy", "complete-delivery.verify-production"):
+                    environment["FAKE_GC_JSON"] = json.dumps([{"metadata": {**metadata, "gc.step_ref": step_ref}}])
+                    results.append(subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment))
+                return results
             for evidence, message in (("", "delivery.deploy_evidence_path is missing"), ("artifacts/delivery/empty.log", "deploy evidence is missing, not a file, or empty")):
                 with self.subTest(evidence=evidence):
                     metadata = {**base_metadata, "delivery.deploy_evidence_path": evidence}
                     if evidence:
                         (repository / evidence).write_text("", encoding="utf-8")
-                    environment["FAKE_GC_JSON"] = json.dumps([{"metadata": metadata}])
-                    result = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
-                    self.assertEqual(result.returncode, 1)
-                    self.assertIn(message, result.stderr)
+                    for result in run_for_both_steps(metadata):
+                        self.assertEqual(result.returncode, 1)
+                        self.assertIn(message, result.stderr)
 
             directory_evidence = artifact_delivery / "directory-evidence"
             directory_evidence.mkdir()
             (directory_evidence / "entry").write_text("not a regular file\n", encoding="utf-8")
-            environment["FAKE_GC_JSON"] = json.dumps([{"metadata": {**base_metadata, "delivery.deploy_evidence_path": str(directory_evidence)}}])
-            result = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("deploy evidence is missing, not a file, or empty", result.stderr)
+            for result in run_for_both_steps({**base_metadata, "delivery.deploy_evidence_path": str(directory_evidence)}):
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("deploy evidence is missing, not a file, or empty", result.stderr)
 
             evidence = artifact_delivery / "deploy.log"
             evidence.write_text("not applicable evidence\n", encoding="utf-8")
-            environment["FAKE_GC_JSON"] = json.dumps([{"metadata": {**base_metadata, "delivery.deploy_evidence_path": str(evidence)}}])
-            result = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            for result in run_for_both_steps({**base_metadata, "delivery.deploy_evidence_path": str(evidence)}):
+                self.assertEqual(result.returncode, 0, result.stderr)
 
             outside_evidence = root / "outside-deploy.log"
             outside_evidence.write_text("foreign evidence\n", encoding="utf-8")
@@ -592,44 +595,15 @@ class PreflightTests(unittest.TestCase):
                 "artifacts/outside-deploy.log",
             ):
                 with self.subTest(escaped_evidence=escaped_path):
-                    environment["FAKE_GC_JSON"] = json.dumps(
-                        [{"metadata": {
-                            **base_metadata,
-                            "delivery.deploy_evidence_path": escaped_path,
-                        }}]
-                    )
-                    escaped = subprocess.run(
-                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
-                        capture_output=True,
-                        text=True,
-                        env=environment,
-                    )
-                    self.assertEqual(escaped.returncode, 1)
-                    self.assertIn(
-                        "must resolve within the canonical artifact delivery directory",
-                        escaped.stderr,
-                    )
+                    for escaped in run_for_both_steps({**base_metadata, "delivery.deploy_evidence_path": escaped_path}):
+                        self.assertEqual(escaped.returncode, 1)
+                        self.assertIn("must resolve within the canonical artifact delivery directory", escaped.stderr)
 
             for reason in ("", " \t "):
                 with self.subTest(deploy_not_applicable_reason=repr(reason)):
-                    environment["FAKE_GC_JSON"] = json.dumps(
-                        [{"metadata": {
-                            **base_metadata,
-                            "delivery.deploy_evidence_path": str(evidence),
-                            "gc.var.deploy_not_applicable_reason": reason,
-                        }}]
-                    )
-                    invalid_reason = subprocess.run(
-                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
-                        capture_output=True,
-                        text=True,
-                        env=environment,
-                    )
-                    self.assertEqual(invalid_reason.returncode, 1)
-                    self.assertIn(
-                        "not-applicable deployment requires a nonblank deploy_not_applicable_reason",
-                        invalid_reason.stderr,
-                    )
+                    for invalid_reason in run_for_both_steps({**base_metadata, "delivery.deploy_evidence_path": str(evidence), "gc.var.deploy_not_applicable_reason": reason}):
+                        self.assertEqual(invalid_reason.returncode, 1)
+                        self.assertIn("not-applicable deployment requires a nonblank deploy_not_applicable_reason", invalid_reason.stderr)
 
             for reason in ("", " \t "):
                 with self.subTest(no_smoke_reason=repr(reason)):

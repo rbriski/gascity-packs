@@ -19,6 +19,14 @@ title = "Prepare external review reconciliation"
 metadata = { "gc.run_target" = "complete-delivery.external-review-resolver" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.setup-external-review.md"
 
+[template.check]
+max_attempts = 1
+
+[template.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/delivery-external-review-deadline.sh"
+timeout = "1m"
+
 [[template]]
 id = "{target}.external-review-loop"
 title = "Iterate until CI and review are green"

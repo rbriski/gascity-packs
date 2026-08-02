@@ -1,5 +1,10 @@
 Finalize the passing external-review expansion and its terminal report.
 
+Before finalizer work, run
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate`.
+The terminal repository check repeats it before evaluating any provider state;
+fail closed without publishing when validation fails.
+
 The `external-review-loop` Ralph check is the sole terminal admission decision:
 it runs the existing evaluator after publication and requires its fully passing
 current-head gate. This finalization lane must not repair, push, resolve a

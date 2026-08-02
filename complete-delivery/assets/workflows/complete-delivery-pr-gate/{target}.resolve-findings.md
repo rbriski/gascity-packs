@@ -1,5 +1,9 @@
 Resolve valid findings from the current-head gate snapshot.
 
+Before reading external evidence, reproducing a finding, or starting any repair,
+run `.gc/scripts/checks/delivery-external-review-deadline.sh --validate`.
+Do not mutate code when it fails.
+
 Read the gate JSON and, before reading the diff, logs, or threads, require a
 clean worktree (`git status --porcelain` empty) and canonical full-SHA
 `HEAD == inspected_head`. If either fails, replace the handoff with blocker-only

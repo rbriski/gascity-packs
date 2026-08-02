@@ -813,12 +813,24 @@ case "$DEPLOY_MODE" in
 esac
 
 STEP_REF="$(delivery_metadata_value "$DELIVERY_STEP_JSON" "gc.step_ref")"
+delivery_validate_not_applicable_evidence() {
+  delivery_command_is_nonblank "$NA_REASON" || \
+    delivery_fail "not-applicable deployment requires a nonblank deploy_not_applicable_reason"
+  [ -n "$DEPLOY_EVIDENCE" ] || delivery_fail "delivery.deploy_evidence_path is missing"
+  DEPLOY_EVIDENCE="$(delivery_resolve_artifact_delivery_evidence "$DEPLOY_EVIDENCE" "deployment evidence path")" || \
+    delivery_fail "deployment evidence path must resolve within the canonical artifact delivery directory"
+  if [ ! -f "$DEPLOY_EVIDENCE" ] || [ ! -s "$DEPLOY_EVIDENCE" ]; then
+    delivery_fail "deploy evidence is missing, not a file, or empty: $DEPLOY_EVIDENCE"
+  fi
+}
+
 case "$STEP_REF" in
   complete-delivery.deploy)
     case "$DEPLOY_MODE" in
       command) delivery_run_deploy_command ;;
       ci) delivery_run_ci_deploy_check ;;
       not-applicable)
+        delivery_validate_not_applicable_evidence
         echo "complete-delivery deploy check requires agent-provided evidence for deploy_mode=not-applicable"
         ;;
     esac
@@ -843,14 +855,7 @@ fi
 if [ "$DEPLOY_STATUS" = "not_applicable" ]; then
   [ "$DEPLOY_MODE" = "not-applicable" ] || \
     delivery_fail "not_applicable status is invalid for deploy_mode=$DEPLOY_MODE"
-  delivery_command_is_nonblank "$NA_REASON" || \
-    delivery_fail "not-applicable deployment requires a nonblank deploy_not_applicable_reason"
-  [ -n "$DEPLOY_EVIDENCE" ] || delivery_fail "delivery.deploy_evidence_path is missing"
-  DEPLOY_EVIDENCE="$(delivery_resolve_artifact_delivery_evidence "$DEPLOY_EVIDENCE" "deployment evidence path")" || \
-    delivery_fail "deployment evidence path must resolve within the canonical artifact delivery directory"
-  if [ ! -f "$DEPLOY_EVIDENCE" ] || [ ! -s "$DEPLOY_EVIDENCE" ]; then
-    delivery_fail "deploy evidence is missing, not a file, or empty: $DEPLOY_EVIDENCE"
-  fi
+  delivery_validate_not_applicable_evidence
   echo "complete-delivery deployment explicitly not applicable: $NA_REASON"
   exit 0
 fi

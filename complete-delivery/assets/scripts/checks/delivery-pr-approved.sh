@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=delivery-common.sh
 source "$SCRIPT_DIR/delivery-common.sh"
 delivery_initialize_context
+"$SCRIPT_DIR/delivery-external-review-deadline.sh" --validate
 
 REPO="$(delivery_root_metadata delivery.repo)"
 PR_NUMBER="$(delivery_root_metadata delivery.pr_number)"
