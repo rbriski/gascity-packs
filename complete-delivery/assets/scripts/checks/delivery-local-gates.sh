@@ -155,7 +155,7 @@ def inline_program_present(executable: str, options: list[str]) -> bool:
         option_operands = ("-X", "-W")
     elif executable.startswith("perl"):
         flags = ("-e", "-E")
-        option_operands = ("-I", "-M", "-m", "-C", "-0", "-F", "-x")
+        option_operands = ("-I", "-M", "-m", "-F", "-x")
     elif executable.startswith("ruby"):
         flags = ("-e",)
         option_operands = ("-I", "-r", "-C", "-E", "-F", "-T", "-W")
@@ -176,7 +176,7 @@ def inline_program_present(executable: str, options: list[str]) -> bool:
             for flag in argument[1:]:
                 if flag in "eE":
                     return True
-                if flag in "IMmCFx0":
+                if flag in "IMmFx":
                     break
         if any(argument == flag or argument.startswith(flag + "=") or (
             flag.startswith("-") and not flag.startswith("--") and argument.startswith(flag)

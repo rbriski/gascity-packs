@@ -458,7 +458,7 @@ class PrGateContractTests(unittest.TestCase):
     def test_local_gates_reject_interpreter_inline_program_forms_before_execution(self) -> None:
         forms = (
             "node -e", "node --eval=", "node -p", "node --print=", "node --require node:path -p",
-            "python3 -c", "python3 -X dev -c", "perl -e", "perl -E", "perl -we", "perl -pe", "ruby -e",
+            "python3 -c", "python3 -X dev -c", "perl -e", "perl -E", "perl -we", "perl -pe", "perl -0 -e", "perl -C -e", "ruby -e",
             "awk -e", "awk --source=", "awk", "awk --",
         )
         for form in forms:
