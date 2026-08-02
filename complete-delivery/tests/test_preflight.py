@@ -1061,6 +1061,9 @@ class PreflightTests(unittest.TestCase):
                 "  if [ \"${FAKE_GC_FAIL_STARTED_UPDATE:-}\" = true ] && printf '%s\\n' \"$*\" | grep -Fq 'delivery.deploy_status=started'; then\n"
                 "    exit 1\n"
                 "  fi\n"
+                "  if [ \"${FAKE_GC_FAIL_FINAL_UPDATE:-}\" = true ] && printf '%s\\n' \"$*\" | grep -Fq 'delivery.deploy_evidence_path='; then\n"
+                "    exit 1\n"
+                "  fi\n"
                 "  exit 0\n"
                 "fi\n"
                 "if [ \"${3:-}\" = root-1 ]; then\n"
@@ -1071,6 +1074,20 @@ class PreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
             gc.chmod(0o755)
+            mv = bin_dir / "mv"
+            mv.write_text(
+                "#!/bin/sh\n"
+                "if [ -n \"${FAKE_MV_LOG:-}\" ]; then\n"
+                "  if [ -n \"${FAKE_MV_FAIL_DEST:-}\" ] && [ \"${2:-}\" = \"$FAKE_MV_FAIL_DEST\" ]; then\n"
+                "    printf 'failed %s\\n' \"$2\" >> \"$FAKE_MV_LOG\"\n"
+                "    exit 1\n"
+                "  fi\n"
+                "  printf 'published %s\\n' \"${2:-}\" >> \"$FAKE_MV_LOG\"\n"
+                "fi\n"
+                "exec /bin/mv \"$@\"\n",
+                encoding="utf-8",
+            )
+            mv.chmod(0o755)
             merge_sha = "a" * 40
             base_metadata = {
                 "delivery.merge_sha": merge_sha,
@@ -1091,6 +1108,7 @@ class PreflightTests(unittest.TestCase):
                     ),
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                     "COMMAND_MARKER": str(marker),
+                    "FAKE_MV_LOG": str(root / "mv.log"),
                 }
             )
 
@@ -1221,7 +1239,10 @@ class PreflightTests(unittest.TestCase):
                     text=True,
                     env=environment,
                 )
-                return result, (delivery_dir / "deploy.log").read_text(encoding="utf-8")
+                evidence = delivery_dir / "deploy.log"
+                return result, (
+                    evidence.read_text(encoding="utf-8") if evidence.exists() else ""
+                )
 
             success_command = 'printf "%s\\n" "$DELIVERY_SHA" >> "$COMMAND_MARKER"'
             succeeded, evidence = run_deploy(success_command)
@@ -1252,6 +1273,9 @@ class PreflightTests(unittest.TestCase):
                     self.assertIn(f"child_status={status}", evidence)
 
             delivery_dir = repository / "artifacts" / "delivery"
+            deploy_log = delivery_dir / "deploy.log"
+            stdout = delivery_dir / "deploy.stdout.log"
+            stderr = delivery_dir / "deploy.stderr.log"
             for path in delivery_dir.iterdir():
                 path.unlink()
             for status in ("started", "deployed", "failed", "verified"):
@@ -1315,6 +1339,119 @@ class PreflightTests(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertFalse(any(delivery_dir.iterdir()))
             environment.pop("FAKE_GC_FAIL_STARTED_UPDATE")
+
+            # Each publication boundary must clean up all final evidence after
+            # the command has run.  The started guard remains durable so a
+            # same-SHA replay fails before it can execute the command again.
+            for failure_name, failed_destination in (
+                ("stderr capture", "deploy.stderr.log"),
+                ("deploy evidence", "deploy.log"),
+            ):
+                with self.subTest(publication_failure=failure_name):
+                    for path in delivery_dir.iterdir():
+                        path.unlink()
+                    if marker.exists():
+                        marker.unlink()
+                    if updates.exists():
+                        updates.unlink()
+                    mv_log = pathlib.Path(environment["FAKE_MV_LOG"])
+                    if mv_log.exists():
+                        mv_log.unlink()
+                    environment["FAKE_MV_FAIL_DEST"] = str(
+                        delivery_dir / failed_destination
+                    )
+                    failed, _ = run_deploy(success_command)
+                    environment.pop("FAKE_MV_FAIL_DEST")
+                    self.assertEqual(failed.returncode, 1)
+                    self.assertFalse(
+                        any(
+                            path.exists()
+                            for path in (
+                                deploy_log,
+                                stdout,
+                                stderr,
+                            )
+                        )
+                    )
+                    self.assertEqual(
+                        marker.read_text(encoding="utf-8"), f"{merge_sha}\n"
+                    )
+                    self.assertIn(
+                        "delivery.deploy_status=started", updates.read_text(encoding="utf-8")
+                    )
+                    publications = mv_log.read_text(encoding="utf-8").splitlines()
+                    self.assertIn(f"published {stdout}", publications)
+                    self.assertIn(
+                        f"failed {delivery_dir / failed_destination}", publications
+                    )
+
+                    environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
+                        **base_metadata,
+                        "gc.var.deploy_command": success_command,
+                        "delivery.deploy_status": "started",
+                        "delivery.deploy_merge_sha": merge_sha,
+                    }}])
+                    marker_before_replay = marker.read_text(encoding="utf-8")
+                    replay = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(replay.returncode, 1)
+                    self.assertIn("exact-once deployment forbids a rerun", replay.stderr)
+                    self.assertEqual(
+                        marker.read_text(encoding="utf-8"), marker_before_replay
+                    )
+
+            with self.subTest(publication_failure="final metadata update"):
+                for path in delivery_dir.iterdir():
+                    path.unlink()
+                if marker.exists():
+                    marker.unlink()
+                if updates.exists():
+                    updates.unlink()
+                mv_log = pathlib.Path(environment["FAKE_MV_LOG"])
+                if mv_log.exists():
+                    mv_log.unlink()
+                environment["FAKE_GC_FAIL_FINAL_UPDATE"] = "true"
+                failed, _ = run_deploy(success_command)
+                environment.pop("FAKE_GC_FAIL_FINAL_UPDATE")
+                self.assertEqual(failed.returncode, 1)
+                self.assertFalse(
+                    any(
+                        path.exists()
+                        for path in (
+                            deploy_log,
+                            stdout,
+                            stderr,
+                        )
+                    )
+                )
+                self.assertEqual(
+                    marker.read_text(encoding="utf-8"), f"{merge_sha}\n"
+                )
+                self.assertIn(
+                    "delivery.deploy_status=started", updates.read_text(encoding="utf-8")
+                )
+                environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
+                    **base_metadata,
+                    "gc.var.deploy_command": success_command,
+                    "delivery.deploy_status": "started",
+                    "delivery.deploy_merge_sha": merge_sha,
+                }}])
+                marker_before_replay = marker.read_text(encoding="utf-8")
+                replay = subprocess.run(
+                    ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+                self.assertEqual(replay.returncode, 1)
+                self.assertIn("exact-once deployment forbids a rerun", replay.stderr)
+                self.assertEqual(
+                    marker.read_text(encoding="utf-8"), marker_before_replay
+                )
 
             succeeded, evidence = run_deploy(success_command)
             self.assertEqual(succeeded.returncode, 0, succeeded.stderr)
