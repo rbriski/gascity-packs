@@ -1187,6 +1187,8 @@ class PreflightTests(unittest.TestCase):
         merge = (WORKFLOW_ROOT / "merge.md").read_text(encoding="utf-8")
         self.assertIn("DELIVERY_PR_URL", merge)
         self.assertIn('gh pr merge "$DELIVERY_PR_URL"', merge)
+        self.assertIn("gc.var.merge_method", merge)
+        self.assertIn("MERGE_METHOD", merge)
         for flag in ("--squash", "--merge", "--rebase"):
             self.assertIn(flag, merge)
 

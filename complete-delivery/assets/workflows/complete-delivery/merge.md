@@ -7,9 +7,11 @@ nonempty full 40-character lowercase Git SHA, and assign it explicitly as
 expected-head guard. Resolve the previously validated durable `delivery.pr_url`
 into a nonempty `DELIVERY_PR_URL` and run
 `gh pr merge "$DELIVERY_PR_URL" --match-head-commit "$DELIVERY_HEAD_SHA"` with
-the configured `merge_method` (`squash`, `merge`, or `rebase`). Map that
-validated value explicitly before merging: `squash` to `--squash`, `merge` to
-`--merge`, and `rebase` to `--rebase`; reject every other value. Use the
+the configured `merge_method` (`squash`, `merge`, or `rebase`). Read
+`gc.var.merge_method`, require one of those three exact values, and assign it
+explicitly as `MERGE_METHOD`. Map that validated value before merging: `squash`
+to `--squash`, `merge` to `--merge`, and `rebase` to `--rebase`; reject every
+other value. Use the
 selected flag together with `--match-head-commit`. Never use
 `--admin`, a force push, or a direct push to the protected base. If the head
 moves, checks restart, approval is dismissed, or mergeability is unknown,
