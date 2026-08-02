@@ -362,7 +362,7 @@ metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
 description_file = "../assets/workflows/complete-delivery/deploy.md"
 
 [steps.check]
-max_attempts = 3
+max_attempts = 1
 
 [steps.check.check]
 mode = "exec"

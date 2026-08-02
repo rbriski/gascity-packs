@@ -1700,6 +1700,8 @@ class PreflightTests(unittest.TestCase):
             steps["deploy"]["check"]["check"]["path"],
             ".gc/scripts/checks/delivery-release-verified.sh",
         )
+        self.assertEqual(steps["deploy"]["check"]["max_attempts"], 1)
+        self.assertEqual(steps["verify-production"]["check"]["max_attempts"], 4)
 
         self.assertEqual(formula["vars"]["deploy_timeout"]["default"], "5m")
         self.assertEqual(formula["vars"]["deploy_ci_workflow"]["default"], "")
