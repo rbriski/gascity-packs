@@ -15,5 +15,7 @@ Record `delivery.deploy_evidence_path` and set `delivery.deploy_status` to
 `delivery.deployed_sha`; the next stage owns production proof. Preserve the
 last known good production state on failure and include rollback guidance.
 
-Close with `gc.outcome=pass` only after a real deployment trigger succeeds.
+Close with `gc.outcome=pass` only after either a real command or CI deployment
+trigger succeeds, or a valid explicit non-applicable record has captured the
+concrete non-deployable-artifact reason and deploy evidence.
 Do not invoke provider-native subagents.

@@ -8,9 +8,13 @@ successful build, or an HTTP 200 without revision evidence is insufficient
 when the service can expose a revision.
 
 Diagnose and repair deploy or application failures, redeploy the same intended
-SHA when safe, and repeat. Do not roll forward to a different unreviewed SHA.
-If rollback is required, execute the documented repository path and leave the
-workflow blocked rather than declaring the requested release complete.
+SHA when safe, and reverify. Make at most three complete
+repair-redeploy-reverify attempts per Formula iteration. If a fourth repair
+would be required, stop mutation, preserve blocker and rollback evidence in
+the verification record, and close with a non-pass outcome. Do not roll forward
+to a different unreviewed SHA. If rollback is required, execute the documented
+repository path and leave the workflow blocked rather than declaring the
+requested release complete.
 
 After proof, record `delivery.deployed_sha=<merge-sha>`,
 `delivery.deploy_status=verified`, and `delivery.verify_evidence_path`. For an
