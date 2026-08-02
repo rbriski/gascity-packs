@@ -5,6 +5,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 
@@ -13,6 +14,8 @@ SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-preflight.sh"
 RELEASE_VERIFIED_SCRIPT = (
     PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-release-verified.sh"
 )
+FORMULA_PATH = PACK_ROOT / "formulas" / "complete-delivery.formula.toml"
+WORKFLOW_ROOT = PACK_ROOT / "assets" / "workflows" / "complete-delivery"
 
 
 class PreflightTests(unittest.TestCase):
@@ -46,6 +49,7 @@ class PreflightTests(unittest.TestCase):
         protected: bool = True,
         step_json: str | None = None,
         root_json: str | None = None,
+        source_json: str | None = None,
         transient_gc_failures: int = 0,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
@@ -68,7 +72,9 @@ class PreflightTests(unittest.TestCase):
                 "    exit 1\n"
                 "  fi\n"
                 "fi\n"
-                "if [ \"${3:-}\" = \"${FAKE_GC_ROOT_ID:-}\" ]; then\n"
+                "if [ \"${3:-}\" = \"${FAKE_GC_SOURCE_ID:-}\" ]; then\n"
+                "  printf '%s\\n' \"$FAKE_GC_SOURCE_JSON\"\n"
+                "elif [ \"${3:-}\" = \"${FAKE_GC_ROOT_ID:-}\" ]; then\n"
                 "  printf '%s\\n' \"$FAKE_GC_ROOT_JSON\"\n"
                 "else\n"
                 "  printf '%s\\n' \"$FAKE_GC_STEP_JSON\"\n"
@@ -98,6 +104,9 @@ class PreflightTests(unittest.TestCase):
                     or json.dumps([{"metadata": metadata}]),
                     "FAKE_GC_ROOT_ID": "root-1" if root_json is not None else "",
                     "FAKE_GC_ROOT_JSON": root_json or "",
+                    "FAKE_GC_SOURCE_ID": self.metadata().get("gc.var.source_bead_id", ""),
+                    "FAKE_GC_SOURCE_JSON": source_json
+                    or json.dumps([{"title": self.metadata()["gc.var.source_title"]}]),
                     "FAKE_GH_PROTECTED": str(protected).lower(),
                     "FAKE_GC_FAILURES_FILE": str(failures_file),
                     "PATH": f"{bin_dir}:{environment['PATH']}",
@@ -131,6 +140,19 @@ class PreflightTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("source_bead_id must be a valid durable bead or convoy ID", result.stderr)
+
+    def test_unreadable_or_mismatched_durable_source_fails_closed(self) -> None:
+        unreadable = self.run_preflight(
+            self.metadata(), source_json="not json"
+        )
+        self.assertEqual(unreadable.returncode, 1)
+        self.assertIn("source_bead_id must resolve to a readable durable bead or convoy", unreadable.stderr)
+
+        mismatched = self.run_preflight(
+            self.metadata(), source_json=json.dumps([{"title": "Different source"}])
+        )
+        self.assertEqual(mismatched.returncode, 1)
+        self.assertIn("source_title must exactly match the resolved durable source title", mismatched.stderr)
 
     def test_zero_local_gates_fail_closed_without_opt_out(self) -> None:
         result = self.run_preflight(self.metadata(**{"gc.var.setup_command": ""}))
@@ -279,6 +301,65 @@ class PreflightTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(f"{missing_key} is missing", result.stderr)
                 self.assertFalse(command_marker.exists())
+
+    def test_not_applicable_release_verification_requires_nonempty_deploy_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gc = bin_dir / "gc"
+            gc.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_JSON"\n', encoding="utf-8")
+            gc.chmod(0o755)
+            base_metadata = {
+                "delivery.merge_sha": "a" * 40,
+                "delivery.deploy_status": "not_applicable",
+                "gc.var.deploy_mode": "not-applicable",
+                "gc.var.deploy_not_applicable_reason": "Documentation-only artifact",
+            }
+            environment = os.environ.copy()
+            environment.update({"GC_BEAD_ID": "step-1", "GC_WORK_DIR": str(repository), "PATH": f"{bin_dir}:{environment['PATH']}"})
+            for evidence, message in (("", "delivery.deploy_evidence_path is missing"), ("empty.log", "deploy evidence is missing or empty")):
+                with self.subTest(evidence=evidence):
+                    metadata = {**base_metadata, "delivery.deploy_evidence_path": evidence}
+                    if evidence:
+                        (repository / evidence).write_text("", encoding="utf-8")
+                    environment["FAKE_GC_JSON"] = json.dumps([{"metadata": metadata}])
+                    result = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn(message, result.stderr)
+
+            evidence = repository / "deploy.log"
+            evidence.write_text("not applicable evidence\n", encoding="utf-8")
+            environment["FAKE_GC_JSON"] = json.dumps([{"metadata": {**base_metadata, "delivery.deploy_evidence_path": str(evidence)}}])
+            result = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_lifecycle_prompts_preserve_current_head_and_mode_contracts(self) -> None:
+        with FORMULA_PATH.open("rb") as formula_file:
+            formula = tomllib.load(formula_file)
+        steps = {step["id"]: step for step in formula["steps"]}
+        self.assertEqual(
+            steps["delivery-preflight"]["check"]["check"]["path"],
+            ".gc/scripts/checks/delivery-preflight.sh",
+        )
+
+        external_review = (WORKFLOW_ROOT / "external-review.md").read_text(encoding="utf-8")
+        for term in ("delivery.head_sha", "delivery.repo", "delivery.branch", "delivery.pr_number", "delivery.pr_url", "local_gates.status: \"passed\"", "tested_commit"):
+            self.assertIn(term, external_review)
+
+        local_gates = (WORKFLOW_ROOT / "local-gates.md").read_text(encoding="utf-8")
+        self.assertIn("status=passed", local_gates)
+        self.assertIn("full final `tested_commit`", local_gates)
+
+        readiness = (WORKFLOW_ROOT / "release-readiness.md").read_text(encoding="utf-8")
+        for term in ("deploy_mode=command", "deploy_mode=not-applicable", "deploy_not_applicable_reason", "allow_no_smoke=true", "merge-SHA proof"):
+            self.assertIn(term, readiness)
+
+        verification = (WORKFLOW_ROOT / "verify-production.md").read_text(encoding="utf-8")
+        self.assertIn("allow_no_smoke=false", verification)
+        self.assertIn("no-smoke exception", verification)
 
 
 if __name__ == "__main__":

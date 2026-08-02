@@ -22,6 +22,9 @@ if [ "$DEPLOY_STATUS" = "not_applicable" ]; then
   [ "$DEPLOY_MODE" = "not-applicable" ] || \
     delivery_fail "not_applicable status is invalid for deploy_mode=$DEPLOY_MODE"
   [ -n "$NA_REASON" ] || delivery_fail "not-applicable deployment requires deploy_not_applicable_reason"
+  [ -n "$DEPLOY_EVIDENCE" ] || delivery_fail "delivery.deploy_evidence_path is missing"
+  DEPLOY_EVIDENCE="$(delivery_resolve_path "$DEPLOY_EVIDENCE")"
+  [ -s "$DEPLOY_EVIDENCE" ] || delivery_fail "deploy evidence is missing or empty: $DEPLOY_EVIDENCE"
   echo "complete-delivery deployment explicitly not applicable: $NA_REASON"
   exit 0
 fi

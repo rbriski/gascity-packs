@@ -74,6 +74,33 @@ require_enum deploy_mode "$DEPLOY_MODE" command ci not-applicable
 case "$SOURCE_BEAD_ID" in
   *[!A-Za-z0-9._-]*|"") errors+=("source_bead_id must be a valid durable bead or convoy ID") ;;
 esac
+if [ -n "$SOURCE_BEAD_ID" ] && [[ "$SOURCE_BEAD_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  if ! SOURCE_JSON="$(delivery_read_bead_json "$SOURCE_BEAD_ID")" || ! delivery_json_is_valid "$SOURCE_JSON"; then
+    errors+=("source_bead_id must resolve to a readable durable bead or convoy")
+  else
+    SOURCE_RESOLVED_TITLE="$(printf '%s' "$SOURCE_JSON" | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+if isinstance(data, list):
+    if len(data) != 1:
+        raise SystemExit(1)
+    data = data[0]
+if not isinstance(data, dict):
+    raise SystemExit(1)
+title = data.get("title")
+if not isinstance(title, str) or not title.strip():
+    raise SystemExit(1)
+print(title.strip())
+')" || SOURCE_RESOLVED_TITLE=""
+    if [ -z "$SOURCE_RESOLVED_TITLE" ]; then
+      errors+=("source_bead_id must resolve to one durable source with a title")
+    elif [ -n "$SOURCE_TITLE" ] && [ "$SOURCE_TITLE" != "$SOURCE_RESOLVED_TITLE" ]; then
+      errors+=("source_title must exactly match the resolved durable source title")
+    fi
+  fi
+fi
 
 [ "$PUSH" = "true" ] || errors+=("push must be true for Complete Delivery")
 [ "$OPEN_PR" = "true" ] || errors+=("open_pr must be true for Complete Delivery")
