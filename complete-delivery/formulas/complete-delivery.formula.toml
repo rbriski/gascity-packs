@@ -1,0 +1,364 @@
+description = """
+Complete, observable delivery from product intent through verified production.
+
+Extends gstack-build with deterministic repository gates, required GitHub and
+CodeRabbit reconciliation, merge, deployment, exact-SHA verification, and an
+HTML/CSS living report. One launch owns the entire lifecycle.
+"""
+formula = "complete-delivery"
+version = 1
+extends = ["gstack-build"]
+target_required = true
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[catalog]
+name = "complete-delivery"
+description = "Plan, build, review, reconcile CI and CodeRabbit, merge, deploy, verify, and report in one run."
+
+[metadata.gc.methodology]
+allowed_drain_policies = ["separate", "same-session"]
+implementation_strategy = "drain"
+interaction_modes = ["interactive", "autonomous", "headless"]
+review_modes = ["report", "agent", "interactive"]
+
+[vars]
+[vars.interaction_mode]
+description = "Workflow interaction posture. Autonomous is the ergonomic default."
+default = "autonomous"
+
+[vars.review_mode]
+description = "Review authority. Agent mode applies bounded fixes without ceremonial pauses."
+default = "agent"
+
+[vars.push]
+description = "Complete Delivery requires publishing the feature branch."
+default = "true"
+
+[vars.open_pr]
+description = "Complete Delivery requires an open, non-draft pull request."
+default = "true"
+
+[vars.report_title]
+description = "Owner-facing title for the living delivery report."
+default = "Complete delivery"
+
+[vars.source_bead_id]
+description = "Durable bead or convoy that supplied the requested delivery intent."
+default = ""
+
+[vars.source_title]
+description = "Validated durable source title used to identify the requested outcome."
+default = ""
+
+[vars.base_branch]
+description = "Pull-request target branch."
+default = "main"
+
+[vars.required_checks]
+description = "Comma-separated exact GitHub check names, or auto for protected-branch discovery with current-head fallback. The base branch must always be protected."
+default = "auto"
+
+[vars.coderabbit]
+description = "CodeRabbit posture: required, optional, or off."
+default = "required"
+
+[vars.allow_no_ci]
+description = "Explicit exception for repositories with no CI checks."
+default = "false"
+
+[vars.setup_command]
+description = "Repository setup command."
+default = ""
+
+[vars.lint_command]
+description = "Repository lint command."
+default = ""
+
+[vars.typecheck_command]
+description = "Repository type-check command."
+default = ""
+
+[vars.test_command]
+description = "Repository primary test command."
+default = ""
+
+[vars.build_command]
+description = "Repository build command."
+default = ""
+
+[vars.browser_test_command]
+description = "Repository browser or end-to-end test command."
+default = ""
+
+[vars.security_command]
+description = "Repository security or secret-scan command."
+default = ""
+
+[vars.extra_gate_command]
+description = "Additional repository-owned quality gate."
+default = ""
+
+[vars.allow_no_local_gates]
+description = "Explicit exception when no local quality command applies."
+default = "false"
+
+[vars.merge_method]
+description = "GitHub merge method: squash, merge, or rebase."
+default = "squash"
+
+[vars.deploy_mode]
+description = "Deployment path: command, ci, or not-applicable."
+default = "command"
+
+[vars.deploy_command]
+description = "Repository-owned command that deploys DELIVERY_SHA."
+default = ""
+
+[vars.deploy_verify_command]
+description = "Command that proves the deployment completed for DELIVERY_SHA."
+default = ""
+
+[vars.smoke_command]
+description = "Production smoke or health command, run with DELIVERY_SHA exported."
+default = ""
+
+[vars.allow_no_smoke]
+description = "Explicit exception when a production smoke test cannot apply."
+default = "false"
+
+[vars.deploy_not_applicable_reason]
+description = "Required reason when deploy_mode is not-applicable."
+default = ""
+
+[vars.production_url]
+description = "Optional owner-facing production URL for the living report."
+default = ""
+
+[vars.report_publish_command]
+description = "Optional command that publishes the generated report bundle."
+default = ""
+
+[[steps]]
+id = "delivery-preflight"
+title = "Validate the repository delivery profile"
+needs = ["prepare"]
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+description_file = "../assets/workflows/complete-delivery/delivery-preflight.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/delivery-preflight.sh"
+timeout = "5m"
+
+[[steps]]
+id = "requirements"
+title = "gstack office-hours requirements after delivery preflight"
+needs = ["delivery-preflight"]
+metadata = { "gc.run_target" = "gstack.office-hours", "gc.build.artifact_schema" = "gc.build.requirements.v1", "gc.build.artifact_path_keys" = "gc.build.requirements_path,gc.var.requirements_path" }
+description_file = "../assets/workflows/complete-delivery/requirements.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"
+
+[[steps]]
+id = "report-initialize"
+title = "Initialize the living delivery report"
+needs = ["delivery-preflight"]
+metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+description_file = "../assets/workflows/complete-delivery/report-initialize.md"
+
+[[steps]]
+id = "plan"
+title = "Draft a source-grounded delivery plan"
+needs = ["requirements"]
+metadata = { "gc.run_target" = "gstack.founder-reviewer", "gc.build.artifact_schema" = "gc.build.plan.v1", "gc.build.artifact_path_keys" = "gc.build.plan_path,gc.var.plan_path" }
+description_file = "../assets/workflows/complete-delivery/plan.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"
+
+[[steps]]
+id = "decompose"
+title = "Create source-grounded implementation convoy"
+needs = ["plan-review"]
+metadata = { "gc.run_target" = "gstack.decomposer", "gc.build.artifact_schema" = "gc.build.decomposition.v1", "gc.build.artifact_path_keys" = "gc.build.decomposition_path,gc.var.decomposition_path" }
+description_file = "../assets/workflows/complete-delivery/decompose.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"
+
+[[steps]]
+id = "report-plan"
+title = "Report the approved plan"
+needs = ["plan-review", "report-initialize"]
+metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+description_file = "../assets/workflows/complete-delivery/report-plan.md"
+
+[[steps]]
+id = "report-implementation"
+title = "Report implementation progress"
+needs = ["summarize-implementation", "report-plan"]
+metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+description_file = "../assets/workflows/complete-delivery/report-implementation.md"
+
+[[steps]]
+id = "local-gates"
+title = "Run repository-native quality gates"
+needs = ["qa"]
+metadata = { "gc.run_target" = "complete-delivery.external-review-resolver" }
+description_file = "../assets/workflows/complete-delivery/local-gates.md"
+
+[steps.check]
+max_attempts = 4
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/delivery-local-gates.sh"
+timeout = "60m"
+
+[[steps]]
+id = "report-review"
+title = "Report internal review and QA"
+needs = ["review", "qa", "local-gates", "report-implementation"]
+metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+description_file = "../assets/workflows/complete-delivery/report-review.md"
+
+[[steps]]
+id = "release-readiness"
+title = "gstack release readiness after exact local gates"
+needs = ["report-review"]
+metadata = { "gc.run_target" = "gstack.release-engineer" }
+expand = "gstack-release-readiness"
+expand_vars = { review_mode = "{{review_mode}}" }
+description_file = "../assets/workflows/complete-delivery/release-readiness.md"
+
+[[steps]]
+id = "finalize"
+title = "Finalize the pre-publication delivery record"
+needs = ["release-readiness"]
+metadata = { "gc.run_target" = "gstack.release-engineer", "gc.build.artifact_schema" = "gc.build.final-report.v1", "gc.build.artifact_path_keys" = "gc.build.final_report_path" }
+description_file = "../assets/workflows/complete-delivery/finalize.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/build-artifact-valid.sh"
+timeout = "5m"
+
+[[steps]]
+id = "publish"
+title = "Publish the branch and open the pull request"
+needs = ["finalize"]
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+description_file = "../assets/workflows/complete-delivery/publish.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/delivery-pr-open.sh"
+timeout = "10m"
+
+[[steps]]
+id = "report-pull-request"
+title = "Report pull-request publication"
+needs = ["publish"]
+metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+description_file = "../assets/workflows/complete-delivery/report-pull-request.md"
+
+[[steps]]
+id = "external-review"
+title = "Reconcile CI, CodeRabbit, and review findings"
+needs = ["report-pull-request"]
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+expand = "complete-delivery-pr-gate"
+description_file = "../assets/workflows/complete-delivery/external-review.md"
+
+[[steps]]
+id = "report-green"
+title = "Report the green external gate"
+needs = ["external-review"]
+metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+description_file = "../assets/workflows/complete-delivery/report-green.md"
+
+[[steps]]
+id = "merge"
+title = "Merge without bypassing protection"
+needs = ["report-green"]
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+description_file = "../assets/workflows/complete-delivery/merge.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/delivery-merged.sh"
+timeout = "15m"
+
+[[steps]]
+id = "report-merged"
+title = "Report the verified merge"
+needs = ["merge"]
+metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+description_file = "../assets/workflows/complete-delivery/report-merged.md"
+
+[[steps]]
+id = "deploy"
+title = "Deploy the exact merge SHA"
+needs = ["report-merged"]
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+description_file = "../assets/workflows/complete-delivery/deploy.md"
+
+[[steps]]
+id = "verify-production"
+title = "Verify production and exact-SHA attestation"
+needs = ["deploy"]
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+description_file = "../assets/workflows/complete-delivery/verify-production.md"
+
+[steps.check]
+max_attempts = 4
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/delivery-release-verified.sh"
+timeout = "60m"
+
+[[steps]]
+id = "report-complete"
+title = "Publish the final living report"
+needs = ["verify-production"]
+metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+description_file = "../assets/workflows/complete-delivery/report-complete.md"
+
+[steps.check]
+max_attempts = 3
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/delivery-report-valid.sh"
+timeout = "10m"
