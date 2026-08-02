@@ -13,8 +13,15 @@ Formula check's existing three-attempt exhaustion evidence in `gc.attempt_log`:
 each failed wait or reconcile attempt records its blocker, and exhaustion closes
 with a non-pass outcome rather than resetting the count or merging.
 
+Immediately before that atomic merge command, re-read the PR's `base.ref` from
+GitHub. Require configured `gc.var.base_branch` to be nonempty and require the
+freshly read `base.ref` to equal it exactly. On a missing value or mismatch,
+fail closed and return to the prior gate; do not rely on the previously read
+base or attempt a merge.
+
 After GitHub reports the PR merged, read `merge_commit_sha`, verify it is
-reachable from `base_branch`, and record it as `delivery.merge_sha`. Record
+reachable from the configured `gc.var.base_branch`, and record it as
+`delivery.merge_sha`. Record
 merge time and method as evidence under `<artifact_root>/delivery/`.
 
 Close with `gc.outcome=pass`; the graph check independently verifies GitHub

@@ -169,6 +169,9 @@ if [ -n "$SMOKE_COMMAND" ]; then
     delivery_fail "smoke_command failed; see verification evidence"
 elif [ "$ALLOW_NO_SMOKE" != "true" ]; then
   delivery_fail "smoke_command is required unless allow_no_smoke=true"
+else
+  printf 'command=smoke outcome=not_run reason=allow_no_smoke_true exception=redacted_no_smoke\n' >>"$VERIFY_EVIDENCE" || \
+    delivery_fail "failed to record no-smoke verification exception"
 fi
 
 echo "complete-delivery release verified at $MERGE_SHA"

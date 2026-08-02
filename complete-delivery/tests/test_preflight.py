@@ -16,6 +16,7 @@ RELEASE_VERIFIED_SCRIPT = (
     PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-release-verified.sh"
 )
 PR_OPEN_SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-pr-open.sh"
+MERGED_SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-merged.sh"
 SOURCE_ARTIFACT_SCRIPT = (
     PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-source-artifact-valid.sh"
 )
@@ -539,6 +540,10 @@ class PreflightTests(unittest.TestCase):
                 env=environment,
             )
             self.assertEqual(without_smoke.returncode, 0, without_smoke.stderr)
+            self.assertIn(
+                "command=smoke outcome=not_run reason=allow_no_smoke_true exception=redacted_no_smoke",
+                evidence.read_text(encoding="utf-8"),
+            )
 
             environment["FAKE_GC_JSON"] = json.dumps(
                 [
@@ -563,6 +568,59 @@ class PreflightTests(unittest.TestCase):
                 "smoke_timeout must be a positive finite duration no greater than 1h",
                 invalid_smoke.stderr,
             )
+
+    def test_merged_check_binds_github_base_to_configured_base_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gc = bin_dir / "gc"
+            gc.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_JSON"\n', encoding="utf-8")
+            gc.chmod(0o755)
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$3\" = \"--jq\" ]; then\n"
+                "  printf '%s\\n' \"$FAKE_COMPARE_STATUS\"\n"
+                "else\n"
+                "  printf '%s\\n' \"$FAKE_PR_JSON\"\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            metadata = {
+                "delivery.repo": "example/repo",
+                "delivery.pr_number": "123",
+                "delivery.merge_sha": "a" * 40,
+                "gc.var.base_branch": "main",
+            }
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GC_BEAD_ID": "step-1",
+                    "GC_WORK_DIR": str(root),
+                    "FAKE_GC_JSON": json.dumps([{"metadata": metadata}]),
+                    "FAKE_PR_JSON": json.dumps(
+                        {"merged": True, "merge_commit_sha": "a" * 40, "base": {"ref": "release"}}
+                    ),
+                    "FAKE_COMPARE_STATUS": "ahead",
+                    "PATH": f"{bin_dir}:{environment['PATH']}",
+                }
+            )
+            mismatched = subprocess.run(
+                ["bash", str(MERGED_SCRIPT)], capture_output=True, text=True, env=environment
+            )
+            self.assertEqual(mismatched.returncode, 1)
+            self.assertIn("does not match configured base_branch main", mismatched.stderr)
+
+            environment["FAKE_PR_JSON"] = json.dumps(
+                {"merged": True, "merge_commit_sha": "a" * 40, "base": {"ref": "main"}}
+            )
+            verified = subprocess.run(
+                ["bash", str(MERGED_SCRIPT)], capture_output=True, text=True, env=environment
+            )
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+            self.assertIn("-> main", verified.stdout)
 
     def test_release_verification_disambiguates_child_and_timeout_statuses(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -735,17 +793,19 @@ class PreflightTests(unittest.TestCase):
                 ".gc/scripts/checks/delivery-source-artifact-valid.sh",
             )
 
-        for prompt, expected_path in (
-            (WORKFLOW_ROOT / "delivery-preflight.md", ".gc/scripts/checks/delivery-preflight.sh"),
-            (WORKFLOW_ROOT / "local-gates.md", ".gc/scripts/checks/delivery-local-gates.sh"),
+        for prompt, expected_path, materialized in (
+            (WORKFLOW_ROOT / "delivery-preflight.md", ".gc/scripts/checks/delivery-preflight.sh", True),
+            (WORKFLOW_ROOT / "local-gates.md", ".gc/scripts/checks/delivery-local-gates.sh", True),
             (
                 PR_GATE_WORKFLOW_ROOT / "{target}.rerun-local-gates.md",
-                ".gc/scripts/checks/delivery-local-gates.sh",
+                "{{pack_root}}/assets/scripts/checks/delivery-local-gates.sh",
+                False,
             ),
         ):
             text = prompt.read_text(encoding="utf-8")
             self.assertIn(f"`{expected_path}`", text)
-            self.assertNotIn("{{pack_root}}/assets/scripts/checks/", text)
+            if materialized:
+                self.assertNotIn("{{pack_root}}/assets/scripts/checks/", text)
 
         external_review = (WORKFLOW_ROOT / "external-review.md").read_text(encoding="utf-8")
         for term in ("delivery.head_sha", "delivery.repo", "delivery.branch", "delivery.pr_number", "delivery.pr_url", "local_gates.status: \"passed\"", "tested_commit"):
