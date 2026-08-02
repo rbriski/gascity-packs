@@ -4,18 +4,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=delivery-common.sh
 source "$SCRIPT_DIR/delivery-common.sh"
+delivery_initialize_context
 
-GENERIC_CHECK="$SCRIPT_DIR/build-artifact-valid.sh"
-if [ ! -f "$GENERIC_CHECK" ]; then
-  GENERIC_CHECK="$SCRIPT_DIR/../../../../gascity/assets/scripts/checks/build-artifact-valid.sh"
+# A deployed pack supplies the common checker beside this materialized script.
+# Source-tree and other non-materialized callers must configure it explicitly;
+# never walk repository-relative paths that can silently select a different
+# pack revision.
+GENERIC_CHECK="$(delivery_var build_artifact_valid_path '')"
+if [ -z "$GENERIC_CHECK" ]; then
+  GENERIC_CHECK="$SCRIPT_DIR/build-artifact-valid.sh"
+else
+  GENERIC_CHECK="$(delivery_resolve_path "$GENERIC_CHECK")"
 fi
 [ -f "$GENERIC_CHECK" ] || delivery_fail "build-artifact-valid.sh is unavailable"
 
 # Preserve the inherited schema and trace gate before applying the
 # Complete Delivery source-binding refinement.
 bash "$GENERIC_CHECK"
-
-delivery_initialize_context
 
 SCHEMA="$(delivery_metadata_value "$DELIVERY_STEP_JSON" "gc.build.artifact_schema")"
 case "$SCHEMA" in

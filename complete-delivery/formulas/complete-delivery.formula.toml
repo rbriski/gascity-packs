@@ -52,6 +52,10 @@ default = ""
 description = "Validated durable source title used to identify the requested outcome."
 default = ""
 
+[vars.build_artifact_valid_path]
+description = "Explicit path to the inherited build-artifact validator when it is not materialized beside the Complete Delivery checks."
+default = ""
+
 [vars.base_branch]
 description = "Pull-request target branch."
 default = "main"

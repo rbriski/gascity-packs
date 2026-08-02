@@ -7,13 +7,28 @@ nonempty full 40-character lowercase Git SHA, and assign it explicitly as
 expected-head guard. Resolve the previously validated durable `delivery.pr_url`
 into a nonempty `DELIVERY_PR_URL` and run
 `gh pr merge "$DELIVERY_PR_URL" --match-head-commit "$DELIVERY_HEAD_SHA"` with
-the configured `merge_method` (`squash`, `merge`, or `rebase`). Never use
+the configured `merge_method` (`squash`, `merge`, or `rebase`). Map that
+validated value explicitly before merging: `squash` to `--squash`, `merge` to
+`--merge`, and `rebase` to `--rebase`; reject every other value. Use the
+selected flag together with `--match-head-commit`. Never use
 `--admin`, a force push, or a direct push to the protected base. If the head
 moves, checks restart, approval is dismissed, or mergeability is unknown,
 wait/reconcile through the prior gate rather than bypassing it. Preserve the
 Formula check's existing three-attempt exhaustion evidence in `gc.attempt_log`:
 each failed wait or reconcile attempt records its blocker, and exhaustion closes
 with a non-pass outcome rather than resetting the count or merging.
+
+Use this explicit selection immediately before the guarded merge command:
+
+```bash
+case "$MERGE_METHOD" in
+  squash) MERGE_FLAG=--squash ;;
+  merge) MERGE_FLAG=--merge ;;
+  rebase) MERGE_FLAG=--rebase ;;
+  *) echo "unsupported merge_method: $MERGE_METHOD" >&2; exit 1 ;;
+esac
+gh pr merge "$DELIVERY_PR_URL" "$MERGE_FLAG" --match-head-commit "$DELIVERY_HEAD_SHA"
+```
 
 Immediately before that atomic merge command, re-read the PR's `base.ref` from
 GitHub. Require configured `gc.var.base_branch` to be nonempty and require the

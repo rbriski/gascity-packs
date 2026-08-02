@@ -22,6 +22,9 @@ MERGED_SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-merged.s
 SOURCE_ARTIFACT_SCRIPT = (
     PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-source-artifact-valid.sh"
 )
+SOURCE_ARTIFACT_GENERIC_CHECK = (
+    REPOSITORY_ROOT / "gascity" / "assets" / "scripts" / "checks" / "build-artifact-valid.sh"
+)
 FORMULA_PATH = PACK_ROOT / "formulas" / "complete-delivery.formula.toml"
 WORKFLOW_ROOT = PACK_ROOT / "assets" / "workflows" / "complete-delivery"
 PR_GATE_WORKFLOW_ROOT = (
@@ -296,6 +299,17 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("deploy=not-applicable", result.stdout)
 
+        for reason in ("", " \t "):
+            with self.subTest(reason=repr(reason)):
+                invalid = self.run_preflight(
+                    {**values, "gc.var.deploy_not_applicable_reason": reason}
+                )
+                self.assertEqual(invalid.returncode, 1)
+                self.assertIn(
+                    "deploy_not_applicable_reason is required and must be nonblank",
+                    invalid.stderr,
+                )
+
     def test_unsafe_production_url_fails(self) -> None:
         result = self.run_preflight(
             self.metadata(**{"gc.var.production_url": "javascript:alert(1)"})
@@ -455,6 +469,27 @@ class PreflightTests(unittest.TestCase):
             environment["FAKE_GC_JSON"] = json.dumps([{"metadata": {**base_metadata, "delivery.deploy_evidence_path": str(evidence)}}])
             result = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+            for reason in ("", " \t "):
+                with self.subTest(deploy_not_applicable_reason=repr(reason)):
+                    environment["FAKE_GC_JSON"] = json.dumps(
+                        [{"metadata": {
+                            **base_metadata,
+                            "delivery.deploy_evidence_path": str(evidence),
+                            "gc.var.deploy_not_applicable_reason": reason,
+                        }}]
+                    )
+                    invalid_reason = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(invalid_reason.returncode, 1)
+                    self.assertIn(
+                        "not-applicable deployment requires a nonblank deploy_not_applicable_reason",
+                        invalid_reason.stderr,
+                    )
 
             for reason in ("", " \t "):
                 with self.subTest(no_smoke_reason=repr(reason)):
@@ -858,6 +893,21 @@ class PreflightTests(unittest.TestCase):
             )
 
             environment["FAKE_GC_ROOT_JSON"] = json.dumps(
+                [{"metadata": {**base_metadata, "gc.var.deploy_mode": "unknown"}}]
+            )
+            unsupported_mode = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(unsupported_mode.returncode, 1)
+            self.assertIn(
+                "deploy_mode must be command, ci, or not-applicable",
+                unsupported_mode.stderr,
+            )
+            self.assertFalse(marker.exists())
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps(
                 [{"metadata": {**base_metadata, "gc.var.deploy_command": "/bin/true"}}]
             )
             for step_metadata, diagnostic in (
@@ -1137,11 +1187,16 @@ class PreflightTests(unittest.TestCase):
         merge = (WORKFLOW_ROOT / "merge.md").read_text(encoding="utf-8")
         self.assertIn("DELIVERY_PR_URL", merge)
         self.assertIn('gh pr merge "$DELIVERY_PR_URL"', merge)
+        for flag in ("--squash", "--merge", "--rebase"):
+            self.assertIn(flag, merge)
 
         source_artifact = SOURCE_ARTIFACT_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("python3 -c 'import yaml'", source_artifact)
+        self.assertIn("build_artifact_valid_path", source_artifact)
 
         finalizer = (WORKFLOW_ROOT / "finalize.md").read_text(encoding="utf-8")
+        self.assertIn("returned `id` to equal", finalizer)
+        self.assertIn("nonblank acceptance criteria", finalizer)
         self.assertIn("source trace is resolved", finalizer)
         self.assertIn("shared artifact validator accepts the final report", finalizer)
         self.assertIn("no blockers remain", finalizer)
@@ -1234,7 +1289,12 @@ class SourceArtifactTests(unittest.TestCase):
         )
 
     def run_check(
-        self, artifact_text: str, *, artifact_kind: str = "requirements", missing_pyyaml: bool = False
+        self,
+        artifact_text: str,
+        *,
+        artifact_kind: str = "requirements",
+        missing_pyyaml: bool = False,
+        generic_check: pathlib.Path | None = SOURCE_ARTIFACT_GENERIC_CHECK,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -1275,6 +1335,11 @@ class SourceArtifactTests(unittest.TestCase):
                 artifact_path_key: str(artifact),
                 "gc.var.source_bead_id": "fi-123",
                 "gc.var.source_title": "Requested delivery",
+                **(
+                    {"gc.var.build_artifact_valid_path": str(generic_check)}
+                    if generic_check is not None
+                    else {}
+                ),
             }}]
             source = [{"id": "fi-123", "title": "Requested delivery"}]
             environment = os.environ.copy()
@@ -1318,6 +1383,11 @@ class SourceArtifactTests(unittest.TestCase):
         result = self.run_check(self.artifact(), missing_pyyaml=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("PyYAML is required for Complete Delivery", result.stderr)
+
+    def test_source_artifact_fails_closed_without_adjacent_or_explicit_generic_checker(self) -> None:
+        result = self.run_check(self.artifact(), generic_check=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("build-artifact-valid.sh is unavailable", result.stderr)
 
     def test_source_intent_heading_inside_fence_is_rejected(self) -> None:
         source_id = "fi-123"

@@ -15,9 +15,11 @@ review, merge, deploy, and verification still follow. Record the absolute path
 on the workflow root as `gc.build.final_report_path`.
 
 Before finalizing, read `gc.var.source_bead_id` and the durable source bead or
-convoy. Fail closed if the source ID is absent, the durable bead or convoy
-cannot be read, its title or acceptance criteria are absent, or the approved
-requirements, plan, and decomposition cannot be linked back to those criteria.
+convoy. Fetch exactly one durable record and require its returned `id` to equal
+`gc.var.source_bead_id` byte-for-byte. Fail closed if the source ID is absent,
+the durable bead or convoy cannot be read, the returned ID differs, its title
+or nonblank acceptance criteria are absent, or the approved requirements,
+plan, and decomposition cannot be linked back to those criteria.
 In any of those cases, record the unresolved trace as a blocker and close with
 a non-pass outcome; do not write a passing final report or set
 `gc.outcome=pass`. Only after every value resolves may the `Source trace`

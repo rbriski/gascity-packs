@@ -168,7 +168,8 @@ case "$DEPLOY_MODE" in
     delivery_command_is_nonblank "$VERIFY_COMMAND" || errors+=("deploy_verify_command is required for deploy_mode=ci")
     ;;
   not-applicable)
-    [ -n "$NA_REASON" ] || errors+=("deploy_not_applicable_reason is required for deploy_mode=not-applicable")
+    delivery_command_is_nonblank "$NA_REASON" || \
+      errors+=("deploy_not_applicable_reason is required and must be nonblank for deploy_mode=not-applicable")
     ;;
 esac
 if [ "$DEPLOY_MODE" != "not-applicable" ]; then

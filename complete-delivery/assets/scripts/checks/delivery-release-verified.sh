@@ -282,6 +282,15 @@ NA_REASON="$(delivery_var deploy_not_applicable_reason "")"
 ALLOW_NO_SMOKE="$(delivery_var allow_no_smoke false)"
 NO_SMOKE_REASON="$(delivery_var no_smoke_reason '')"
 
+# This checker is shared by the deploy and production-verification graph
+# steps. Empty metadata retains the formula's declared command default, while
+# an unknown value must fail before either step can report success.
+case "$DEPLOY_MODE" in
+  "") DEPLOY_MODE=command ;;
+  command|ci|not-applicable) ;;
+  *) delivery_fail "deploy_mode must be command, ci, or not-applicable" ;;
+esac
+
 STEP_REF="$(delivery_metadata_value "$DELIVERY_STEP_JSON" "gc.step_ref")"
 case "$STEP_REF" in
   complete-delivery.deploy)
@@ -307,7 +316,8 @@ fi
 if [ "$DEPLOY_STATUS" = "not_applicable" ]; then
   [ "$DEPLOY_MODE" = "not-applicable" ] || \
     delivery_fail "not_applicable status is invalid for deploy_mode=$DEPLOY_MODE"
-  [ -n "$NA_REASON" ] || delivery_fail "not-applicable deployment requires deploy_not_applicable_reason"
+  delivery_command_is_nonblank "$NA_REASON" || \
+    delivery_fail "not-applicable deployment requires a nonblank deploy_not_applicable_reason"
   [ -n "$DEPLOY_EVIDENCE" ] || delivery_fail "delivery.deploy_evidence_path is missing"
   DEPLOY_EVIDENCE="$(delivery_resolve_path "$DEPLOY_EVIDENCE")"
   if [ ! -f "$DEPLOY_EVIDENCE" ] || [ ! -s "$DEPLOY_EVIDENCE" ]; then
