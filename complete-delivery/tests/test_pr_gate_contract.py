@@ -76,8 +76,11 @@ class PrGateContractTests(unittest.TestCase):
         finalizer = (workflows / "{target}.md").read_text(encoding="utf-8")
 
         self.assert_prose_contains(precheck, "Keep `external-review` `active`")
-        self.assertIn("immediate next action", precheck)
-        self.assert_prose_contains(precheck, "Only after that check passes")
+        self.assert_prose_contains(
+            precheck,
+            "set the immediate next action to the `external-review-loop` terminal mechanical check. "
+            "Only after that check passes may the existing post-check finalizer",
+        )
         self.assertIn("child report pre-terminal", loop)
         self.assertIn("leave `external-review` `active`", loop)
         self.assertIn("must not publish `passed` or a protected-merge next action", loop)
