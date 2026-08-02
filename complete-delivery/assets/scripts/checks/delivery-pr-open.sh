@@ -11,11 +11,13 @@ REPO="$(delivery_root_metadata delivery.repo)"
 PR_NUMBER="$(delivery_root_metadata delivery.pr_number)"
 RECORDED_SHA="$(delivery_root_metadata delivery.head_sha)"
 RECORDED_URL="$(delivery_root_metadata delivery.pr_url)"
+RECORDED_BRANCH="$(delivery_root_metadata delivery.branch)"
 BASE_BRANCH="$(delivery_var base_branch '')"
 [ -n "$REPO" ] || delivery_fail "workflow root metadata delivery.repo is missing"
 [ -n "$PR_NUMBER" ] || delivery_fail "workflow root metadata delivery.pr_number is missing"
 [ -n "$RECORDED_SHA" ] || delivery_fail "workflow root metadata delivery.head_sha is missing"
 [ -n "$RECORDED_URL" ] || delivery_fail "workflow root metadata delivery.pr_url is missing"
+[ -n "$RECORDED_BRANCH" ] || delivery_fail "workflow root metadata delivery.branch is missing"
 [ -n "$BASE_BRANCH" ] || delivery_fail "configured base_branch is required"
 
 PR_JSON="$(gh api "repos/$REPO/pulls/$PR_NUMBER")" || delivery_fail "failed to read PR $REPO#$PR_NUMBER"
@@ -27,17 +29,20 @@ print("\t".join([
     str(data.get("state") or ""),
     str(bool(data.get("draft"))).lower(),
     str((data.get("head") or {}).get("sha") or ""),
+    str((data.get("head") or {}).get("ref") or ""),
     str((data.get("base") or {}).get("ref") or ""),
     str(((data.get("base") or {}).get("repo") or {}).get("full_name") or ""),
     str(data.get("number") or ""),
     str(data.get("html_url") or ""),
 ]))
 ')"
-IFS=$'\t' read -r STATE DRAFT REMOTE_SHA REMOTE_BASE REMOTE_REPO REMOTE_NUMBER PR_URL <<<"$RESULT"
+IFS=$'\t' read -r STATE DRAFT REMOTE_SHA REMOTE_BRANCH REMOTE_BASE REMOTE_REPO REMOTE_NUMBER PR_URL <<<"$RESULT"
 [ "$STATE" = "open" ] || delivery_fail "PR is not open (state=$STATE)"
 [ "$DRAFT" = "false" ] || delivery_fail "PR is still a draft"
 [ "$REMOTE_SHA" = "$RECORDED_SHA" ] || \
   delivery_fail "recorded head $RECORDED_SHA does not match GitHub head $REMOTE_SHA"
+[ "$REMOTE_BRANCH" = "$RECORDED_BRANCH" ] || \
+  delivery_fail "recorded branch $RECORDED_BRANCH does not match GitHub head branch $REMOTE_BRANCH"
 [ "$REMOTE_BASE" = "$BASE_BRANCH" ] || \
   delivery_fail "PR base $REMOTE_BASE does not match configured base branch $BASE_BRANCH"
 [ "$REMOTE_REPO" = "$REPO" ] || \

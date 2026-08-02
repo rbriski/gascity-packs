@@ -381,7 +381,7 @@ class PreflightTests(unittest.TestCase):
             }
             environment = os.environ.copy()
             environment.update({"GC_BEAD_ID": "step-1", "GC_WORK_DIR": str(repository), "PATH": f"{bin_dir}:{environment['PATH']}"})
-            for evidence, message in (("", "delivery.deploy_evidence_path is missing"), ("empty.log", "deploy evidence is missing or empty")):
+            for evidence, message in (("", "delivery.deploy_evidence_path is missing"), ("empty.log", "deploy evidence is missing, not a file, or empty")):
                 with self.subTest(evidence=evidence):
                     metadata = {**base_metadata, "delivery.deploy_evidence_path": evidence}
                     if evidence:
@@ -390,6 +390,14 @@ class PreflightTests(unittest.TestCase):
                     result = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
                     self.assertEqual(result.returncode, 1)
                     self.assertIn(message, result.stderr)
+
+            directory_evidence = repository / "directory-evidence"
+            directory_evidence.mkdir()
+            (directory_evidence / "entry").write_text("not a regular file\n", encoding="utf-8")
+            environment["FAKE_GC_JSON"] = json.dumps([{"metadata": {**base_metadata, "delivery.deploy_evidence_path": str(directory_evidence)}}])
+            result = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("deploy evidence is missing, not a file, or empty", result.stderr)
 
             evidence = repository / "deploy.log"
             evidence.write_text("not applicable evidence\n", encoding="utf-8")
@@ -456,7 +464,37 @@ class PreflightTests(unittest.TestCase):
                 env=environment,
             )
             self.assertEqual(timed_out.returncode, 1)
-            self.assertIn("deploy_verify_command failed or timed out", timed_out.stderr)
+            self.assertIn("deploy_verify_command failed; see verification evidence", timed_out.stderr)
+            self.assertIn("command=deploy_verify", evidence.read_text(encoding="utf-8"))
+            self.assertIn("outcome=timeout", evidence.read_text(encoding="utf-8"))
+
+            for command, expected_outcome in (("   ", "required for deploy_mode"), ("false; true", "command_failure")):
+                with self.subTest(command=command):
+                    evidence.write_text("verified\n", encoding="utf-8")
+                    environment["FAKE_GC_JSON"] = json.dumps([{"metadata": {**base_metadata, "gc.var.deploy_verify_command": command}}])
+                    failed = subprocess.run(["bash", str(RELEASE_VERIFIED_SCRIPT)], capture_output=True, text=True, env=environment)
+                    self.assertEqual(failed.returncode, 1)
+                    if command.isspace():
+                        self.assertIn(expected_outcome, failed.stderr)
+                    else:
+                        self.assertIn(expected_outcome, evidence.read_text(encoding="utf-8"))
+                        self.assertNotIn(command, evidence.read_text(encoding="utf-8"))
+
+            environment["FAKE_GC_JSON"] = json.dumps(
+                [{"metadata": {
+                    **base_metadata,
+                    "gc.var.deploy_verify_command": "/bin/true",
+                    "gc.var.smoke_command": "\t ",
+                }}]
+            )
+            blank_smoke = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(blank_smoke.returncode, 1)
+            self.assertIn("smoke_command is required unless allow_no_smoke=true", blank_smoke.stderr)
 
             for timeout_value in ("0", "0s", "inf", "infinity", "--foreground"):
                 with self.subTest(timeout_value=timeout_value):
@@ -542,12 +580,13 @@ class PreflightTests(unittest.TestCase):
                 "delivery.pr_number": "123",
                 "delivery.head_sha": "a" * 40,
                 "delivery.pr_url": "https://github.com/example/repo/pull/123",
+                "delivery.branch": "feature/delivery",
                 "gc.var.base_branch": "main",
             }
             pull = {
                 "state": "open",
                 "draft": False,
-                "head": {"sha": "a" * 40},
+                "head": {"sha": "a" * 40, "ref": "feature/delivery"},
                 "base": {"ref": "main", "repo": {"full_name": "example/repo"}},
                 "number": 123,
                 "html_url": metadata["delivery.pr_url"],
@@ -573,6 +612,7 @@ class PreflightTests(unittest.TestCase):
                 ({"state": "closed"}, "PR is not open"),
                 ({"draft": True}, "PR is still a draft"),
                 ({"head": {"sha": "b" * 40}}, "does not match GitHub head"),
+                ({"head": {"sha": "a" * 40, "ref": "wrong-branch"}}, "does not match GitHub head branch"),
                 ({"base": {"ref": "wrong-base", "repo": {"full_name": "example/repo"}}}, "does not match configured base branch"),
                 ({"base": {"ref": "main", "repo": {"full_name": "other/repo"}}}, "does not match recorded repository"),
                 ({"number": 456}, "does not match recorded PR number"),
@@ -806,10 +846,35 @@ class SourceArtifactTests(unittest.TestCase):
                 self.assertIn(message, result.stderr)
 
     def test_source_intent_heading_inside_fence_is_rejected(self) -> None:
+        source_id = "fi-123"
+        source_title = "Requested delivery"
+        heading = f"## Source Intent\n\n{source_id} — {source_title}"
         for artifact_kind in ("requirements", "plan", "decomposition"):
-            artifact = self.artifact(artifact_kind=artifact_kind).replace(
-                "## Source Intent\n\nfi-123 — Requested delivery",
-                "```markdown\n## Source Intent\n\nfi-123 — Requested delivery\n```",
+            artifact = self.artifact(
+                artifact_kind=artifact_kind,
+                source_id=source_id,
+                source_title=source_title,
+            ).replace(
+                heading,
+                f"```markdown\n{heading}\n```",
+            )
+            with self.subTest(artifact_kind=artifact_kind):
+                result = self.run_check(artifact, artifact_kind=artifact_kind)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("requires a Source Intent section", result.stderr)
+
+    def test_source_intent_heading_cannot_span_lines(self) -> None:
+        source_id = "fi-123"
+        source_title = "Requested delivery"
+        heading = f"## Source Intent\n\n{source_id} — {source_title}"
+        for artifact_kind in ("requirements", "plan", "decomposition"):
+            artifact = self.artifact(
+                artifact_kind=artifact_kind,
+                source_id=source_id,
+                source_title=source_title,
+            ).replace(
+                heading,
+                f"##\nSource Intent\n\n{source_id} — {source_title}",
             )
             with self.subTest(artifact_kind=artifact_kind):
                 result = self.run_check(artifact, artifact_kind=artifact_kind)

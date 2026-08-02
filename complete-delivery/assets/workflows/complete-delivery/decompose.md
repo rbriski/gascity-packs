@@ -8,7 +8,9 @@ HEAD change into the delivery outcome. Record the source ID in the convoy and
 link source-anchor beads back to the workflow root so the final trace remains
 auditable.
 
-In the decomposition artifact YAML front matter, record `source.id`,
+Write the decomposition artifact to `{{decomposition_path}}` (declared by the
+inherited `gstack-build` formula) and record that exact path on the workflow
+root as `gc.build.decomposition_path`. In its YAML front matter, record `source.id`,
 `source.title`, and `source.anchor: gc:<source-id>` using the exact durable
 values. Start its body with the exact unfenced H2 heading `## Source Intent`
 and place that same resolved source ID and title immediately below it.

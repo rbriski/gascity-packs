@@ -26,8 +26,11 @@ requested release complete.
 
 After proof, record `delivery.deployed_sha=<merge-sha>`,
 `delivery.deploy_status=verified`, and `delivery.verify_evidence_path`. For an
-explicit non-applicable artifact, preserve `delivery.deploy_status=not_applicable`.
-Close with `gc.outcome=pass`; the graph check reruns configured verification
-and smoke commands and compares SHAs.
+explicit non-applicable artifact, preserve `delivery.deploy_status=not_applicable`,
+its nonempty regular-file deployment evidence, and the documented reason. Close
+with `gc.outcome=pass` only after the graph check: for `verified` it reruns the
+configured verification and applicable smoke commands and compares SHAs; for
+`not_applicable` it validates the reason and evidence instead of running those
+commands.
 
 Do not invoke provider-native subagents.

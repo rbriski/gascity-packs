@@ -117,7 +117,7 @@ def markdown_outside_fences(markdown: str) -> str:
 
 
 if not re.search(
-    r"^##\s+Source Intent\s*$",
+    r"^##[ \t]+Source Intent[ \t]*$",
     markdown_outside_fences(match.group("body")),
     re.MULTILINE,
 ):

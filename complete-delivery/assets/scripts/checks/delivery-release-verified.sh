@@ -27,6 +27,43 @@ raise SystemExit(0 if Decimal(0) < seconds <= Decimal(3600) else 1)
 PY
 }
 
+delivery_command_is_nonblank() {
+  [[ "$1" =~ [^[:space:]] ]]
+}
+
+delivery_command_label() {
+  python3 - "$1" <<'PY'
+import hashlib
+import sys
+
+print(f"sha256:{hashlib.sha256(sys.argv[1].encode()).hexdigest()}")
+PY
+}
+
+delivery_run_bounded_command() {
+  local name="$1"
+  local command="$2"
+  local timeout_value="$3"
+  local status outcome label
+
+  label="$(delivery_command_label "$command")"
+  if timeout --kill-after=5s "$timeout_value" bash -euo pipefail -c "$command"; then
+    status=0
+    outcome=passed
+  else
+    status=$?
+    case "$status" in
+      124|137) outcome=timeout ;;
+      125) outcome=timeout_utility_failure ;;
+      *) outcome=command_failure ;;
+    esac
+  fi
+  printf 'command=%s label=%s timeout=%s outcome=%s status=%s\n' \
+    "$name" "$label" "$timeout_value" "$outcome" "$status" >>"$VERIFY_EVIDENCE" || \
+    delivery_fail "failed to record $name verification evidence"
+  [ "$status" -eq 0 ]
+}
+
 MERGE_SHA="$(delivery_root_metadata delivery.merge_sha)"
 DEPLOYED_SHA="$(delivery_root_metadata delivery.deployed_sha)"
 DEPLOY_STATUS="$(delivery_root_metadata delivery.deploy_status)"
@@ -45,7 +82,9 @@ if [ "$DEPLOY_STATUS" = "not_applicable" ]; then
   [ -n "$NA_REASON" ] || delivery_fail "not-applicable deployment requires deploy_not_applicable_reason"
   [ -n "$DEPLOY_EVIDENCE" ] || delivery_fail "delivery.deploy_evidence_path is missing"
   DEPLOY_EVIDENCE="$(delivery_resolve_path "$DEPLOY_EVIDENCE")"
-  [ -s "$DEPLOY_EVIDENCE" ] || delivery_fail "deploy evidence is missing or empty: $DEPLOY_EVIDENCE"
+  if [ ! -f "$DEPLOY_EVIDENCE" ] || [ ! -s "$DEPLOY_EVIDENCE" ]; then
+    delivery_fail "deploy evidence is missing, not a file, or empty: $DEPLOY_EVIDENCE"
+  fi
   echo "complete-delivery deployment explicitly not applicable: $NA_REASON"
   exit 0
 fi
@@ -84,21 +123,21 @@ ALLOW_NO_SMOKE="$(delivery_var allow_no_smoke false)"
 VERIFY_TIMEOUT="$(delivery_var deploy_verify_timeout 5m)"
 SMOKE_TIMEOUT="$(delivery_var smoke_timeout 5m)"
 
-[ -n "$VERIFY_COMMAND" ] || \
+delivery_command_is_nonblank "$VERIFY_COMMAND" || \
   delivery_fail "deploy_verify_command is required for deploy_mode=$DEPLOY_MODE"
 command -v timeout >/dev/null 2>&1 || delivery_fail "timeout is required on PATH"
 delivery_timeout_is_bounded "$VERIFY_TIMEOUT" || \
   delivery_fail "deploy_verify_timeout must be a positive finite duration no greater than 1h"
 
-echo "complete-delivery deploy verification: $VERIFY_COMMAND"
-timeout --kill-after=5s "$VERIFY_TIMEOUT" bash -lc "$VERIFY_COMMAND" || \
-  delivery_fail "deploy_verify_command failed or timed out"
+delivery_run_bounded_command deploy_verify "$VERIFY_COMMAND" "$VERIFY_TIMEOUT" || \
+  delivery_fail "deploy_verify_command failed; see verification evidence"
 if [ -n "$SMOKE_COMMAND" ]; then
+  delivery_command_is_nonblank "$SMOKE_COMMAND" || \
+    delivery_fail "smoke_command is required unless allow_no_smoke=true"
   delivery_timeout_is_bounded "$SMOKE_TIMEOUT" || \
     delivery_fail "smoke_timeout must be a positive finite duration no greater than 1h"
-  echo "complete-delivery production smoke: $SMOKE_COMMAND"
-  timeout --kill-after=5s "$SMOKE_TIMEOUT" bash -lc "$SMOKE_COMMAND" || \
-    delivery_fail "smoke_command failed or timed out"
+  delivery_run_bounded_command smoke "$SMOKE_COMMAND" "$SMOKE_TIMEOUT" || \
+    delivery_fail "smoke_command failed; see verification evidence"
 elif [ "$ALLOW_NO_SMOKE" != "true" ]; then
   delivery_fail "smoke_command is required unless allow_no_smoke=true"
 fi
