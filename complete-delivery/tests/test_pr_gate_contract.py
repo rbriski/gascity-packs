@@ -459,7 +459,7 @@ class PrGateContractTests(unittest.TestCase):
         forms = (
             "node -e", "node --eval=", "node -p", "node --print=", "node --require node:path -p",
             "python3 -c", "python3 -X dev -c", "perl -e", "perl -E", "perl -we", "perl -pe", "ruby -e",
-            "awk -e", "awk --source=", "awk",
+            "awk -e", "awk --source=", "awk", "awk --",
         )
         for form in forms:
             with self.subTest(form=form), tempfile.TemporaryDirectory() as directory:

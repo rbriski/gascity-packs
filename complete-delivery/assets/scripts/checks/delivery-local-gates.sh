@@ -171,7 +171,7 @@ def inline_program_present(executable: str, options: list[str]) -> bool:
         if selected and not awk:
             return False
         if argument == "--":
-            return False
+            return awk and not selected
         if executable.startswith("perl") and argument.startswith("-") and not argument.startswith("--"):
             for flag in argument[1:]:
                 if flag in "eE":
