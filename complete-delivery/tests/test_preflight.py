@@ -372,6 +372,7 @@ class PreflightTests(unittest.TestCase):
                 evidence.write_text("verified\n", encoding="utf-8")
                 command_marker = root / "command-ran"
                 metadata = {
+                    "gc.step_ref": "complete-delivery.verify-production",
                     "delivery.merge_sha": "a" * 40,
                     "delivery.deployed_sha": "a" * 40,
                     "delivery.deploy_status": "verified",
@@ -423,6 +424,7 @@ class PreflightTests(unittest.TestCase):
             gc.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_JSON"\n', encoding="utf-8")
             gc.chmod(0o755)
             base_metadata = {
+                "gc.step_ref": "complete-delivery.verify-production",
                 "delivery.merge_sha": "a" * 40,
                 "delivery.deploy_status": "not_applicable",
                 "gc.var.deploy_mode": "not-applicable",
@@ -505,6 +507,7 @@ class PreflightTests(unittest.TestCase):
             gc.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_JSON"\n', encoding="utf-8")
             gc.chmod(0o755)
             base_metadata = {
+                "gc.step_ref": "complete-delivery.verify-production",
                 "delivery.merge_sha": "a" * 40,
                 "delivery.deployed_sha": "a" * 40,
                 "delivery.deploy_status": "verified",
@@ -738,6 +741,7 @@ class PreflightTests(unittest.TestCase):
             gc.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_JSON"\n', encoding="utf-8")
             gc.chmod(0o755)
             base_metadata = {
+                "gc.step_ref": "complete-delivery.verify-production",
                 "delivery.merge_sha": "a" * 40,
                 "delivery.deployed_sha": "a" * 40,
                 "delivery.deploy_status": "verified",
@@ -846,11 +850,48 @@ class PreflightTests(unittest.TestCase):
                     "GC_WORK_DIR": str(repository),
                     "FAKE_GC_UPDATES": str(updates),
                     "FAKE_GC_STEP_JSON": json.dumps(
-                        [{"metadata": {"gc.root_bead_id": "root-1", "gc.step_id": "deploy"}}]
+                        [{"metadata": {"gc.root_bead_id": "root-1", "gc.step_ref": "complete-delivery.deploy"}}]
                     ),
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                     "COMMAND_MARKER": str(marker),
                 }
+            )
+
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps(
+                [{"metadata": {**base_metadata, "gc.var.deploy_command": "/bin/true"}}]
+            )
+            for step_metadata, diagnostic in (
+                ({"gc.root_bead_id": "root-1"}, "gc.step_ref is required"),
+                (
+                    {
+                        "gc.root_bead_id": "root-1",
+                        "gc.step_ref": "complete-delivery.other",
+                    },
+                    "unexpected deployment lifecycle gc.step_ref",
+                ),
+            ):
+                with self.subTest(step_metadata=step_metadata):
+                    environment["FAKE_GC_STEP_JSON"] = json.dumps(
+                        [{"metadata": step_metadata}]
+                    )
+                    invalid_step = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(invalid_step.returncode, 1)
+                    self.assertIn(diagnostic, invalid_step.stderr)
+                    self.assertFalse(marker.exists())
+            environment["FAKE_GC_STEP_JSON"] = json.dumps(
+                [
+                    {
+                        "metadata": {
+                            "gc.root_bead_id": "root-1",
+                            "gc.step_ref": "complete-delivery.deploy",
+                        }
+                    }
+                ]
             )
 
             def run_deploy(command: str, timeout: str = "1s") -> tuple[subprocess.CompletedProcess[str], str]:
@@ -931,7 +972,7 @@ class PreflightTests(unittest.TestCase):
             }
             environment["GC_BEAD_ID"] = "verify-step"
             environment["FAKE_GC_STEP_JSON"] = json.dumps(
-                [{"metadata": {"gc.root_bead_id": "root-1", "gc.step_id": "verify-production"}}]
+                [{"metadata": {"gc.root_bead_id": "root-1", "gc.step_ref": "complete-delivery.verify-production"}}]
             )
             environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": verified_metadata}])
             release = subprocess.run(

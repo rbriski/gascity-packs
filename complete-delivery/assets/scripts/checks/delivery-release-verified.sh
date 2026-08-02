@@ -282,15 +282,20 @@ NA_REASON="$(delivery_var deploy_not_applicable_reason "")"
 ALLOW_NO_SMOKE="$(delivery_var allow_no_smoke false)"
 NO_SMOKE_REASON="$(delivery_var no_smoke_reason '')"
 
-STEP_ID="$(delivery_metadata_value "$DELIVERY_STEP_JSON" "gc.step_id")"
-if [ "$STEP_ID" = "deploy" ]; then
-  [ "$DEPLOY_MODE" = command ] || {
-    echo "complete-delivery deploy check requires agent-provided evidence for deploy_mode=$DEPLOY_MODE"
+STEP_REF="$(delivery_metadata_value "$DELIVERY_STEP_JSON" "gc.step_ref")"
+case "$STEP_REF" in
+  complete-delivery.deploy)
+    [ "$DEPLOY_MODE" = command ] || {
+      echo "complete-delivery deploy check requires agent-provided evidence for deploy_mode=$DEPLOY_MODE"
+      exit 0
+    }
+    delivery_run_deploy_command
     exit 0
-  }
-  delivery_run_deploy_command
-  exit 0
-fi
+    ;;
+  complete-delivery.verify-production) ;;
+  "") delivery_fail "gc.step_ref is required for deployment lifecycle checks" ;;
+  *) delivery_fail "unexpected deployment lifecycle gc.step_ref: $STEP_REF" ;;
+esac
 
 if [ "$ALLOW_NO_SMOKE" = "true" ] && ! [[ "$NO_SMOKE_REASON" =~ [^[:space:]] ]]; then
   delivery_fail "no_smoke_reason is required and must be nonblank when allow_no_smoke=true"
@@ -311,6 +316,11 @@ if [ "$DEPLOY_STATUS" = "not_applicable" ]; then
   echo "complete-delivery deployment explicitly not applicable: $NA_REASON"
   exit 0
 fi
+
+DELIVERY_REPO="$(delivery_root_metadata delivery.repo)"
+DELIVERY_PR="$(delivery_root_metadata delivery.pr_number)"
+[ -n "$DELIVERY_REPO" ] || delivery_fail "delivery.repo is missing"
+[ -n "$DELIVERY_PR" ] || delivery_fail "delivery.pr_number is missing"
 
 case "$DEPLOY_MODE" in
   command)
@@ -359,10 +369,6 @@ VERIFY_EVIDENCE="$(delivery_resolve_path "$VERIFY_EVIDENCE")"
 [ -s "$VERIFY_EVIDENCE" ] || delivery_fail "verification evidence is missing or empty: $VERIFY_EVIDENCE"
 
 export DELIVERY_SHA="$MERGE_SHA"
-DELIVERY_REPO="$(delivery_root_metadata delivery.repo)"
-DELIVERY_PR="$(delivery_root_metadata delivery.pr_number)"
-[ -n "$DELIVERY_REPO" ] || delivery_fail "delivery.repo is missing"
-[ -n "$DELIVERY_PR" ] || delivery_fail "delivery.pr_number is missing"
 export DELIVERY_REPO DELIVERY_PR
 cd "$DELIVERY_WORK_DIR"
 
