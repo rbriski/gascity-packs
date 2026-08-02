@@ -180,7 +180,7 @@ if [ "$DEPLOY_MODE" != "not-applicable" ]; then
   fi
   delivery_timeout_is_bounded "$VERIFY_TIMEOUT" || \
     errors+=("deploy_verify_timeout must be a positive finite duration no greater than 1h")
-  if [ -n "$SMOKE_COMMAND" ]; then
+  if delivery_command_is_nonblank "$SMOKE_COMMAND"; then
     delivery_timeout_is_bounded "$SMOKE_TIMEOUT" || \
       errors+=("smoke_timeout must be a positive finite duration no greater than 1h")
   fi

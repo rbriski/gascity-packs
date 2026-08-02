@@ -54,13 +54,18 @@ python3 -c 'import yaml' >/dev/null 2>&1 || \
 SOURCE_JSON="$(delivery_read_bead_json "$SOURCE_ID")" || \
   delivery_fail "source $SOURCE_ID is unreadable"
 delivery_json_is_valid "$SOURCE_JSON" || delivery_fail "source $SOURCE_ID returned invalid JSON"
-SOURCE_FIELDS="$(printf '%s' "$SOURCE_JSON" | python3 -c '
+SOURCE_FIELDS="$(printf '%s' "$SOURCE_JSON" | \
+  DELIVERY_SOURCE_ID="$SOURCE_ID" \
+  DELIVERY_SOURCE_TITLE="$SOURCE_TITLE" \
+  DELIVERY_SOURCE_SCHEMA="$SCHEMA" \
+  python3 -c '
 import json
+import os
 import sys
 
-expected_id = sys.argv[1]
-expected_title = sys.argv[2]
-schema = sys.argv[3]
+expected_id = os.environ["DELIVERY_SOURCE_ID"]
+expected_title = os.environ["DELIVERY_SOURCE_TITLE"]
+schema = os.environ["DELIVERY_SOURCE_SCHEMA"]
 data = json.load(sys.stdin)
 if isinstance(data, list):
     if len(data) != 1:
@@ -75,7 +80,7 @@ if not isinstance(source_id, str) or not source_id.strip():
     raise SystemExit(1)
 if not isinstance(title, str) or not title.strip():
     raise SystemExit(1)
-if schema == "gc.build.final-report.v1" and (
+if (
     not isinstance(acceptance_criteria, str) or not acceptance_criteria.strip()
 ):
     raise SystemExit(1)
@@ -86,12 +91,35 @@ print(json.dumps({
     "title": title,
     "acceptance_criteria": acceptance_criteria,
 }))
-' "$SOURCE_ID" "$SOURCE_TITLE" "$SCHEMA")" || \
+')" || \
   delivery_fail "source $SOURCE_ID is ambiguous, incomplete, or does not exactly match configured source identity"
 
-python3 - "$ARTIFACT_PATH" "$SCHEMA" "$SOURCE_FIELDS" <<'PY'
+REQUIREMENTS_PATH=""
+PLAN_PATH=""
+DECOMPOSITION_PATH=""
+if [ "$SCHEMA" = "gc.build.final-report.v1" ]; then
+  REQUIREMENTS_PATH="$(delivery_root_metadata gc.build.requirements_path)"
+  PLAN_PATH="$(delivery_root_metadata gc.build.plan_path)"
+  DECOMPOSITION_PATH="$(delivery_root_metadata gc.build.decomposition_path)"
+  [ -n "$REQUIREMENTS_PATH" ] || \
+    delivery_fail "gc.build.requirements_path is required to finalize source traceability"
+  [ -n "$PLAN_PATH" ] || \
+    delivery_fail "gc.build.plan_path is required to finalize source traceability"
+  [ -n "$DECOMPOSITION_PATH" ] || \
+    delivery_fail "gc.build.decomposition_path is required to finalize source traceability"
+  REQUIREMENTS_PATH="$(delivery_resolve_path "$REQUIREMENTS_PATH")"
+  PLAN_PATH="$(delivery_resolve_path "$PLAN_PATH")"
+  DECOMPOSITION_PATH="$(delivery_resolve_path "$DECOMPOSITION_PATH")"
+fi
+
+DELIVERY_SOURCE_FIELDS="$SOURCE_FIELDS" \
+DELIVERY_REQUIREMENTS_PATH="$REQUIREMENTS_PATH" \
+DELIVERY_PLAN_PATH="$PLAN_PATH" \
+DELIVERY_DECOMPOSITION_PATH="$DECOMPOSITION_PATH" \
+python3 - "$ARTIFACT_PATH" "$SCHEMA" <<'PY'
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -100,28 +128,63 @@ import yaml
 
 path = Path(sys.argv[1])
 schema = sys.argv[2]
-source_record = json.loads(sys.argv[3])
+source_record = json.loads(os.environ["DELIVERY_SOURCE_FIELDS"])
 expected_id = source_record["id"]
 expected_title = source_record["title"]
-acceptance_hash = ""
-if schema == "gc.build.final-report.v1":
-    acceptance_hash = "sha256:" + hashlib.sha256(
-        source_record["acceptance_criteria"].encode("utf-8")
-    ).hexdigest()
-text = path.read_text(encoding="utf-8")
-match = re.match(r"\A---\n(?P<front>.*?)\n---(?:\n|\Z)(?P<body>.*)\Z", text, re.DOTALL)
-if not match:
-    raise SystemExit("complete-delivery-check: source-bound artifact has no YAML front matter")
-front = yaml.safe_load(match.group("front")) or {}
-source = front.get("source") if isinstance(front, dict) else None
-if not isinstance(source, dict):
-    raise SystemExit("complete-delivery-check: source-bound artifact requires a source mapping")
-expected = {"id": expected_id, "title": expected_title, "anchor": f"gc:{expected_id}"}
-for key, value in expected.items():
-    if source.get(key) != value:
+acceptance_hash = "sha256:" + hashlib.sha256(
+    source_record["acceptance_criteria"].encode("utf-8")
+).hexdigest()
+
+
+def artifact_parts(artifact_path: Path, context: str):
+    try:
+        text = artifact_path.read_text(encoding="utf-8")
+    except OSError as exc:
         raise SystemExit(
-            f"complete-delivery-check: source.{key} must equal {value!r}"
+            f"complete-delivery-check: {context} is unreadable: {exc}"
+        ) from exc
+    match = re.match(
+        r"\A---\n(?P<front>.*?)\n---(?:\n|\Z)(?P<body>.*)\Z",
+        text,
+        re.DOTALL,
+    )
+    if not match:
+        raise SystemExit(
+            f"complete-delivery-check: {context} has no YAML front matter"
         )
+    front = yaml.safe_load(match.group("front")) or {}
+    if not isinstance(front, dict):
+        raise SystemExit(
+            f"complete-delivery-check: {context} front matter must be a mapping"
+        )
+    return front, match.group("body")
+
+
+def validate_source_binding(front, context: str):
+    source = front.get("source")
+    if not isinstance(source, dict):
+        raise SystemExit(
+            f"complete-delivery-check: {context} requires a source mapping"
+        )
+    expected = {
+        "id": expected_id,
+        "title": expected_title,
+        "anchor": f"gc:{expected_id}",
+        "acceptance_criteria_sha256": acceptance_hash,
+    }
+    for key, value in expected.items():
+        if source.get(key) == value:
+            continue
+        raise SystemExit(
+            f"complete-delivery-check: {context} source.{key} must equal {value!r}"
+        )
+    return source
+
+
+front, body = artifact_parts(path, "source-bound artifact")
+source = validate_source_binding(front, "source-bound artifact")
+
+
 def markdown_outside_fences(markdown: str) -> str:
     visible = []
     fence = None
@@ -142,7 +205,7 @@ def markdown_outside_fences(markdown: str) -> str:
     return "\n".join(visible)
 
 
-visible = markdown_outside_fences(match.group("body"))
+visible = markdown_outside_fences(body)
 if schema in {
     "gc.build.requirements.v1",
     "gc.build.plan.v1",
@@ -153,11 +216,23 @@ if schema in {
             "complete-delivery-check: source-bound artifact requires a Source Intent section"
         )
 elif schema == "gc.build.final-report.v1":
-    if source.get("acceptance_criteria_sha256") != acceptance_hash:
-        raise SystemExit(
-            "complete-delivery-check: source.acceptance_criteria_sha256 must equal "
-            f"{acceptance_hash!r}"
-        )
+    upstream_artifacts = (
+        ("gc.build.requirements.v1", os.environ["DELIVERY_REQUIREMENTS_PATH"]),
+        ("gc.build.plan.v1", os.environ["DELIVERY_PLAN_PATH"]),
+        ("gc.build.decomposition.v1", os.environ["DELIVERY_DECOMPOSITION_PATH"]),
+    )
+    for upstream_schema, upstream_path in upstream_artifacts:
+        context = f"approved {upstream_schema} artifact"
+        upstream_front, _ = artifact_parts(Path(upstream_path), context)
+        if upstream_front.get("schema") != upstream_schema:
+            raise SystemExit(
+                f"complete-delivery-check: {context} schema must equal {upstream_schema!r}"
+            )
+        if upstream_front.get("status") != "approved":
+            raise SystemExit(
+                f"complete-delivery-check: {context} status must equal 'approved'"
+            )
+        validate_source_binding(upstream_front, context)
     trace_match = re.search(
         r"^##[ \t]+Source trace[ \t]*$(?P<content>.*?)(?=^##[ \t]+|\Z)",
         visible,
@@ -169,7 +244,7 @@ elif schema == "gc.build.final-report.v1":
         )
     trace = trace_match.group("content")
     for label, value in (
-        ("Source ID", f"Source ID: `{expected_id}`"),
+        ("Source ID", f"Source ID: {expected_id}"),
         ("Source title", f"Source title: {expected_title}"),
         (
             "Acceptance criteria SHA-256",
@@ -177,9 +252,9 @@ elif schema == "gc.build.final-report.v1":
         ),
     ):
         occurrences = [
-            line.rstrip(" \t")
+            line
             for line in trace.splitlines()
-            if re.search(rf"{re.escape(label)}[ \t]*:", line)
+            if re.match(rf"^[ \t]*{re.escape(label)}[ \t]*:", line)
         ]
         if occurrences != [value]:
             raise SystemExit(

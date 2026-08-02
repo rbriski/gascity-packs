@@ -306,8 +306,12 @@ case "$STEP_REF" in
   *) delivery_fail "unexpected deployment lifecycle gc.step_ref: $STEP_REF" ;;
 esac
 
-if [ "$ALLOW_NO_SMOKE" = "true" ] && ! [[ "$NO_SMOKE_REASON" =~ [^[:space:]] ]]; then
-  delivery_fail "no_smoke_reason is required and must be nonblank when allow_no_smoke=true"
+if [ "$ALLOW_NO_SMOKE" = "true" ]; then
+  [[ "$NO_SMOKE_REASON" =~ [^[:space:]] ]] || \
+    delivery_fail "no_smoke_reason is required and must be nonblank when allow_no_smoke=true"
+  RECORDED_NO_SMOKE_REASON="$(delivery_root_metadata delivery.no_smoke_reason)"
+  [ "$RECORDED_NO_SMOKE_REASON" = "$NO_SMOKE_REASON" ] || \
+    delivery_fail "delivery.no_smoke_reason must exactly match gc.var.no_smoke_reason"
 fi
 
 [ -n "$MERGE_SHA" ] || delivery_fail "delivery.merge_sha is missing"
@@ -395,9 +399,7 @@ delivery_timeout_is_bounded "$VERIFY_TIMEOUT" || \
 
 delivery_run_bounded_command deploy_verify "$VERIFY_COMMAND" "$VERIFY_TIMEOUT" || \
   delivery_fail "deploy_verify_command failed; see verification evidence"
-if [ -n "$SMOKE_COMMAND" ]; then
-  delivery_command_is_nonblank "$SMOKE_COMMAND" || \
-    delivery_fail "smoke_command is required unless allow_no_smoke=true"
+if delivery_command_is_nonblank "$SMOKE_COMMAND"; then
   delivery_timeout_is_bounded "$SMOKE_TIMEOUT" || \
     delivery_fail "smoke_timeout must be a positive finite duration no greater than 1h"
   delivery_run_bounded_command smoke "$SMOKE_COMMAND" "$SMOKE_TIMEOUT" || \

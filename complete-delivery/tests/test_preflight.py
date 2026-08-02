@@ -240,17 +240,19 @@ class PreflightTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_smoke_timeout_is_validated_only_when_smoke_runs(self) -> None:
-        without_smoke = self.run_preflight(
-            self.metadata(
-                **{
-                    "gc.var.smoke_command": "",
-                    "gc.var.allow_no_smoke": "true",
-                    "gc.var.no_smoke_reason": "No production endpoint is exposed",
-                    "gc.var.smoke_timeout": "0s",
-                }
-            )
-        )
-        self.assertEqual(without_smoke.returncode, 0, without_smoke.stderr)
+        for command in ("", " \t "):
+            with self.subTest(command=repr(command)):
+                without_smoke = self.run_preflight(
+                    self.metadata(
+                        **{
+                            "gc.var.smoke_command": command,
+                            "gc.var.allow_no_smoke": "true",
+                            "gc.var.no_smoke_reason": "No production endpoint is exposed",
+                            "gc.var.smoke_timeout": "0s",
+                        }
+                    )
+                )
+                self.assertEqual(without_smoke.returncode, 0, without_smoke.stderr)
 
         with_smoke = self.run_preflight(
             self.metadata(**{"gc.var.smoke_timeout": "0s"})
@@ -519,6 +521,7 @@ class PreflightTests(unittest.TestCase):
                     "delivery.deploy_evidence_path": str(evidence),
                     "gc.var.allow_no_smoke": "true",
                     "gc.var.no_smoke_reason": "No production smoke surface exists",
+                    "delivery.no_smoke_reason": "No production smoke surface exists",
                 }}]
             )
             result = subprocess.run(
@@ -553,6 +556,7 @@ class PreflightTests(unittest.TestCase):
                 "gc.var.deploy_mode": "ci",
                 "gc.var.allow_no_smoke": "true",
                 "gc.var.no_smoke_reason": "No production endpoint is exposed",
+                "delivery.no_smoke_reason": "No production endpoint is exposed",
             }
             environment = os.environ.copy()
             environment.update(
@@ -619,8 +623,11 @@ class PreflightTests(unittest.TestCase):
                 text=True,
                 env=environment,
             )
-            self.assertEqual(blank_smoke.returncode, 1)
-            self.assertIn("smoke_command is required unless allow_no_smoke=true", blank_smoke.stderr)
+            self.assertEqual(blank_smoke.returncode, 0, blank_smoke.stderr)
+            self.assertIn(
+                "command=smoke outcome=not_run reason=allow_no_smoke_true",
+                evidence.read_text(encoding="utf-8"),
+            )
 
             for timeout_value in ("0", "0s", "inf", "infinity", "--foreground"):
                 with self.subTest(timeout_value=timeout_value):
@@ -685,6 +692,25 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(missing_reason.returncode, 1)
             self.assertIn("no_smoke_reason is required and must be nonblank", missing_reason.stderr)
+
+            environment["FAKE_GC_JSON"] = json.dumps(
+                [{"metadata": {
+                    **base_metadata,
+                    "delivery.no_smoke_reason": "A different durable reason",
+                    "gc.var.deploy_verify_command": "/bin/true",
+                }}]
+            )
+            mismatched_reason = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(mismatched_reason.returncode, 1)
+            self.assertIn(
+                "delivery.no_smoke_reason must exactly match gc.var.no_smoke_reason",
+                mismatched_reason.stderr,
+            )
 
             environment["FAKE_GC_JSON"] = json.dumps(
                 [
@@ -787,6 +813,7 @@ class PreflightTests(unittest.TestCase):
                 "gc.var.deploy_mode": "ci",
                 "gc.var.allow_no_smoke": "true",
                 "gc.var.no_smoke_reason": "No production endpoint is exposed",
+                "delivery.no_smoke_reason": "No production endpoint is exposed",
             }
             environment = os.environ.copy()
             environment.update(
@@ -1019,6 +1046,7 @@ class PreflightTests(unittest.TestCase):
                 "gc.var.deploy_verify_command": "/bin/true",
                 "gc.var.allow_no_smoke": "true",
                 "gc.var.no_smoke_reason": "No production endpoint is exposed",
+                "delivery.no_smoke_reason": "No production endpoint is exposed",
             }
             environment["GC_BEAD_ID"] = "verify-step"
             environment["FAKE_GC_STEP_JSON"] = json.dumps(
@@ -1199,6 +1227,8 @@ class PreflightTests(unittest.TestCase):
         source_artifact = SOURCE_ARTIFACT_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("python3 -c 'import yaml'", source_artifact)
         self.assertIn("build_artifact_valid_path", source_artifact)
+        self.assertIn('DELIVERY_SOURCE_FIELDS="$SOURCE_FIELDS"', source_artifact)
+        self.assertNotIn('"$SOURCE_ID" "$SOURCE_TITLE" "$SCHEMA"', source_artifact)
 
         finalizer = (WORKFLOW_ROOT / "finalize.md").read_text(encoding="utf-8")
         self.assertIn("returned `id` to equal", finalizer)
@@ -1210,10 +1240,9 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("no blockers remain", finalizer)
 
         for prompt in ("requirements.md", "plan.md", "decompose.md"):
-            self.assertIn(
-                "exact unfenced H2 heading `## Source Intent`",
-                (WORKFLOW_ROOT / prompt).read_text(encoding="utf-8"),
-            )
+            prompt_text = (WORKFLOW_ROOT / prompt).read_text(encoding="utf-8")
+            self.assertIn("exact unfenced H2 heading `## Source Intent`", prompt_text)
+            self.assertIn("source.acceptance_criteria_sha256", prompt_text)
 
 
 class SourceArtifactTests(unittest.TestCase):
@@ -1231,16 +1260,14 @@ class SourceArtifactTests(unittest.TestCase):
     ) -> str:
         source = ""
         if include_source:
-            source_acceptance = ""
-            if artifact_kind == "final-report":
-                source_acceptance = (
-                    "  acceptance_criteria_sha256: "
-                    f"{source_acceptance_hash if source_acceptance_hash is not None else 'sha256:' + hashlib.sha256(acceptance_criteria.encode('utf-8')).hexdigest()}\n"
-                )
+            source_acceptance = (
+                "  acceptance_criteria_sha256: "
+                f"{source_acceptance_hash if source_acceptance_hash is not None else 'sha256:' + hashlib.sha256(acceptance_criteria.encode('utf-8')).hexdigest()}\n"
+            )
             source = (
                 "source:\n"
                 f"  id: {source_id}\n"
-                f"  title: {source_title}\n"
+                f"  title: {json.dumps(source_title)}\n"
                 f"  anchor: {source_anchor}\n"
                 f"{source_acceptance}"
             )
@@ -1286,7 +1313,7 @@ class SourceArtifactTests(unittest.TestCase):
                 )
                 sections.append(
                     "## Source trace\n\n"
-                    f"Source ID: `{source_id}`\n"
+                    f"Source ID: {source_id}\n"
                     f"Source title: {source_title}\n"
                     f"Acceptance criteria SHA-256: {acceptance_hash}"
                 )
@@ -1335,6 +1362,8 @@ class SourceArtifactTests(unittest.TestCase):
         missing_pyyaml: bool = False,
         generic_check: pathlib.Path | None = SOURCE_ARTIFACT_GENERIC_CHECK,
         source_json: object | None = None,
+        source_title: str = "Requested delivery",
+        upstream_overrides: dict[str, str | None] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -1371,22 +1400,40 @@ class SourceArtifactTests(unittest.TestCase):
                 "gc.build.artifact_schema": f"gc.build.{artifact_kind}.v1",
                 "gc.build.artifact_path_keys": artifact_path_key,
             }}]
-            workflow_root = [{"id": "root-1", "metadata": {
+            root_metadata = {
                 artifact_path_key: str(artifact),
                 "gc.var.source_bead_id": "fi-123",
-                "gc.var.source_title": "Requested delivery",
+                "gc.var.source_title": source_title,
                 **(
                     {"gc.var.build_artifact_valid_path": str(generic_check)}
                     if generic_check is not None
                     else {}
                 ),
-            }}]
+            }
+            if artifact_kind == "final-report":
+                upstream_overrides = upstream_overrides or {}
+                for upstream_kind in ("requirements", "plan", "decomposition"):
+                    upstream_text = upstream_overrides.get(
+                        upstream_kind,
+                        self.artifact(
+                            artifact_kind=upstream_kind,
+                            source_title=source_title,
+                        ),
+                    )
+                    if upstream_text is None:
+                        continue
+                    upstream_path = root / f"{upstream_kind}.md"
+                    upstream_path.write_text(upstream_text, encoding="utf-8")
+                    root_metadata[f"gc.build.{upstream_kind}_path"] = str(
+                        upstream_path
+                    )
+            workflow_root = [{"id": "root-1", "metadata": root_metadata}]
             source = (
                 source_json
                 if source_json is not None
                 else [{
                     "id": "fi-123",
-                    "title": "Requested delivery",
+                    "title": source_title,
                     "acceptance_criteria": "The requested outcome is delivered.",
                 }]
             )
@@ -1421,6 +1468,10 @@ class SourceArtifactTests(unittest.TestCase):
             (self.artifact(source_id="fi-wrong"), "source.id must equal"),
             (self.artifact(source_title="Wrong title"), "source.title must equal"),
             (self.artifact(source_anchor="gc:fi-wrong"), "source.anchor must equal"),
+            (
+                self.artifact(source_acceptance_hash="sha256:" + "0" * 64),
+                "source.acceptance_criteria_sha256 must equal",
+            ),
         ):
             with self.subTest(message=message):
                 result = self.run_check(artifact)
@@ -1432,12 +1483,19 @@ class SourceArtifactTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("PyYAML is required for Complete Delivery", result.stderr)
 
-    def test_pre_finalization_artifacts_keep_their_existing_source_contract(self) -> None:
-        result = self.run_check(
-            self.artifact(),
-            source_json=[{"id": "fi-123", "title": "Requested delivery"}],
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    def test_all_source_artifacts_require_durable_acceptance_criteria(self) -> None:
+        for artifact_kind in ("requirements", "plan", "decomposition", "final-report"):
+            with self.subTest(artifact_kind=artifact_kind):
+                result = self.run_check(
+                    self.artifact(artifact_kind=artifact_kind),
+                    artifact_kind=artifact_kind,
+                    source_json=[{"id": "fi-123", "title": "Requested delivery"}],
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "does not exactly match configured source identity",
+                    result.stderr,
+                )
 
     def test_source_artifact_fails_closed_without_adjacent_or_explicit_generic_checker(self) -> None:
         result = self.run_check(self.artifact(), generic_check=None)
@@ -1510,17 +1568,21 @@ class SourceArtifactTests(unittest.TestCase):
         exact_hash = "sha256:" + hashlib.sha256(
             b"The requested outcome is delivered."
         ).hexdigest()
-        source_id_line = "Source ID: `fi-123`"
+        source_id_line = "Source ID: fi-123"
         source_title_line = "Source title: Requested delivery"
         source_hash_line = f"Acceptance criteria SHA-256: {exact_hash}"
         malformed_lines = {
             "prefixed source id": exact_artifact.replace(
-                "Source ID: `fi-123`",
-                "prefix Source ID: `fi-123`",
+                "Source ID: fi-123",
+                "prefix Source ID: fi-123",
             ),
             "suffixed source title": exact_artifact.replace(
                 "Source title: Requested delivery",
                 "Source title: Requested delivery suffix",
+            ),
+            "trailing whitespace source id": exact_artifact.replace(
+                source_id_line,
+                source_id_line + " ",
             ),
             "wrong visible hash": exact_artifact.replace(
                 f"Acceptance criteria SHA-256: {exact_hash}",
@@ -1532,7 +1594,7 @@ class SourceArtifactTests(unittest.TestCase):
             ),
             "conflicting source id": exact_artifact.replace(
                 source_id_line,
-                f"{source_id_line}\nSource ID: `fi-forged`",
+                f"{source_id_line}\nSource ID: fi-forged",
             ),
             "duplicate source title": exact_artifact.replace(
                 source_title_line,
@@ -1558,7 +1620,7 @@ class SourceArtifactTests(unittest.TestCase):
             ),
             "malformed source id label": exact_artifact.replace(
                 source_id_line,
-                "Source ID : `fi-123`",
+                "Source ID : fi-123",
             ),
         }
         for name, malformed in malformed_lines.items():
@@ -1566,6 +1628,21 @@ class SourceArtifactTests(unittest.TestCase):
                 result = self.run_check(malformed, artifact_kind="final-report")
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Source trace must contain exactly one", result.stderr)
+
+        reserved_label_title = "Clarify Source ID: handling"
+        reserved_label = self.run_check(
+            self.artifact(
+                artifact_kind="final-report",
+                source_title=reserved_label_title,
+            ),
+            artifact_kind="final-report",
+            source_title=reserved_label_title,
+        )
+        self.assertEqual(
+            reserved_label.returncode,
+            0,
+            reserved_label.stdout + reserved_label.stderr,
+        )
 
     def test_final_report_requires_exact_acceptance_hash(self) -> None:
         for hash_value in ("", "sha256:" + "0" * 64):
@@ -1579,6 +1656,52 @@ class SourceArtifactTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("acceptance_criteria_sha256 must equal", result.stderr)
+
+    def test_final_report_requires_all_approved_upstream_source_bindings(self) -> None:
+        wrong_hash = "sha256:" + "0" * 64
+        mismatched_plan = self.run_check(
+            self.artifact(artifact_kind="final-report"),
+            artifact_kind="final-report",
+            upstream_overrides={
+                "plan": self.artifact(
+                    artifact_kind="plan",
+                    source_acceptance_hash=wrong_hash,
+                )
+            },
+        )
+        self.assertNotEqual(mismatched_plan.returncode, 0)
+        self.assertIn(
+            "approved gc.build.plan.v1 artifact source.acceptance_criteria_sha256 must equal",
+            mismatched_plan.stderr,
+        )
+
+        missing_decomposition = self.run_check(
+            self.artifact(artifact_kind="final-report"),
+            artifact_kind="final-report",
+            upstream_overrides={"decomposition": None},
+        )
+        self.assertNotEqual(missing_decomposition.returncode, 0)
+        self.assertIn(
+            "gc.build.decomposition_path is required to finalize source traceability",
+            missing_decomposition.stderr,
+        )
+
+        unapproved_requirements = self.run_check(
+            self.artifact(artifact_kind="final-report"),
+            artifact_kind="final-report",
+            upstream_overrides={
+                "requirements": self.artifact(artifact_kind="requirements").replace(
+                    "status: approved",
+                    "status: draft",
+                    1,
+                )
+            },
+        )
+        self.assertNotEqual(unapproved_requirements.returncode, 0)
+        self.assertIn(
+            "approved gc.build.requirements.v1 artifact status must equal 'approved'",
+            unapproved_requirements.stderr,
+        )
 
     def test_final_report_requires_exact_complete_source_record(self) -> None:
         artifact = self.artifact(artifact_kind="final-report")

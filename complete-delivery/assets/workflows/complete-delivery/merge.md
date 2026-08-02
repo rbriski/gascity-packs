@@ -5,9 +5,8 @@ Re-run the PR gate against the current head immediately before merge. Read
 nonempty full 40-character lowercase Git SHA, and assign it explicitly as
 `DELIVERY_HEAD_SHA`. Require the PR-gate SHA to equal that value, then pass it as the atomic
 expected-head guard. Resolve the previously validated durable `delivery.pr_url`
-into a nonempty `DELIVERY_PR_URL` and run
-`gh pr merge "$DELIVERY_PR_URL" --match-head-commit "$DELIVERY_HEAD_SHA"` with
-the configured `merge_method` (`squash`, `merge`, or `rebase`). Read
+into a nonempty `DELIVERY_PR_URL`. Merge only with the canonical guarded
+command below after selecting its method flag. Read
 `gc.var.merge_method`, require one of those three exact values, and assign it
 explicitly as `MERGE_METHOD`. Map that validated value before merging: `squash`
 to `--squash`, `merge` to `--merge`, and `rebase` to `--rebase`; reject every

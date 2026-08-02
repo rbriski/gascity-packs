@@ -27,9 +27,16 @@ a non-pass outcome; do not write a passing final report or set
 `Source title: <source-title>`, and `Acceptance criteria SHA-256:
 sha256:<hash>`. In YAML front matter, set `source.id`, `source.title`,
 `source.anchor`, and `source.acceptance_criteria_sha256` to the same resolved
-values. The hash is the SHA-256 digest of the exact acceptance-criteria string.
+values. Write each visible value as its exact raw text without Markdown
+backticks or other decoration. The hash is the SHA-256 digest of the exact
+acceptance-criteria string.
 This trace proves the delivered outcome is the requested work rather than a
 coincidental repository-HEAD change. Do not reproduce raw source notes,
 acceptance criteria, or sensitive source text in the public living report.
+The source-artifact validator mechanically reopens the approved artifacts at
+`gc.build.requirements_path`, `gc.build.plan_path`, and
+`gc.build.decomposition_path`; each must have approved status and the same
+exact durable source identity and acceptance-criteria SHA-256 before this
+stage can pass.
 
 On repair attempts, read validator errors from `gc.attempt_log` and repair the artifact in place. Close with `gc.outcome=pass` only when the source trace is resolved, the Complete Delivery source-artifact validator (which invokes the shared artifact validator) accepts the final report, and no blockers remain; otherwise close with a non-pass outcome. Do not publish or invoke provider-native subagents from this stage.

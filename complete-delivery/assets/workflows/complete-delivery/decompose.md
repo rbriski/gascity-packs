@@ -10,9 +10,12 @@ auditable.
 
 Write the decomposition artifact to `{{decomposition_path}}` (declared by the
 inherited `gstack-build` formula) and record that exact path on the workflow
-root as `gc.build.decomposition_path`. In its YAML front matter, record `source.id`,
-`source.title`, and `source.anchor: gc:<source-id>` using the exact durable
-values. Start its body with the exact unfenced H2 heading `## Source Intent`
+root as `gc.build.decomposition_path`. In its YAML front matter, record
+`source.id`, `source.title`, `source.anchor: gc:<source-id>`, and
+`source.acceptance_criteria_sha256` using the exact durable values. The hash is
+`sha256:` plus the SHA-256 digest of the exact durable acceptance-criteria
+string; do not copy the raw criteria into that source mapping. Start its body
+with the exact unfenced H2 heading `## Source Intent`
 and place that same resolved source ID and title immediately below it.
 
 Each bead must map to one vertical slice and include acceptance criteria, likely
