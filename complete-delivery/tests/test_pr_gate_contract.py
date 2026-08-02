@@ -76,7 +76,8 @@ class PrGateContractTests(unittest.TestCase):
         finalizer = (workflows / "{target}.md").read_text(encoding="utf-8")
 
         self.assert_prose_contains(precheck, "Keep `external-review` `active`")
-        self.assertIn("never claim protected merge is next", precheck)
+        self.assertIn("immediate next action", precheck)
+        self.assert_prose_contains(precheck, "Only after that check passes")
         self.assertIn("child report pre-terminal", loop)
         self.assertIn("leave `external-review` `active`", loop)
         self.assertIn("must not publish `passed` or a protected-merge next action", loop)
@@ -334,8 +335,6 @@ class PrGateContractTests(unittest.TestCase):
         result, _ = self.run_local_gates("true", empty_parser_output=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("local gate command could not be parsed safely: true", result.stderr)
-        script = LOCAL_GATES_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn('[ "${LOCAL_GATE_ARGV+x}" != x ] ||', script)
 
     def test_local_gates_reject_remote_approval_commands_before_bash_can_run_them(self) -> None:
         policy_commands = (
@@ -356,13 +355,16 @@ class PrGateContractTests(unittest.TestCase):
             "delivery_gate.py>/dev/null", "gh>/dev/null pr checks",
         )
         for terminal_command in policy_commands:
-            with self.subTest(terminal_command=terminal_command):
-                result, _ = self.run_local_gates(terminal_command)
+            with self.subTest(terminal_command=terminal_command), tempfile.TemporaryDirectory() as directory:
+                marker = pathlib.Path(directory) / "side-effect"
+                command = f"{terminal_command} {shlex.quote(str(marker))}"
+                result, _ = self.run_local_gates(command)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(
                     "invokes a terminal remote approval gate or provider command",
                     result.stderr,
                 )
+                self.assertFalse(marker.exists())
 
         for terminal_command in syntax_commands:
             with self.subTest(terminal_command=terminal_command):
