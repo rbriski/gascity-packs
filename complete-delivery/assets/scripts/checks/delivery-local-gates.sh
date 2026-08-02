@@ -165,22 +165,37 @@ def inline_program_present(executable: str, options: list[str]) -> bool:
     else:
         return False
 
-    awk = executable in {"awk", "gawk", "mawk", "nawk"}; selected = index = 0
+    awk = executable in {"awk", "gawk", "mawk", "nawk"}
+    short_inline_flags = {flag[1:] for flag in flags if len(flag) == 2}
+    short_operand_flags = {
+        flag[1:] for flag in option_operands if len(flag) == 2
+    }
+
+    def clustered_program(argument: str) -> bool:
+        if awk or not argument.startswith("-") or argument.startswith("--"):
+            return False
+        for flag in argument[1:]:
+            if flag in short_inline_flags:
+                return True
+            if flag in short_operand_flags:
+                return False
+        return False
+
+    selected = index = 0
     while index < len(options):
         argument = options[index]
         if selected and not awk:
             return False
         if argument == "--":
             return awk and not selected
-        if executable.startswith("perl") and argument.startswith("-") and not argument.startswith("--"):
-            for flag in argument[1:]:
-                if flag in "eE":
-                    return True
-                if flag in "IMmFx":
-                    break
-        if any(argument == flag or argument.startswith(flag + "=") or (
-            flag.startswith("-") and not flag.startswith("--") and argument.startswith(flag)
-        ) for flag in flags):
+        if clustered_program(argument):
+            return True
+        if any(
+            argument == flag
+            or argument.startswith(flag + "=")
+            or (flag.startswith("-") and not flag.startswith("--") and argument.startswith(flag))
+            for flag in flags
+        ):
             return True
         if awk and (
             argument in {"-f", "--file", "-E", "--exec"}

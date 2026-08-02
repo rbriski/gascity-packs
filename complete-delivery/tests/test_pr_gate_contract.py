@@ -81,6 +81,8 @@ class PrGateContractTests(unittest.TestCase):
             "set the immediate next action to the `external-review-loop` terminal mechanical check. "
             "Only after that check passes may the existing post-check finalizer",
         )
+        self.assert_prose_contains(precheck, "proven publication whose canonical full-SHA `published_head` exactly equals the updated workflow-root `delivery.head_sha`")
+        self.assert_prose_contains(precheck, "prior-inspected-head `pr-gate.json` is not current-head evidence")
         self.assertIn("child report pre-terminal", loop)
         self.assertIn("leave `external-review` `active`", loop)
         self.assertIn("must not publish `passed` or a protected-merge next action", loop)
@@ -437,24 +439,27 @@ class PrGateContractTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("terminal remote approval gate", result.stderr)
                     self.assertFalse(marker.exists())
-
     def test_local_gates_reject_interpreter_inline_program_forms_before_execution(self) -> None:
         forms = (
-            "node -e", "node --eval=", "node -p", "node --print=", "node --require node:path -p",
-            "python3 -c", "python3 -X dev -c", "perl -e", "perl -E", "perl -we", "perl -pe", "perl -0 -e", "perl -C -e", "ruby -e",
+            "node -e", "node --eval=", "node -p", "node --print=", "node --require node:path -p", "node -pe",
+            "python3 -c", "python3 -X dev -c", "python3 -Ic", "perl -e", "perl -E", "perl -we", "perl -pe", "perl -0 -e", "perl -C -e", "ruby -e", "ruby -we",
             "awk -e", "awk --source=", "awk", "awk --",
         )
         for form in forms:
             with self.subTest(form=form), tempfile.TemporaryDirectory() as directory:
                 marker = pathlib.Path(directory) / "inline-ran"
-                code = shlex.quote(f"touch {marker}")
+                source = {
+                    "python3 -Ic": f"__import__('pathlib').Path({str(marker)!r}).touch()",
+                    "ruby -we": f"File.write({str(marker)!r}, '')",
+                    "node -pe": f"require('fs').writeFileSync({str(marker)!r}, '')",
+                }.get(form, f"touch {marker}")
+                code = shlex.quote(source)
                 attached_code = form.endswith(("=", "-e", "-p", "-c", "-E"))
                 command = f"{form}{code}" if attached_code else f"{form} {code}"
                 result, _ = self.run_local_gates(command)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("terminal remote approval gate", result.stderr)
                 self.assertFalse(marker.exists())
-
     def test_local_gates_allow_awk_program_files_with_positional_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -465,14 +470,12 @@ class PrGateContractTests(unittest.TestCase):
             result, _ = self.run_local_gates(f"awk -f {shlex.quote(str(program))} {shlex.quote(str(input_file))}")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("benign input", result.stdout)
-
     def test_local_gates_allow_python_arguments_after_script_or_module_selection(self) -> None:
         for command in ("python3 script.py -e value", "python3 -m pytest -c pyproject.toml"):
             with self.subTest(command=command):
                 result, _ = self.run_local_gates(command)
                 self.assertNotIn("could not be parsed safely", result.stderr)
                 self.assertIn("local gate [test]", result.stdout)
-
     def test_local_gates_reject_command_substitution_before_side_effects(self) -> None:
         constructions = {
             "dollar": (
@@ -496,7 +499,6 @@ class PrGateContractTests(unittest.TestCase):
                         self.assertNotEqual(result.returncode, 0)
                         self.assertIn("command substitution", result.stderr)
                         self.assertFalse(marker.exists())
-
     def test_local_gates_use_a_restricted_argv_executor(self) -> None:
         unsupported_commands = (
             "$'g''h' pr checks",
@@ -518,7 +520,6 @@ class PrGateContractTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("terminal remote approval gate", result.stderr)
                     self.assertFalse(marker.exists())
-
     def test_local_gates_resolve_quotes_escapes_and_controlled_session_default(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             marker = pathlib.Path(directory) / "quoted marker"
@@ -556,7 +557,6 @@ class PrGateContractTests(unittest.TestCase):
                 result, _ = self.run_local_gates(command)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("parameter, arithmetic, or command expansion", result.stderr)
-
     def test_local_gates_reject_quote_split_terminal_commands_before_side_effects(self) -> None:
         for terminal_command in (
             'g"h" pr checks',
