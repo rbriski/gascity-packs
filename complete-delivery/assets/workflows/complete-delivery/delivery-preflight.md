@@ -1,6 +1,6 @@
 Validate the rig's durable Complete Delivery profile before substantive work.
 
-Run `{{pack_root}}/assets/scripts/checks/delivery-preflight.sh` with this
+Run `.gc/scripts/checks/delivery-preflight.sh` with this
 claimed bead as `GC_BEAD_ID`. It validates the one-step contract: repository-native gates,
 exact required-check policy, CodeRabbit posture, merge method, deployment
 mode, exact-SHA verification, production smoke, and safe report publication.

@@ -11,7 +11,7 @@ otherwise; individual thread `fix_commit` values remain thread evidence, not
 the test candidate. Permit at most three complete regression-repair-and-rerun attempts per Formula iteration: count each regression repair, commit and record it as the new
 `candidate_commit`, then rerun the complete sequence from the start. If a fourth repair is required, stop committing, replace the entire handoff with blocker-only retry-exhausted evidence containing no authority fields,
 and close with a non-pass outcome. Invoke
-`{{pack_root}}/assets/scripts/checks/delivery-local-gates.sh` with this claimed
+`.gc/scripts/checks/delivery-local-gates.sh` with this claimed
 bead as `GC_BEAD_ID`. The complete nonterminal local-gate set is the configured
 `setup_command`, `lint_command`, `typecheck_command`, `test_command`,
 `build_command`, `browser_test_command`, `security_command`, and

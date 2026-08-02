@@ -28,30 +28,6 @@ delivery_json_is_valid() {
   printf '%s' "$1" | python3 -c 'import json, sys; json.load(sys.stdin)' >/dev/null 2>&1
 }
 
-delivery_timeout_is_bounded() {
-  python3 - "$1" <<'PY'
-import re
-import sys
-from decimal import Decimal, InvalidOperation
-
-match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?|\.[0-9]+)([smhd]?)", sys.argv[1])
-if not match:
-    raise SystemExit(1)
-try:
-    value = Decimal(match.group(1))
-except InvalidOperation:
-    raise SystemExit(1)
-seconds = value * {
-    "": Decimal(1),
-    "s": Decimal(1),
-    "m": Decimal(60),
-    "h": Decimal(3600),
-    "d": Decimal(86400),
-}[match.group(2)]
-raise SystemExit(0 if Decimal(0) < seconds <= Decimal(3600) else 1)
-PY
-}
-
 delivery_read_bead_json() {
   local bead_id="$1"
   local attempt=1

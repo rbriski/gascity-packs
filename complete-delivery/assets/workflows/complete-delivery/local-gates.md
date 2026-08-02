@@ -1,7 +1,7 @@
 Run and repair the exact repository-native quality gates.
 
 From the launcher worktree, run
-`{{pack_root}}/assets/scripts/checks/delivery-local-gates.sh` with this claimed bead as
+`.gc/scripts/checks/delivery-local-gates.sh` with this claimed bead as
 `GC_BEAD_ID`. The script executes every configured non-empty command in this
 order: setup, lint, typecheck, test, build, browser, security, extra. On a
 failure, diagnose the defect, make the smallest correct code or test change,

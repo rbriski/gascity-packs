@@ -21,6 +21,9 @@ SOURCE_ARTIFACT_SCRIPT = (
 )
 FORMULA_PATH = PACK_ROOT / "formulas" / "complete-delivery.formula.toml"
 WORKFLOW_ROOT = PACK_ROOT / "assets" / "workflows" / "complete-delivery"
+PR_GATE_WORKFLOW_ROOT = (
+    PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+)
 
 
 class PreflightTests(unittest.TestCase):
@@ -538,6 +541,18 @@ class PreflightTests(unittest.TestCase):
                 steps[step_id]["check"]["check"]["path"],
                 ".gc/scripts/checks/delivery-source-artifact-valid.sh",
             )
+
+        for prompt, expected_path in (
+            (WORKFLOW_ROOT / "delivery-preflight.md", ".gc/scripts/checks/delivery-preflight.sh"),
+            (WORKFLOW_ROOT / "local-gates.md", ".gc/scripts/checks/delivery-local-gates.sh"),
+            (
+                PR_GATE_WORKFLOW_ROOT / "{target}.rerun-local-gates.md",
+                ".gc/scripts/checks/delivery-local-gates.sh",
+            ),
+        ):
+            text = prompt.read_text(encoding="utf-8")
+            self.assertIn(f"`{expected_path}`", text)
+            self.assertNotIn("{{pack_root}}/assets/scripts/checks/", text)
 
         external_review = (WORKFLOW_ROOT / "external-review.md").read_text(encoding="utf-8")
         for term in ("delivery.head_sha", "delivery.repo", "delivery.branch", "delivery.pr_number", "delivery.pr_url", "local_gates.status: \"passed\"", "tested_commit"):
