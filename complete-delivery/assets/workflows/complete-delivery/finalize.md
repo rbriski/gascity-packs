@@ -22,10 +22,14 @@ or nonblank acceptance criteria are absent, or the approved requirements,
 plan, and decomposition cannot be linked back to those criteria.
 In any of those cases, record the unresolved trace as a blocker and close with
 a non-pass outcome; do not write a passing final report or set
-`gc.outcome=pass`. Only after every value resolves may the `Source trace`
-subsection record the exact ID and title and link the approved artifacts back to
-the source acceptance criteria. This trace proves the delivered outcome is the
-requested work rather than a coincidental repository-HEAD change. Do not
-reproduce raw source notes or sensitive source text in the public living report.
+`gc.outcome=pass`. Only after every value resolves may the visible, unfenced
+`## Source trace` section record these exact lines: `Source ID: <source-id>`,
+`Source title: <source-title>`, and `Acceptance criteria SHA-256:
+sha256:<hash>`. In YAML front matter, set `source.id`, `source.title`,
+`source.anchor`, and `source.acceptance_criteria_sha256` to the same resolved
+values. The hash is the SHA-256 digest of the exact acceptance-criteria string.
+This trace proves the delivered outcome is the requested work rather than a
+coincidental repository-HEAD change. Do not reproduce raw source notes,
+acceptance criteria, or sensitive source text in the public living report.
 
-On repair attempts, read validator errors from `gc.attempt_log` and repair the artifact in place. Close with `gc.outcome=pass` only when the source trace is resolved, the shared artifact validator accepts the final report, and no blockers remain; otherwise close with a non-pass outcome. The graph's shared artifact validator is authoritative. Do not publish or invoke provider-native subagents from this stage.
+On repair attempts, read validator errors from `gc.attempt_log` and repair the artifact in place. Close with `gc.outcome=pass` only when the source trace is resolved, the Complete Delivery source-artifact validator (which invokes the shared artifact validator) accepts the final report, and no blockers remain; otherwise close with a non-pass outcome. Do not publish or invoke provider-native subagents from this stage.

@@ -24,7 +24,7 @@ bash "$GENERIC_CHECK"
 
 SCHEMA="$(delivery_metadata_value "$DELIVERY_STEP_JSON" "gc.build.artifact_schema")"
 case "$SCHEMA" in
-  gc.build.requirements.v1|gc.build.plan.v1|gc.build.decomposition.v1) ;;
+  gc.build.requirements.v1|gc.build.plan.v1|gc.build.decomposition.v1|gc.build.final-report.v1) ;;
   *) delivery_fail "source-artifact check does not support schema $SCHEMA" ;;
 esac
 
@@ -54,10 +54,13 @@ python3 -c 'import yaml' >/dev/null 2>&1 || \
 SOURCE_JSON="$(delivery_read_bead_json "$SOURCE_ID")" || \
   delivery_fail "source $SOURCE_ID is unreadable"
 delivery_json_is_valid "$SOURCE_JSON" || delivery_fail "source $SOURCE_ID returned invalid JSON"
-RESOLVED_SOURCE="$(printf '%s' "$SOURCE_JSON" | python3 -c '
+SOURCE_FIELDS="$(printf '%s' "$SOURCE_JSON" | python3 -c '
 import json
 import sys
 
+expected_id = sys.argv[1]
+expected_title = sys.argv[2]
+schema = sys.argv[3]
 data = json.load(sys.stdin)
 if isinstance(data, list):
     if len(data) != 1:
@@ -67,19 +70,28 @@ if not isinstance(data, dict):
     raise SystemExit(1)
 source_id = data.get("id")
 title = data.get("title")
+acceptance_criteria = data.get("acceptance_criteria")
 if not isinstance(source_id, str) or not source_id.strip():
     raise SystemExit(1)
 if not isinstance(title, str) or not title.strip():
     raise SystemExit(1)
-print(source_id.strip())
-print(title.strip())
-')" || delivery_fail "source $SOURCE_ID is ambiguous or incomplete"
-RESOLVED_ID="$(printf '%s\n' "$RESOLVED_SOURCE" | sed -n '1p')"
-RESOLVED_TITLE="$(printf '%s\n' "$RESOLVED_SOURCE" | sed -n '2p')"
-[ "$RESOLVED_ID" = "$SOURCE_ID" ] || delivery_fail "resolved source id does not match $SOURCE_ID"
-[ "$RESOLVED_TITLE" = "$SOURCE_TITLE" ] || delivery_fail "resolved source title does not match gc.var.source_title"
+if schema == "gc.build.final-report.v1" and (
+    not isinstance(acceptance_criteria, str) or not acceptance_criteria.strip()
+):
+    raise SystemExit(1)
+if source_id != expected_id or title != expected_title:
+    raise SystemExit(1)
+print(json.dumps({
+    "id": source_id,
+    "title": title,
+    "acceptance_criteria": acceptance_criteria,
+}))
+' "$SOURCE_ID" "$SOURCE_TITLE" "$SCHEMA")" || \
+  delivery_fail "source $SOURCE_ID is ambiguous, incomplete, or does not exactly match configured source identity"
 
-python3 - "$ARTIFACT_PATH" "$SOURCE_ID" "$SOURCE_TITLE" <<'PY'
+python3 - "$ARTIFACT_PATH" "$SCHEMA" "$SOURCE_FIELDS" <<'PY'
+import hashlib
+import json
 import re
 import sys
 from pathlib import Path
@@ -87,8 +99,15 @@ from pathlib import Path
 import yaml
 
 path = Path(sys.argv[1])
-expected_id = sys.argv[2]
-expected_title = sys.argv[3]
+schema = sys.argv[2]
+source_record = json.loads(sys.argv[3])
+expected_id = source_record["id"]
+expected_title = source_record["title"]
+acceptance_hash = ""
+if schema == "gc.build.final-report.v1":
+    acceptance_hash = "sha256:" + hashlib.sha256(
+        source_record["acceptance_criteria"].encode("utf-8")
+    ).hexdigest()
 text = path.read_text(encoding="utf-8")
 match = re.match(r"\A---\n(?P<front>.*?)\n---(?:\n|\Z)(?P<body>.*)\Z", text, re.DOTALL)
 if not match:
@@ -123,12 +142,44 @@ def markdown_outside_fences(markdown: str) -> str:
     return "\n".join(visible)
 
 
-if not re.search(
-    r"^##[ \t]+Source Intent[ \t]*$",
-    markdown_outside_fences(match.group("body")),
-    re.MULTILINE,
-):
-    raise SystemExit("complete-delivery-check: source-bound artifact requires a Source Intent section")
+visible = markdown_outside_fences(match.group("body"))
+if schema in {
+    "gc.build.requirements.v1",
+    "gc.build.plan.v1",
+    "gc.build.decomposition.v1",
+}:
+    if not re.search(r"^##[ \t]+Source Intent[ \t]*$", visible, re.MULTILINE):
+        raise SystemExit(
+            "complete-delivery-check: source-bound artifact requires a Source Intent section"
+        )
+elif schema == "gc.build.final-report.v1":
+    if source.get("acceptance_criteria_sha256") != acceptance_hash:
+        raise SystemExit(
+            "complete-delivery-check: source.acceptance_criteria_sha256 must equal "
+            f"{acceptance_hash!r}"
+        )
+    trace_match = re.search(
+        r"^##[ \t]+Source trace[ \t]*$(?P<content>.*?)(?=^##[ \t]+|\Z)",
+        visible,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not trace_match:
+        raise SystemExit(
+            "complete-delivery-check: final report requires an unfenced Source trace section"
+        )
+    trace = trace_match.group("content")
+    for value in (
+        f"Source ID: `{expected_id}`",
+        f"Source title: {expected_title}",
+        f"Acceptance criteria SHA-256: {acceptance_hash}",
+    ):
+        if value not in trace:
+            raise SystemExit(
+                "complete-delivery-check: Source trace must bind exact durable source "
+                f"value {value!r}"
+            )
+else:
+    raise SystemExit(f"complete-delivery-check: unsupported schema {schema}")
 PY
 
 echo "complete-delivery source artifact valid: schema=$SCHEMA source=$SOURCE_ID path=$ARTIFACT_PATH"

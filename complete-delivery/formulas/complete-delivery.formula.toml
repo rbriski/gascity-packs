@@ -284,7 +284,7 @@ max_attempts = 3
 
 [steps.check.check]
 mode = "exec"
-path = ".gc/scripts/checks/build-artifact-valid.sh"
+path = ".gc/scripts/checks/delivery-source-artifact-valid.sh"
 timeout = "5m"
 
 [[steps]]

@@ -1133,6 +1133,10 @@ class PreflightTests(unittest.TestCase):
                 steps[step_id]["check"]["check"]["path"],
                 ".gc/scripts/checks/delivery-source-artifact-valid.sh",
             )
+        self.assertEqual(
+            steps["finalize"]["check"]["check"]["path"],
+            ".gc/scripts/checks/delivery-source-artifact-valid.sh",
+        )
 
         for prompt, expected_path, materialized in (
             (WORKFLOW_ROOT / "delivery-preflight.md", ".gc/scripts/checks/delivery-preflight.sh", True),
@@ -1200,7 +1204,9 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("returned `id` to equal", finalizer)
         self.assertIn("nonblank acceptance criteria", finalizer)
         self.assertIn("source trace is resolved", finalizer)
-        self.assertIn("shared artifact validator accepts the final report", finalizer)
+        self.assertIn("Acceptance criteria SHA-256", finalizer)
+        self.assertIn("source.acceptance_criteria_sha256", finalizer)
+        self.assertIn("source-artifact validator", finalizer)
         self.assertIn("no blockers remain", finalizer)
 
         for prompt in ("requirements.md", "plan.md", "decompose.md"):
@@ -1219,14 +1225,24 @@ class SourceArtifactTests(unittest.TestCase):
         source_title: str = "Requested delivery",
         source_anchor: str = "gc:fi-123",
         include_source: bool = True,
+        acceptance_criteria: str = "The requested outcome is delivered.",
+        source_acceptance_hash: str | None = None,
+        include_source_trace: bool = True,
     ) -> str:
         source = ""
         if include_source:
+            source_acceptance = ""
+            if artifact_kind == "final-report":
+                source_acceptance = (
+                    "  acceptance_criteria_sha256: "
+                    f"{source_acceptance_hash if source_acceptance_hash is not None else 'sha256:' + hashlib.sha256(acceptance_criteria.encode('utf-8')).hexdigest()}\n"
+                )
             source = (
                 "source:\n"
                 f"  id: {source_id}\n"
                 f"  title: {source_title}\n"
                 f"  anchor: {source_anchor}\n"
+                f"{source_acceptance}"
             )
         required_sections = {
             "requirements": (
@@ -1253,8 +1269,29 @@ class SourceArtifactTests(unittest.TestCase):
                 "Implementation Convoy",
                 "Work Items",
             ),
+            "final-report": (
+                "Summary",
+                "Outcome",
+                "Artifacts",
+                "Remaining Risks",
+            ),
         }
-        sections = [f"## Source Intent\n\n{source_id} — {source_title}"]
+        sections: list[str] = []
+        if artifact_kind == "final-report":
+            if include_source_trace:
+                acceptance_hash = (
+                    source_acceptance_hash
+                    if source_acceptance_hash is not None
+                    else "sha256:" + hashlib.sha256(acceptance_criteria.encode("utf-8")).hexdigest()
+                )
+                sections.append(
+                    "## Source trace\n\n"
+                    f"Source ID: `{source_id}`\n"
+                    f"Source title: {source_title}\n"
+                    f"Acceptance criteria SHA-256: {acceptance_hash}"
+                )
+        else:
+            sections.append(f"## Source Intent\n\n{source_id} — {source_title}")
         sections.extend(
             f"## {name}\n\n{name} content."
             for name in required_sections[artifact_kind]
@@ -1297,6 +1334,7 @@ class SourceArtifactTests(unittest.TestCase):
         artifact_kind: str = "requirements",
         missing_pyyaml: bool = False,
         generic_check: pathlib.Path | None = SOURCE_ARTIFACT_GENERIC_CHECK,
+        source_json: object | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -1343,7 +1381,15 @@ class SourceArtifactTests(unittest.TestCase):
                     else {}
                 ),
             }}]
-            source = [{"id": "fi-123", "title": "Requested delivery"}]
+            source = (
+                source_json
+                if source_json is not None
+                else [{
+                    "id": "fi-123",
+                    "title": "Requested delivery",
+                    "acceptance_criteria": "The requested outcome is delivered.",
+                }]
+            )
             environment = os.environ.copy()
             environment.update({
                 "GC_BEAD_ID": "step-1",
@@ -1386,6 +1432,13 @@ class SourceArtifactTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("PyYAML is required for Complete Delivery", result.stderr)
 
+    def test_pre_finalization_artifacts_keep_their_existing_source_contract(self) -> None:
+        result = self.run_check(
+            self.artifact(),
+            source_json=[{"id": "fi-123", "title": "Requested delivery"}],
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_source_artifact_fails_closed_without_adjacent_or_explicit_generic_checker(self) -> None:
         result = self.run_check(self.artifact(), generic_check=None)
         self.assertNotEqual(result.returncode, 0)
@@ -1426,6 +1479,97 @@ class SourceArtifactTests(unittest.TestCase):
                 result = self.run_check(artifact, artifact_kind=artifact_kind)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("requires a Source Intent section", result.stderr)
+
+    def test_final_report_requires_exact_visible_source_trace(self) -> None:
+        valid = self.run_check(
+            self.artifact(artifact_kind="final-report"),
+            artifact_kind="final-report",
+        )
+        self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
+        self.assertIn("final-report", valid.stdout)
+
+        missing_trace = self.run_check(
+            self.artifact(artifact_kind="final-report", include_source_trace=False),
+            artifact_kind="final-report",
+        )
+        self.assertNotEqual(missing_trace.returncode, 0)
+        self.assertIn("requires an unfenced Source trace section", missing_trace.stderr)
+
+        fenced_trace = self.artifact(artifact_kind="final-report").replace(
+            "## Source trace",
+            "```markdown\n## Source trace",
+        ).replace(
+            "## Summary",
+            "```\n\n## Summary",
+        )
+        fenced = self.run_check(fenced_trace, artifact_kind="final-report")
+        self.assertNotEqual(fenced.returncode, 0)
+        self.assertIn("requires an unfenced Source trace section", fenced.stderr)
+
+    def test_final_report_requires_exact_acceptance_hash(self) -> None:
+        for hash_value in ("", "sha256:" + "0" * 64):
+            with self.subTest(hash_value=hash_value or "missing"):
+                result = self.run_check(
+                    self.artifact(
+                        artifact_kind="final-report",
+                        source_acceptance_hash=hash_value,
+                    ),
+                    artifact_kind="final-report",
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("acceptance_criteria_sha256 must equal", result.stderr)
+
+    def test_final_report_requires_exact_complete_source_record(self) -> None:
+        artifact = self.artifact(artifact_kind="final-report")
+        cases = (
+            (
+                [{
+                    "title": "Requested delivery",
+                    "acceptance_criteria": "The requested outcome is delivered.",
+                }],
+                "missing id",
+            ),
+            (
+                [{
+                    "id": "fi-wrong",
+                    "title": "Requested delivery",
+                    "acceptance_criteria": "The requested outcome is delivered.",
+                }],
+                "mismatched id",
+            ),
+            (
+                [{
+                    "id": "fi-123",
+                    "title": "Requested delivery",
+                    "acceptance_criteria": " \t\n",
+                }],
+                "blank acceptance criteria",
+            ),
+            (
+                [
+                    {
+                        "id": "fi-123",
+                        "title": "Requested delivery",
+                        "acceptance_criteria": "The requested outcome is delivered.",
+                    },
+                    {
+                        "id": "fi-123",
+                        "title": "Requested delivery",
+                        "acceptance_criteria": "The requested outcome is delivered.",
+                    },
+                ],
+                "ambiguous source",
+            ),
+        )
+        for source_json, name in cases:
+            with self.subTest(name=name):
+                result = self.run_check(
+                    artifact,
+                    artifact_kind="final-report",
+                    source_json=source_json,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("does not exactly match configured source identity", result.stderr)
 
 
 if __name__ == "__main__":
