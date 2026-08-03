@@ -195,11 +195,19 @@ if not isinstance(stage.get("summary"), str) or not stage["summary"].strip():
 evidence = stage.get("evidence")
 if not isinstance(evidence, list) or not evidence:
     raise SystemExit("report external-review stage has no evidence")
-if not any(
-    isinstance(item, str)
-    and metadata_path(item, "report external-review evidence", work_dir).parts == gate_parts
-    for item in evidence
-):
+
+def names_canonical_gate_evidence(item):
+    # A report can retain unrelated or legacy evidence.  It is authority only
+    # when at least one entry resolves to this exact canonical gate path; an
+    # unrelated malformed entry must not prevent that authoritative match.
+    if not isinstance(item, str):
+        return False
+    try:
+        return metadata_path(item, "report external-review evidence", work_dir).parts == gate_parts
+    except SystemExit:
+        return False
+
+if not any(names_canonical_gate_evidence(item) for item in evidence):
     raise SystemExit("report external-review evidence does not name the resolved PR gate artifact")
 
 if not isinstance(gate, dict) or gate.get("schema") != "gc.complete-delivery.pr-gate.v1":

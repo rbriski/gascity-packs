@@ -444,6 +444,7 @@ class PrGateContractTests(unittest.TestCase):
             "Keep `external-review` active",
         )
         self.assert_prose_contains(precheck, "proven publication whose canonical full-SHA `published_head` exactly equals the updated workflow-root `delivery.head_sha`")
+        self.assert_prose_contains(precheck, "direct `published_head == tested_commit` equality also holds")
         self.assert_prose_contains(precheck, "prior-inspected-head `pr-gate.json` is not current-head evidence")
         self.assert_prose_contains(precheck, "root-head-mismatched other than the exact proven publication transition above")
         self.assert_prose_contains(precheck, "may publish only configured active or blocked status")

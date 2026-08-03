@@ -2347,6 +2347,26 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(passed.returncode, 0, passed.stderr)
 
+            # Evidence is an audit trail, not an all-or-nothing parser.  A
+            # canonical gate path remains sufficient when unrelated entries
+            # are malformed, while a report with no canonical entry still
+            # fails below.
+            tolerant_evidence_state = json.loads(json.dumps(passed_state))
+            tolerant_evidence_state["stages"]["external-review"]["evidence"] = [
+                {"legacy": "non-path evidence"},
+                "artifacts/delivery/../../foreign-gate.json",
+                str(gate_path),
+            ]
+            state_path.write_text(json.dumps(tolerant_evidence_state), encoding="utf-8")
+            tolerant_evidence = subprocess.run(
+                ["bash", str(REPORT_GREEN_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(tolerant_evidence.returncode, 0, tolerant_evidence.stderr)
+            state_path.write_text(json.dumps(passed_state), encoding="utf-8")
+
             # Persisted workflow authority paths are sometimes absolute.
             # Accept the contained form, normalize all three metadata paths
             # to the canonical relative authority model, and retain the same
@@ -2458,6 +2478,8 @@ class PreflightTests(unittest.TestCase):
                 ("malformed gate", {}, "not-json"),
                 ("blocked gate", {}, {**passed_gate, "passed": False, "state": "blocked", "blockers": ["blocked"]}),
                 ("wrong-head gate", {}, {**passed_gate, "head_sha": "b" * 40}),
+                ("wrong gate state literal", {}, {**passed_gate, "state": "Passed"}),
+                ("wrong report stage literal", {"stages": {"external-review": {**passed_state["stages"]["external-review"], "status": "Passed"}}}, None),
                 ("negated protected merge", {"next_action": "Do not proceed to protected merge."}, None),
             )
             for name, state_mutation, gate_mutation in cases:

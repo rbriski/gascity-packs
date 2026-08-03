@@ -10,7 +10,8 @@ Read the newest gate JSON and include its path and head as evidence. Accept it o
 The sole transition is a proven publication whose canonical full-SHA
 `published_head` exactly equals the updated workflow-root `delivery.head_sha`,
 whose canonical `tested_commit` is valid, whose `local_gates` status is
-`passed`, and whose `published_head_matches_tested_commit` is true: its
+`passed`, and whose `published_head_matches_tested_commit` is true and direct
+`published_head == tested_commit` equality also holds: its
 prior-inspected-head `pr-gate.json` is not current-head evidence, but retain it
 as transition evidence and continue to the terminal check; otherwise invalidate
 `tested_commit`, `local_gates`, `published_head`, and
