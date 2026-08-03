@@ -261,3 +261,16 @@ schema = 1
     commit = "a1490ecf90238f3af52ab2e7f24e30b5b62cbfc2"
     hash = "sha256:c06f30e61407994cef7e16aafecbc71afbbc9f8cdfd0d506146fdf95837333cf"
     description = "Initial oversight-rig release: rig-scoped project-lead + deterministic escalation machinery."
+
+[[pack]]
+  name = "complete-delivery"
+  description = "End-to-end protected software delivery with durable Formula v2 gates, deployment verification, and living reports."
+  source = "https://github.com/rbriski/gascity-packs/tree/main/complete-delivery"
+  source_kind = "git"
+
+  [[pack.release]]
+    version = "0.1.0"
+    ref = "main"
+    commit = "0258322b80d75af640b22aa933cc3518378aa3a4"
+    hash = "sha256:abe44282517092897bc4ca76620293ee9bd37a98ca409cc20734b596212973a0"
+    description = "Initial Complete Delivery release with PR-sized delivery maps, bounded review loops, protected merge, deployment verification, and living reports."
