@@ -20,6 +20,10 @@ blocker, clear the protected-merge next action, and invalidate the handoff's
 `published_head_matches_tested_commit` pass evidence. Do not publish, and
 close with a non-pass outcome. Run
 `report_publish_command` with `DELIVERY_REPORT_DIR` only after that validation
-when configured.
+when configured, and require it to succeed before retaining the passing state or closing pass. A publication
+failure must remove/revert the tentative passing state, restore an explicit
+blocker, clear the protected-merge next action, invalidate the handoff's
+`tested_commit`, `local_gates`, `published_head`, and
+`published_head_matches_tested_commit` pass evidence, and close non-pass.
 
 Close with `gc.outcome=pass`. Do not invoke provider-native subagents.

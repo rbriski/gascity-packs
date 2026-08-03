@@ -19,19 +19,19 @@ any non-success finalization path, invalidate the handoff's `tested_commit`,
 success evidence rather than allowing a prior attempt to authorize the report,
 then close with a non-pass outcome.
 
-After that terminal check has passed, immediately re-run
-`.gc/scripts/checks/delivery-external-review-deadline.sh --validate` before
-the final report mutation. On failure, invalidate the handoff success evidence,
-write no passing report state, and close non-pass. This post-check finalizer is
-the sole authority that may then update the living report from its final
-current-head gate artifact: mark `external-review` as `passed`, name the
-required checks, CodeRabbit signal, zero unresolved threads, and gate path as
-evidence, and set the next action to protected merge. Immediately before
-running `report_publish_command`, re-run
-`.gc/scripts/checks/delivery-external-review-deadline.sh --validate`; failure
-invalidates the pass evidence and prevents publication. Run
-`report_publish_command` with `DELIVERY_REPORT_DIR` only after that validation.
+After that terminal check has passed, record only the validated current-head
+gate path and close with `gc.outcome=pass`. This nested finalizer is
+evidence-only: it must never mark `external-review` as `passed`, set a
+protected-merge next action, or invoke `report_publish_command`. Top-level
+`complete-delivery/report-green.md`, which runs after this expansion, is the
+sole authority for the passing living-report transition, protected merge, and
+passing-report publication. Immediately before
+the final report mutation, the top-level `report-green` actor must re-run the
+immutable deadline validation. Immediately before
+running `report_publish_command`, that same top-level actor must re-run the
+immutable deadline validation; a failure prevents publication.
+This finalizer records evidence only and never performs that mutation.
 
 Close with `gc.outcome=pass` only after the successful terminal check and
-report update; otherwise close with a non-pass outcome. Do not merge or invoke
-provider-native subagents.
+evidence recording; otherwise close with a non-pass outcome. Do not merge or
+invoke provider-native subagents.

@@ -26,7 +26,13 @@ the PR, then immediately persist all refreshed workflow-root identity fields
 before any thread resolution: exact full-SHA `delivery.head_sha`,
 `delivery.repo`, `delivery.branch`, `delivery.pr_number`, and `delivery.pr_url`.
 Also persist the handoff's exact full-SHA `published_head`, `tested_commit`, and
-boolean `published_head_matches_tested_commit`. A deadline validation failure
+boolean `published_head_matches_tested_commit`. Immediately re-read and exactly
+verify every just-written workflow-root and handoff identity field before any
+thread resolution; persistence that is failed, partial, malformed, or
+head-mismatched is a distinct publication blocker. On that blocker, clear all
+authority fields (`tested_commit`, `local_gates`, `published_head`, and
+`published_head_matches_tested_commit`), write blocker-only state, and keep
+every mapped thread open. A deadline validation failure
 is a deadline blocker, a refresh failure is a publication blocker, and a
 thread-resolution failure is a resolution blocker; record those three failures
 distinctly and never reuse one as success evidence for another. Only then
@@ -42,8 +48,10 @@ the artifact's `tested_commit` (`published_head == tested_commit`) and
 On failed, blocked, skipped, unavailable, malformed, or stale push/refresh that
 invalidates the whole handoff, clear `tested_commit` and `local_gates`, record a
 publication failure, write blocker-only state, keep every mapped thread open,
-and do not record passing publication evidence, then reacquire a current PR head that is a full SHA before
-another inspection or gate run. Only when a successful refresh returns a
+and do not record passing publication evidence. That blocker-only state must
+also clear `published_head` and `published_head_matches_tested_commit` before
+it can reacquire a current PR head that is a full SHA before another inspection or
+gate run. Only when a successful refresh returns a
 different full-SHA may that `published_head` be next-iteration state, not a
 publication failure; it keeps every mapped thread open and cannot authorize
 resolution.

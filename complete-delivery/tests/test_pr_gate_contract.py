@@ -388,7 +388,7 @@ class PrGateContractTests(unittest.TestCase):
             "complete-delivery.report-editor",
         )
 
-    def test_only_post_check_finalizer_may_publish_passing_report(self) -> None:
+    def test_only_outer_report_green_may_authorize_passing_report(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
         precheck = (workflows / "{target}.report-external-review.md").read_text(
             encoding="utf-8"
@@ -397,21 +397,76 @@ class PrGateContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         finalizer = (workflows / "{target}.md").read_text(encoding="utf-8")
+        outer_report = (
+            PACK_ROOT / "assets" / "workflows" / "complete-delivery" / "report-green.md"
+        ).read_text(encoding="utf-8")
 
         self.assert_prose_contains(precheck, "Keep `external-review` `active`")
         self.assert_prose_contains(
             precheck,
             "set the immediate next action to the `external-review-loop` terminal mechanical check. "
-            "Only after that check passes may the existing post-check finalizer",
+            "Keep `external-review` active",
         )
         self.assert_prose_contains(precheck, "proven publication whose canonical full-SHA `published_head` exactly equals the updated workflow-root `delivery.head_sha`")
         self.assert_prose_contains(precheck, "prior-inspected-head `pr-gate.json` is not current-head evidence")
         self.assert_prose_contains(precheck, "root-head-mismatched other than the exact proven publication transition above")
+        self.assert_prose_contains(precheck, "may publish only configured active or blocked status")
+        self.assert_prose_contains(precheck, "must never publish `external-review` as `passed` or a protected-merge next action")
+        self.assert_prose_contains(precheck, "Immediately before running `report_publish_command`")
+        self.assert_prose_contains(precheck, "If the second validation or publication fails")
+        self.assert_prose_contains(precheck, "revert the just-written active-state mutation to an explicit non-pass blocker")
         self.assertIn("child report pre-terminal", loop)
         self.assertIn("leave `external-review` `active`", loop)
         self.assertIn("must not publish `passed` or a protected-merge next action", loop)
-        self.assertIn("post-check `{target}.md` finalizer", loop)
-        self.assert_prose_contains(finalizer, "sole authority")
+        self.assert_prose_contains(loop, "does not authorize the passing report, protected merge, or report publication")
+        self.assert_prose_contains(finalizer, "evidence-only")
+        self.assert_prose_contains(finalizer, "must never mark `external-review` as `passed`")
+        self.assert_prose_contains(finalizer, "must never mark `external-review` as `passed`, set a protected-merge next action, or invoke `report_publish_command`")
+        self.assert_prose_contains(finalizer, "Top-level `complete-delivery/report-green.md`")
+        self.assert_prose_contains(outer_report, "sole outer report authority")
+        self.assert_prose_contains(outer_report, "report_publish_command")
+        self.assert_prose_contains(outer_report, "require it to succeed before retaining the passing state or closing pass")
+        self.assert_prose_contains(outer_report, "remove/revert the tentative passing state")
+        self.assert_prose_contains(outer_report, "clear the protected-merge next action")
+
+    def test_outer_formula_orders_external_review_before_report_green_and_merge(self) -> None:
+        outer_formula_path = PACK_ROOT / "formulas" / "complete-delivery.formula.toml"
+        with outer_formula_path.open("rb") as formula_file:
+            outer_formula = tomllib.load(formula_file)
+        steps = {step["id"]: step for step in outer_formula["steps"]}
+
+        self.assertEqual(steps["report-green"]["needs"], ["external-review"])
+        self.assertEqual(steps["merge"]["needs"], ["report-green"])
+
+    def test_terminal_publication_identity_and_deadline_guards_are_fail_closed(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        publish_fixes = (workflows / "{target}.publish-fixes.md").read_text(
+            encoding="utf-8"
+        )
+        rerun_local_gates = (workflows / "{target}.rerun-local-gates.md").read_text(
+            encoding="utf-8"
+        )
+        precheck = (workflows / "{target}.report-external-review.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assert_prose_contains(
+            publish_fixes,
+            "Immediately re-read and exactly verify every just-written workflow-root and handoff identity field before any thread resolution",
+        )
+        self.assert_prose_contains(publish_fixes, "persistence that is failed, partial, malformed, or head-mismatched is a distinct publication blocker")
+        self.assert_prose_contains(publish_fixes, "clear all authority fields")
+        self.assert_prose_contains(publish_fixes, "keep every mapped thread open")
+        for guard in (
+            "Immediately before every source edit",
+            "every local-gate-script invocation",
+            "every commit",
+        ):
+            with self.subTest(guard=guard):
+                self.assert_prose_contains(rerun_local_gates, guard)
+        self.assert_prose_contains(precheck, "Immediately before the living-report mutation")
+        self.assert_prose_contains(precheck, "Immediately before running `report_publish_command`")
+        self.assert_prose_contains(precheck, "revert the just-written active-state mutation")
 
     def test_formula_preserves_the_bounded_resolve_test_publish_handoff(self) -> None:
         loop = self.templates["{target}.external-review-loop"]

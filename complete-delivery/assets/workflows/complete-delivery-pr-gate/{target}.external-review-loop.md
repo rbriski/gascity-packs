@@ -16,9 +16,11 @@ required CI, CodeRabbit completion, all live unresolved review threads, human
 change requests, PR/draft state, and head stability.
 
 Keep the child report pre-terminal: it must leave `external-review` `active`
-and must not publish `passed` or a protected-merge next action. Only this
-terminal mechanical check, followed by the post-check `{target}.md` finalizer,
-may authorize that passed report and protected-merge publication.
+and must not publish `passed` or a protected-merge next action. This terminal
+mechanical check records only current-head gate evidence; it does not authorize
+the passing report, protected merge, or report publication. After the expansion
+finishes, top-level `complete-delivery/report-green.md` is the sole authority
+for those actions.
 
 Never weaken a gate or resolve a thread unless the durable handoff proves
 `published_head` is exactly equal to `tested_commit`; commit containment or a

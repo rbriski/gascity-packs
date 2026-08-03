@@ -1,8 +1,9 @@
 Rerun the repository-native quality gates after review resolution.
 
-Before each regression-repair attempt and before starting the local-gate command,
-run `.gc/scripts/checks/delivery-external-review-deadline.sh --validate`.
-Do not repair or test when it fails.
+Immediately before every source edit, every local-gate-script invocation, and
+every commit, run `.gc/scripts/checks/delivery-external-review-deadline.sh
+--validate`. A prior attempt or gate validation does not authorize a later edit,
+script invocation, or commit. Do not repair or test when it fails.
 
 Read `<artifact_root>/delivery/external-review-handoff.json` and, before every
 test attempt, clear prior `tested_commit`, `local_gates`, `published_head`, and
