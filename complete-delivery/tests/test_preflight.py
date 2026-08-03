@@ -2335,6 +2335,28 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(passed.returncode, 0, passed.stderr)
 
+            # Persisted workflow authority paths are sometimes absolute.
+            # Accept the contained form, normalize all three metadata paths
+            # to the canonical relative authority model, and retain the same
+            # report/gate relationship checks.
+            contained_absolute_metadata = {
+                **metadata,
+                "gc.var.artifact_root": str(artifact_root),
+                "delivery.report_state_path": str(state_path),
+                "delivery.pr_gate_path": str(gate_path),
+            }
+            environment["FAKE_ROOT_JSON"] = json.dumps(
+                [{"metadata": contained_absolute_metadata}]
+            )
+            contained_absolute = subprocess.run(
+                ["bash", str(REPORT_GREEN_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(contained_absolute.returncode, 0, contained_absolute.stderr)
+            environment["FAKE_ROOT_JSON"] = json.dumps([{"metadata": metadata}])
+
             # The authority documents are opened before they are parsed.  Use
             # sitecustomize only in this subprocess fixture to replace one
             # pathname at that boundary; a pathname reopen would read the
@@ -2448,8 +2470,11 @@ class PreflightTests(unittest.TestCase):
 
             outside_state = root / "outside-state.json"
             outside_state.write_text(json.dumps(passed_state), encoding="utf-8")
+            alternate_state = report_directory / "alternate-state.json"
+            alternate_state.write_text(json.dumps(passed_state), encoding="utf-8")
             outside_gate = root / "outside-gate.json"
             outside_gate.write_text(json.dumps(passed_gate), encoding="utf-8")
+            outside_artifact_root = root.parent / f"{root.name}-outside-artifacts"
             linked_state = report_directory / "linked-state.json"
             linked_state.symlink_to(outside_state)
             linked_report_directory = artifact_root / "linked-delivery-report"
@@ -2477,7 +2502,12 @@ class PreflightTests(unittest.TestCase):
                 (
                     "absolute report state",
                     {"delivery.report_state_path": str(outside_state)},
-                    "delivery.report_state_path must not be absolute or contain traversal",
+                    "delivery.report_state_path must be exactly the canonical artifact delivery-report/state.json path",
+                ),
+                (
+                    "alternate report state filename",
+                    {"delivery.report_state_path": str(alternate_state)},
+                    "delivery.report_state_path must be exactly the canonical artifact delivery-report/state.json path",
                 ),
                 (
                     "traversal report state",
@@ -2486,13 +2516,13 @@ class PreflightTests(unittest.TestCase):
                             "artifacts/delivery-report/../../outside-state.json"
                         )
                     },
-                    "delivery.report_state_path must not be absolute or contain traversal",
+                    "delivery.report_state_path must not contain traversal",
                 ),
                 (
                     "final report state symlink",
                     {
                         "delivery.report_state_path": (
-                            "artifacts/delivery-report/linked-state.json"
+                            "artifacts/delivery-report/state.json"
                         )
                     },
                     "report state is unavailable or a symlink",
@@ -2504,12 +2534,12 @@ class PreflightTests(unittest.TestCase):
                             "artifacts/linked-delivery-report/state.json"
                         )
                     },
-                    "delivery.report_state_path must resolve within the canonical artifact delivery-report directory",
+                    "delivery.report_state_path must be exactly the canonical artifact delivery-report/state.json path",
                 ),
                 (
                     "absolute PR gate",
                     {"delivery.pr_gate_path": str(outside_gate)},
-                    "delivery.pr_gate_path must not be absolute or contain traversal",
+                    "delivery.pr_gate_path must be exactly the canonical artifact delivery/pr-gate.json path",
                 ),
                 (
                     "traversal PR gate",
@@ -2518,16 +2548,12 @@ class PreflightTests(unittest.TestCase):
                             "artifacts/delivery/../../outside-gate.json"
                         )
                     },
-                    "delivery.pr_gate_path must not be absolute or contain traversal",
+                    "delivery.pr_gate_path must not contain traversal",
                 ),
                 (
                     "final PR gate symlink",
-                    {
-                        "delivery.pr_gate_path": (
-                            "artifacts/delivery/linked-pr-gate.json"
-                        )
-                    },
-                    "delivery.pr_gate_path must be exactly the canonical artifact delivery/pr-gate.json path",
+                    {"delivery.pr_gate_path": "artifacts/delivery/pr-gate.json"},
+                    "PR gate artifact is unavailable or a symlink",
                 ),
                 (
                     "parent PR gate symlink",
@@ -2537,6 +2563,11 @@ class PreflightTests(unittest.TestCase):
                         )
                     },
                     "delivery.pr_gate_path must be exactly the canonical artifact delivery/pr-gate.json path",
+                ),
+                (
+                    "absolute artifact root outside canonical work directory",
+                    {"gc.var.artifact_root": str(outside_artifact_root)},
+                    "gc.var.artifact_root must resolve beneath the canonical work directory",
                 ),
             )
             for name, overrides, diagnostic in containment_cases:
@@ -2550,12 +2581,25 @@ class PreflightTests(unittest.TestCase):
                     environment["FAKE_ROOT_JSON"] = json.dumps(
                         [{"metadata": {**metadata, **overrides}}]
                     )
-                    blocked = subprocess.run(
-                        ["bash", str(REPORT_GREEN_SCRIPT)],
-                        capture_output=True,
-                        text=True,
-                        env=environment,
-                    )
+                    canonical_symlinks = {
+                        "final report state symlink": (state_path, outside_state),
+                        "final PR gate symlink": (gate_path, outside_gate),
+                    }
+                    if name in canonical_symlinks:
+                        path, target = canonical_symlinks[name]
+                        path.unlink()
+                        path.symlink_to(target)
+                    try:
+                        blocked = subprocess.run(
+                            ["bash", str(REPORT_GREEN_SCRIPT)],
+                            capture_output=True,
+                            text=True,
+                            env=environment,
+                        )
+                    finally:
+                        if name in canonical_symlinks:
+                            path, _target = canonical_symlinks[name]
+                            path.unlink()
                     self.assertEqual(blocked.returncode, 1, blocked.stderr)
                     self.assertIn(diagnostic, blocked.stderr)
 

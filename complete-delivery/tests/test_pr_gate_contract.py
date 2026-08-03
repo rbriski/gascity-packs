@@ -342,6 +342,18 @@ class PrGateContractTests(unittest.TestCase):
         for required_guard in required_deadline_guards:
             with self.subTest(resolve_findings_guard=required_guard):
                 self.assert_prose_contains(resolve_findings, required_guard)
+
+        post_commit_guards = (
+            "Immediately after the final repair commit",
+            "immediately before persisting successful handoff evidence",
+            "either post-commit validation fails",
+            "replace the handoff with blocker-only state",
+            "persist no successful identity, candidate, disposition, fix-commit, tested-commit, publication, or equality evidence",
+            "make no further source-editing mutation or commit",
+        )
+        for required_guard in post_commit_guards:
+            with self.subTest(resolve_findings_post_commit_guard=required_guard):
+                self.assert_prose_contains(resolve_findings, required_guard)
         resolver = (
             PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md"
         ).read_text(encoding="utf-8")

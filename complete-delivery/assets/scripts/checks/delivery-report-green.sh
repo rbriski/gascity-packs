@@ -43,13 +43,29 @@ def fail(message):
     raise SystemExit(message)
 
 
-def metadata_path(value, label):
+def metadata_path(value, label, work_dir):
     if not value or "\x00" in value or "\n" in value or "\r" in value:
-        fail(f"{label} must be a nonblank relative metadata path")
+        fail(f"{label} must be a nonblank metadata path")
     path = Path(value)
-    if path.is_absolute() or ".." in path.parts:
-        fail(f"{label} must not be absolute or contain traversal")
-    return path
+    if ".." in path.parts:
+        fail(f"{label} must not contain traversal")
+    if not path.is_absolute():
+        if not path.parts or path.parts == (".",):
+            fail(f"{label} must be a nonblank metadata path")
+        return path
+
+    # Persisted workflow metadata may use an absolute path.  Accept it only
+    # when both its resolved target and its lexical components are contained
+    # by the canonical work directory.  The latter keeps a symlinked input
+    # from being normalized away before no-follow traversal rejects it.
+    try:
+        path.resolve(strict=False).relative_to(work_dir)
+        relative = path.relative_to(work_dir)
+    except ValueError:
+        fail(f"{label} must resolve beneath the canonical work directory")
+    if not relative.parts or relative.parts == (".",):
+        fail(f"{label} must be a nonblank metadata path")
+    return relative
 
 
 def require_directory(fd, label):
@@ -107,16 +123,16 @@ def parse_json(fd, label):
 
 
 work_dir = Path(sys.argv[1]).resolve(strict=True)
-artifact_root_value = metadata_path(sys.argv[2], "gc.var.artifact_root")
-state_value = metadata_path(sys.argv[3], "delivery.report_state_path")
-gate_value = metadata_path(sys.argv[4], "delivery.pr_gate_path")
+artifact_root_value = metadata_path(sys.argv[2], "gc.var.artifact_root", work_dir)
+state_value = metadata_path(sys.argv[3], "delivery.report_state_path", work_dir)
+gate_value = metadata_path(sys.argv[4], "delivery.pr_gate_path", work_dir)
 head_sha, repo, pr_number = sys.argv[5:]
 artifact_parts = artifact_root_value.parts
 state_parts = state_value.parts
 gate_parts = gate_value.parts
 
-if state_parts[: len(artifact_parts) + 1] != artifact_parts + ("delivery-report",):
-    fail("delivery.report_state_path must resolve within the canonical artifact delivery-report directory")
+if state_parts != artifact_parts + ("delivery-report", "state.json"):
+    fail("delivery.report_state_path must be exactly the canonical artifact delivery-report/state.json path")
 if gate_parts != artifact_parts + ("delivery", "pr-gate.json"):
     fail("delivery.pr_gate_path must be exactly the canonical artifact delivery/pr-gate.json path")
 
@@ -181,8 +197,7 @@ if not isinstance(evidence, list) or not evidence:
     raise SystemExit("report external-review stage has no evidence")
 if not any(
     isinstance(item, str)
-    and os.path.normpath(item if os.path.isabs(item) else os.path.join(work_dir, item))
-    == os.path.normpath(os.path.join(work_dir, *gate_parts))
+    and metadata_path(item, "report external-review evidence", work_dir).parts == gate_parts
     for item in evidence
 ):
     raise SystemExit("report external-review evidence does not name the resolved PR gate artifact")
