@@ -117,6 +117,8 @@ class PreflightTests(unittest.TestCase):
             "gc.var.source_bead_id": "fi-123",
             "gc.var.source_title": "Requested delivery",
             "gc.var.launcher_github_preflight": "github-v1",
+            "gc.step_id": "delivery-preflight",
+            "gc.formula_name": "complete-delivery",
         }
         values.update(overrides)
         return values
@@ -134,6 +136,7 @@ class PreflightTests(unittest.TestCase):
         control_id: str = "",
         gh_available: bool = True,
         transient_gc_failures: int = 0,
+        iteration: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -147,6 +150,10 @@ class PreflightTests(unittest.TestCase):
             gc = bin_dir / "gc"
             gc.write_text(
                 "#!/bin/sh\n"
+                "if [ \"${1:-}\" = bd ] && [ \"${2:-}\" = update ]; then\n"
+                "  printf '%s\\n' \"$*\" >> \"$FAKE_GC_UPDATE_LOG\"\n"
+                "  exit 0\n"
+                "fi\n"
                 "if [ -n \"${FAKE_GC_FAILURES_FILE:-}\" ] && [ -f \"$FAKE_GC_FAILURES_FILE\" ]; then\n"
                 "  failures=$(cat \"$FAKE_GC_FAILURES_FILE\")\n"
                 "  if [ \"$failures\" -gt 0 ]; then\n"
@@ -175,12 +182,16 @@ class PreflightTests(unittest.TestCase):
                 "  printf '%s\\n' 'gh: Branch not protected (HTTP 404)' >&2\n"
                 "  exit 1\n"
                 "fi\n"
+                "if [ \"${1:-}\" = repo ] && [ \"${2:-}\" = view ]; then\n"
+                "  printf '%s\\n' '{\"nameWithOwner\":\"example/repo\"}'\n"
+                "fi\n"
                 "exit 0\n",
                 encoding="utf-8",
             )
             gh.chmod(0o755)
             environment = os.environ.copy()
             failures_file = root / "gc-failures"
+            update_log = root / "gc-updates"
             failures_file.write_text(str(transient_gc_failures), encoding="utf-8")
             environment.update(
                 {
@@ -198,15 +209,24 @@ class PreflightTests(unittest.TestCase):
                     "FAKE_GH_PROTECTED": str(protected).lower(),
                     "FAKE_GH_AVAILABLE": str(gh_available).lower(),
                     "FAKE_GC_FAILURES_FILE": str(failures_file),
+                    "FAKE_GC_UPDATE_LOG": str(update_log),
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                 }
             )
-            return subprocess.run(
+            if iteration is not None:
+                environment["GC_ITERATION"] = iteration
+            result = subprocess.run(
                 ["bash", str(SCRIPT)],
                 capture_output=True,
                 text=True,
                 env=environment,
             )
+            result.gc_updates = (
+                update_log.read_text(encoding="utf-8").splitlines()
+                if update_log.exists()
+                else []
+            )
+            return result
 
     def test_complete_command_profile_passes(self) -> None:
         result = self.run_preflight(self.metadata())
@@ -575,16 +595,62 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("durable authenticated launcher GitHub preflight evidence", result.stderr)
 
-    def test_sanitized_retry_check_requires_launcher_evidence_without_reading_gh(self) -> None:
-        result = self.run_preflight(self.metadata(), gh_available=False)
+    def test_sanitized_retry_check_requires_root_bound_worker_evidence_without_reading_gh(self) -> None:
+        evidence = "github-worker-v1:step-1:step-1"
+        result = self.run_preflight(
+            self.metadata(**{"gc.delivery_preflight.worker_github_preflight": evidence}),
+            gh_available=False,
+            iteration="2",
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
 
         missing = self.run_preflight(
             self.metadata(**{"gc.var.launcher_github_preflight": ""}),
             gh_available=False,
+            iteration="2",
         )
         self.assertEqual(missing.returncode, 1)
         self.assertIn("durable authenticated launcher GitHub preflight evidence", missing.stderr)
+
+    def test_sanitized_retry_rejects_missing_stale_or_wrong_root_worker_evidence(self) -> None:
+        for evidence in (
+            "",
+            "github-worker-v0:step-1:step-1",
+            "github-worker-v1:other-root:step-1",
+            "github-worker-v1:step-1:other-control",
+        ):
+            with self.subTest(evidence=evidence):
+                result = self.run_preflight(
+                    self.metadata(
+                        **{"gc.delivery_preflight.worker_github_preflight": evidence}
+                    ),
+                    gh_available=False,
+                    iteration="2",
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("missing, stale, or wrong-root durable worker GitHub preflight evidence", result.stderr)
+
+    def test_first_worker_fails_closed_when_github_is_unavailable(self) -> None:
+        result = self.run_preflight(self.metadata(), gh_available=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("worker gh authentication check failed", result.stderr)
+
+    def test_first_worker_requires_protected_base_before_attestation(self) -> None:
+        result = self.run_preflight(self.metadata(), protected=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("worker protected base branch check for main failed", result.stderr)
+        self.assertEqual(result.gc_updates, [])
+
+    def test_first_worker_persists_versioned_root_bound_evidence(self) -> None:
+        result = self.run_preflight(self.metadata())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.gc_updates,
+            [
+                "bd update step-1 --set-metadata "
+                "gc.delivery_preflight.worker_github_preflight=github-worker-v1:step-1:step-1"
+            ],
+        )
 
     def test_blank_retry_recovers_only_exact_control_bead_lineage(self) -> None:
         root_id = "root-1"
@@ -617,11 +683,14 @@ class PreflightTests(unittest.TestCase):
         result = self.run_preflight(
             self.metadata(),
             step_json=json.dumps([attempt]),
-            root_json=json.dumps([{"metadata": self.metadata()}]),
+            root_json=json.dumps([{"metadata": self.metadata(**{
+                "gc.delivery_preflight.worker_github_preflight": "github-worker-v1:root-1:control-1",
+            })}]),
             bead_id=attempt["id"],
             control_id=control_id,
             control_json=json.dumps([control]),
             gh_available=False,
+            iteration="3",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -633,6 +702,7 @@ class PreflightTests(unittest.TestCase):
             bead_id=attempt["id"],
             control_id=control_id,
             control_json=json.dumps([control]),
+            iteration="3",
         )
         self.assertEqual(ambiguous.returncode, 1)
         self.assertIn("ambiguous or invalid logical lineage", ambiguous.stderr)

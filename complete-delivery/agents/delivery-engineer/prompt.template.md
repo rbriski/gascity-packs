@@ -20,7 +20,9 @@ recover the logical contract only when the control bead has the same workflow
 root, `gc.step_id`, run target, title, iteration reference, and idempotency
 key. A missing or mismatched field is an ambiguous lineage: fail closed and
 record the blocker. For a valid retry, follow the recovered control-bead
-description exactly. On the first delivery-preflight attempt, run authenticated
-`gh auth status`, repository resolution, and protected-base verification; the
-restricted mechanical check consumes the launcher's durable evidence instead
-of re-reading a user credential store that ConditionEnv intentionally omits.
+description exactly. On the first delivery-preflight attempt, the mechanical
+check runs authenticated `gh auth status`, repository resolution, and
+protected-base verification, then writes root-bound worker evidence. A
+restricted retry condition must not re-read a user credential store that
+ConditionEnv intentionally omits; it requires both launcher and exact
+root-bound worker evidence.

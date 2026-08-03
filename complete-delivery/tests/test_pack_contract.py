@@ -452,7 +452,7 @@ class CommandContractTests(unittest.TestCase):
             [
                 "auth status",
                 "repo view --json nameWithOwner",
-                "api repos/{owner}/{repo}/branches/main/protection --silent",
+                "api repos/example/repo/branches/main/protection --silent",
             ],
         )
 

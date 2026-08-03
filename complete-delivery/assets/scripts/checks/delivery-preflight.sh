@@ -109,6 +109,7 @@ BASE_BRANCH="$(delivery_var base_branch main)"
 SOURCE_BEAD_ID="$(delivery_var source_bead_id '')"
 SOURCE_TITLE="$(delivery_var source_title '')"
 LAUNCHER_GITHUB_PREFLIGHT="$(delivery_var launcher_github_preflight '')"
+WORKER_GITHUB_PREFLIGHT="$(delivery_root_metadata gc.delivery_preflight.worker_github_preflight)"
 
 require_bool push "$PUSH"
 require_bool open_pr "$OPEN_PR"
@@ -221,6 +222,66 @@ fi
 
 if [ "$LAUNCHER_GITHUB_PREFLIGHT" != "github-v1" ]; then
   errors+=("missing durable authenticated launcher GitHub preflight evidence")
+fi
+
+worker_github_preflight() {
+  local repository_json name_with_owner base_branch encoded_base_branch evidence
+  if ! delivery_is_preflight_control; then
+    errors+=("worker GitHub preflight can only attest the complete-delivery delivery-preflight control")
+    return 1
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    errors+=("worker gh authentication check failed")
+    return 1
+  fi
+  if ! repository_json="$(gh repo view --json nameWithOwner 2>/dev/null)"; then
+    errors+=("worker GitHub repository resolution failed")
+    return 1
+  fi
+  name_with_owner="$(printf '%s' "$repository_json" | python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except json.JSONDecodeError:
+    raise SystemExit(1)
+value = payload.get("nameWithOwner") if isinstance(payload, dict) else None
+if not isinstance(value, str) or not value.strip() or "/" not in value:
+    raise SystemExit(1)
+print(value)
+')" || name_with_owner=""
+  if [ -z "$name_with_owner" ]; then
+    errors+=("worker GitHub repository resolution returned no nameWithOwner")
+    return 1
+  fi
+  base_branch="$BASE_BRANCH"
+  encoded_base_branch="$(python3 - "$base_branch" <<'PY'
+from urllib.parse import quote
+import sys
+print(quote(sys.argv[1], safe=""))
+PY
+)"
+  if ! gh api "repos/$name_with_owner/branches/$encoded_base_branch/protection" --silent >/dev/null 2>&1; then
+    errors+=("worker protected base branch check for $base_branch failed")
+    return 1
+  fi
+  evidence="$(delivery_worker_preflight_evidence)"
+  if ! gc bd update "$DELIVERY_ROOT_ID" \
+    --set-metadata gc.delivery_preflight.worker_github_preflight="$evidence" >/dev/null; then
+    errors+=("could not persist root-bound worker GitHub preflight evidence")
+    return 1
+  fi
+  WORKER_GITHUB_PREFLIGHT="$evidence"
+}
+
+# Gas City 1.4's Ralph ConditionEnv intentionally sanitizes HOME.  The first
+# worker runs the credentialed checks and writes root-bound evidence; retries
+# and mechanical conditions must never touch gh or a credential store.
+if [ -z "${GC_ITERATION:-}" ]; then
+  worker_github_preflight || true
+elif ! delivery_worker_preflight_evidence_is_valid "$WORKER_GITHUB_PREFLIGHT"; then
+  errors+=("missing, stale, or wrong-root durable worker GitHub preflight evidence")
 fi
 command -v git >/dev/null 2>&1 || errors+=("git is required on PATH")
 if command -v git >/dev/null 2>&1; then

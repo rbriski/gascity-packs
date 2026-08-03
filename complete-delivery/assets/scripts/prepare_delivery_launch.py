@@ -470,7 +470,7 @@ def verify_github_delivery_prerequisites(rig_root: Path, profile: dict[str, Any]
     run_github_command(
         [
             "api",
-            f"repos/{{owner}}/{{repo}}/branches/{quote(base_branch, safe='')}/protection",
+            f"repos/{name_with_owner}/branches/{quote(base_branch, safe='')}/protection",
             "--silent",
         ],
         cwd=rig_root,

@@ -227,6 +227,29 @@ delivery_var() {
   printf '%s' "$value"
 }
 
+delivery_worker_preflight_evidence() {
+  # The evidence is written only by the unrestricted first worker.  It binds
+  # the attestation to this particular workflow root and logical preflight
+  # control, so a value copied from another launch cannot satisfy Ralph's
+  # restricted retry condition.
+  printf 'github-worker-v1:%s:%s' "$DELIVERY_ROOT_ID" "$DELIVERY_LOGICAL_BEAD_ID"
+}
+
+delivery_worker_preflight_evidence_is_valid() {
+  python3 - "$1" "$DELIVERY_ROOT_ID" "$DELIVERY_LOGICAL_BEAD_ID" <<'PY'
+import sys
+
+evidence, root_id, control_id = sys.argv[1:]
+expected = f"github-worker-v1:{root_id}:{control_id}"
+raise SystemExit(0 if evidence == expected else 1)
+PY
+}
+
+delivery_is_preflight_control() {
+  [ "$(delivery_metadata_value "$DELIVERY_STEP_JSON" "gc.step_id")" = "delivery-preflight" ] || return 1
+  [ "$(delivery_metadata_value "$DELIVERY_ROOT_JSON" "gc.formula_name")" = "complete-delivery" ] || return 1
+}
+
 delivery_resolve_path() {
   case "$1" in
     /*) printf '%s' "$1" ;;
