@@ -2247,14 +2247,20 @@ class PreflightTests(unittest.TestCase):
             root = pathlib.Path(directory)
             bin_dir = root / "bin"
             bin_dir.mkdir()
-            state_path = root / "report-state.json"
+            artifact_root = root / "artifacts"
+            report_directory = artifact_root / "delivery-report"
+            delivery_directory = artifact_root / "delivery"
+            report_directory.mkdir(parents=True)
+            delivery_directory.mkdir()
+            state_path = report_directory / "state.json"
             now = datetime.now(timezone.utc).replace(microsecond=0)
             metadata = {
-                "delivery.report_state_path": str(state_path),
+                "gc.var.artifact_root": "artifacts",
+                "delivery.report_state_path": "artifacts/delivery-report/state.json",
                 "delivery.head_sha": "a" * 40,
                 "delivery.repo": "example/repo",
                 "delivery.pr_number": "123",
-                "delivery.pr_gate_path": "pr-gate.json",
+                "delivery.pr_gate_path": "artifacts/delivery/pr-gate.json",
                 "delivery.external_review_started_at": (
                     now - timedelta(minutes=1)
                 ).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -2262,7 +2268,7 @@ class PreflightTests(unittest.TestCase):
                     now + timedelta(hours=1)
                 ).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
-            gate_path = root / "pr-gate.json"
+            gate_path = delivery_directory / "pr-gate.json"
             gc = bin_dir / "gc"
             gc.write_text(
                 "#!/bin/sh\n"
@@ -2349,6 +2355,101 @@ class PreflightTests(unittest.TestCase):
                             json.dumps(passed_gate if gate_mutation is None else gate_mutation),
                             encoding="utf-8",
                         )
+                    blocked = subprocess.run(
+                        ["bash", str(REPORT_GREEN_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(blocked.returncode, 1, blocked.stderr)
+
+            outside_state = root / "outside-state.json"
+            outside_state.write_text(json.dumps(passed_state), encoding="utf-8")
+            outside_gate = root / "outside-gate.json"
+            outside_gate.write_text(json.dumps(passed_gate), encoding="utf-8")
+            linked_state = report_directory / "linked-state.json"
+            linked_state.symlink_to(outside_state)
+            linked_report_directory = artifact_root / "linked-delivery-report"
+            outside_report_directory = root / "outside-delivery-report"
+            outside_report_directory.mkdir()
+            (outside_report_directory / "state.json").write_text(
+                json.dumps(passed_state), encoding="utf-8"
+            )
+            linked_report_directory.symlink_to(
+                outside_report_directory, target_is_directory=True
+            )
+            linked_gate = delivery_directory / "linked-pr-gate.json"
+            linked_gate.symlink_to(outside_gate)
+            linked_delivery_directory = artifact_root / "linked-delivery"
+            outside_delivery_directory = root / "outside-delivery"
+            outside_delivery_directory.mkdir()
+            (outside_delivery_directory / "pr-gate.json").write_text(
+                json.dumps(passed_gate), encoding="utf-8"
+            )
+            linked_delivery_directory.symlink_to(
+                outside_delivery_directory, target_is_directory=True
+            )
+
+            containment_cases = (
+                (
+                    "absolute report state",
+                    {"delivery.report_state_path": str(outside_state)},
+                ),
+                (
+                    "traversal report state",
+                    {
+                        "delivery.report_state_path": (
+                            "artifacts/delivery-report/../../outside-state.json"
+                        )
+                    },
+                ),
+                (
+                    "final report state symlink",
+                    {
+                        "delivery.report_state_path": (
+                            "artifacts/delivery-report/linked-state.json"
+                        )
+                    },
+                ),
+                (
+                    "parent report state symlink",
+                    {
+                        "delivery.report_state_path": (
+                            "artifacts/linked-delivery-report/state.json"
+                        )
+                    },
+                ),
+                ("absolute PR gate", {"delivery.pr_gate_path": str(outside_gate)}),
+                (
+                    "traversal PR gate",
+                    {
+                        "delivery.pr_gate_path": (
+                            "artifacts/delivery/../../outside-gate.json"
+                        )
+                    },
+                ),
+                (
+                    "final PR gate symlink",
+                    {
+                        "delivery.pr_gate_path": (
+                            "artifacts/delivery/linked-pr-gate.json"
+                        )
+                    },
+                ),
+                (
+                    "parent PR gate symlink",
+                    {
+                        "delivery.pr_gate_path": (
+                            "artifacts/linked-delivery/pr-gate.json"
+                        )
+                    },
+                ),
+            )
+            for name, overrides in containment_cases:
+                with self.subTest(name=name):
+                    environment["FAKE_GC_ROOT_JSON"] = json.dumps(
+                        [{"metadata": {**metadata, **overrides}}]
+                    )
                     blocked = subprocess.run(
                         ["bash", str(REPORT_GREEN_SCRIPT)],
                         capture_output=True,

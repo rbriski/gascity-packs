@@ -10,10 +10,10 @@ delivery_initialize_context
 # the immutable deadline in this bounded Formula check before accepting it.
 "$SCRIPT_DIR/delivery-external-review-deadline.sh" --validate
 
+ARTIFACT_ROOT="$(delivery_var artifact_root '')"
 STATE="$(delivery_root_metadata delivery.report_state_path)"
+[ -n "$ARTIFACT_ROOT" ] || delivery_fail "gc.var.artifact_root is missing"
 [ -n "$STATE" ] || delivery_fail "delivery.report_state_path is missing"
-STATE="$(delivery_resolve_path "$STATE")"
-[ -s "$STATE" ] || delivery_fail "report state is missing or empty: $STATE"
 
 HEAD_SHA="$(delivery_root_metadata delivery.head_sha)"
 [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || \
@@ -25,9 +25,92 @@ PR_NUMBER="$(delivery_root_metadata delivery.pr_number)"
   delivery_fail "workflow root metadata delivery.pr_number must be a positive integer"
 PR_GATE="$(delivery_root_metadata delivery.pr_gate_path)"
 [ -n "$PR_GATE" ] || delivery_fail "workflow root metadata delivery.pr_gate_path is missing"
-PR_GATE="$(delivery_resolve_path "$PR_GATE")"
-[ -f "$PR_GATE" ] && [ ! -L "$PR_GATE" ] || \
-  delivery_fail "PR gate artifact is missing, not regular, or a symlink: $PR_GATE"
+
+# These artifacts become authority for a protected merge.  Metadata must name
+# relative, in-worktree paths; accepting lexical normalization here would let a
+# traversal, absolute path, or symlinked component substitute foreign evidence.
+mapfile -t GREEN_ARTIFACTS < <(python3 - "$DELIVERY_WORK_DIR" "$ARTIFACT_ROOT" "$STATE" "$PR_GATE" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+
+def fail(message):
+    raise SystemExit(message)
+
+
+def metadata_path(value, label):
+    if not value or "\x00" in value or "\n" in value or "\r" in value:
+        fail(f"{label} must be a nonblank relative metadata path")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        fail(f"{label} must not be absolute or contain traversal")
+    return path
+
+
+def nonsymlink_path(work_dir, relative, label):
+    current = work_dir
+    for component in relative.parts:
+        if component in ("", "."):
+            continue
+        current /= component
+        try:
+            mode = os.lstat(current).st_mode
+        except OSError as exc:
+            fail(f"{label} is unavailable: {exc}")
+        if stat.S_ISLNK(mode):
+            fail(f"{label} contains a symlinked component: {current}")
+    try:
+        resolved = current.resolve(strict=True)
+        resolved.relative_to(work_dir)
+    except (OSError, ValueError) as exc:
+        fail(f"{label} does not resolve within the canonical work directory: {exc}")
+    return current, resolved
+
+
+work_dir = Path(sys.argv[1]).resolve(strict=True)
+artifact_root_value = metadata_path(sys.argv[2], "gc.var.artifact_root")
+state_value = metadata_path(sys.argv[3], "delivery.report_state_path")
+gate_value = metadata_path(sys.argv[4], "delivery.pr_gate_path")
+
+artifact_root, artifact_root_canonical = nonsymlink_path(
+    work_dir, artifact_root_value, "gc.var.artifact_root"
+)
+if not artifact_root.is_dir():
+    fail("gc.var.artifact_root is not a directory")
+
+report_directory = artifact_root / "delivery-report"
+report_directory_canonical = artifact_root_canonical / "delivery-report"
+state_path, state_canonical = nonsymlink_path(
+    work_dir, state_value, "delivery.report_state_path"
+)
+try:
+    state_canonical.relative_to(report_directory_canonical)
+except ValueError:
+    fail("delivery.report_state_path must resolve within the canonical artifact delivery-report directory")
+if not stat.S_ISREG(os.lstat(state_path).st_mode) or state_path.stat().st_size == 0:
+    fail("report state is missing, not a non-symlink regular file, or empty")
+
+gate_path, gate_canonical = nonsymlink_path(
+    work_dir, gate_value, "delivery.pr_gate_path"
+)
+expected_gate = artifact_root / "delivery" / "pr-gate.json"
+expected_gate_canonical = artifact_root_canonical / "delivery" / "pr-gate.json"
+if gate_path != expected_gate or gate_canonical != expected_gate_canonical:
+    fail("delivery.pr_gate_path must be exactly the canonical artifact delivery/pr-gate.json path")
+if not stat.S_ISREG(os.lstat(gate_path).st_mode):
+    fail("PR gate artifact is missing or not a non-symlink regular file")
+
+print(state_canonical)
+print(gate_canonical)
+PY
+) || delivery_fail "report-green authority artifacts must be canonical, contained, and non-symlinked"
+
+[ "${#GREEN_ARTIFACTS[@]}" -eq 2 ] || \
+  delivery_fail "report-green authority artifact resolution returned an invalid result"
+STATE="${GREEN_ARTIFACTS[0]}"
+PR_GATE="${GREEN_ARTIFACTS[1]}"
 
 python3 - "$STATE" "$PR_GATE" "$HEAD_SHA" "$REPO" "$PR_NUMBER" "$DELIVERY_WORK_DIR" <<'PY'
 import json
