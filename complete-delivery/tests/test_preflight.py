@@ -2477,6 +2477,7 @@ class PreflightTests(unittest.TestCase):
                 (
                     "absolute report state",
                     {"delivery.report_state_path": str(outside_state)},
+                    "delivery.report_state_path must not be absolute or contain traversal",
                 ),
                 (
                     "traversal report state",
@@ -2485,6 +2486,7 @@ class PreflightTests(unittest.TestCase):
                             "artifacts/delivery-report/../../outside-state.json"
                         )
                     },
+                    "delivery.report_state_path must not be absolute or contain traversal",
                 ),
                 (
                     "final report state symlink",
@@ -2493,6 +2495,7 @@ class PreflightTests(unittest.TestCase):
                             "artifacts/delivery-report/linked-state.json"
                         )
                     },
+                    "report state is unavailable or a symlink",
                 ),
                 (
                     "parent report state symlink",
@@ -2501,8 +2504,13 @@ class PreflightTests(unittest.TestCase):
                             "artifacts/linked-delivery-report/state.json"
                         )
                     },
+                    "delivery.report_state_path must resolve within the canonical artifact delivery-report directory",
                 ),
-                ("absolute PR gate", {"delivery.pr_gate_path": str(outside_gate)}),
+                (
+                    "absolute PR gate",
+                    {"delivery.pr_gate_path": str(outside_gate)},
+                    "delivery.pr_gate_path must not be absolute or contain traversal",
+                ),
                 (
                     "traversal PR gate",
                     {
@@ -2510,6 +2518,7 @@ class PreflightTests(unittest.TestCase):
                             "artifacts/delivery/../../outside-gate.json"
                         )
                     },
+                    "delivery.pr_gate_path must not be absolute or contain traversal",
                 ),
                 (
                     "final PR gate symlink",
@@ -2518,6 +2527,7 @@ class PreflightTests(unittest.TestCase):
                             "artifacts/delivery/linked-pr-gate.json"
                         )
                     },
+                    "delivery.pr_gate_path must be exactly the canonical artifact delivery/pr-gate.json path",
                 ),
                 (
                     "parent PR gate symlink",
@@ -2526,11 +2536,18 @@ class PreflightTests(unittest.TestCase):
                             "artifacts/linked-delivery/pr-gate.json"
                         )
                     },
+                    "delivery.pr_gate_path must be exactly the canonical artifact delivery/pr-gate.json path",
                 ),
             )
-            for name, overrides in containment_cases:
+            for name, overrides, diagnostic in containment_cases:
                 with self.subTest(name=name):
-                    environment["FAKE_GC_ROOT_JSON"] = json.dumps(
+                    # The rejected cases above deliberately mutate these
+                    # authority documents.  Restore known-good fixtures so a
+                    # containment failure can only come from this case's root
+                    # metadata override.
+                    state_path.write_text(json.dumps(passed_state), encoding="utf-8")
+                    gate_path.write_text(json.dumps(passed_gate), encoding="utf-8")
+                    environment["FAKE_ROOT_JSON"] = json.dumps(
                         [{"metadata": {**metadata, **overrides}}]
                     )
                     blocked = subprocess.run(
@@ -2540,6 +2557,7 @@ class PreflightTests(unittest.TestCase):
                         env=environment,
                     )
                     self.assertEqual(blocked.returncode, 1, blocked.stderr)
+                    self.assertIn(diagnostic, blocked.stderr)
 
     def test_pr_open_validates_full_recorded_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
