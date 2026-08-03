@@ -97,7 +97,10 @@ def open_regular(parent_fd, name, label, require_nonempty=False):
 
 def parse_json(fd, label):
     try:
-        with os.fdopen(fd, encoding="utf-8") as handle:
+        # Retain the caller-owned descriptor for its cleanup path.  The dup
+        # references the same already-open authority object, so this still
+        # cannot follow a replacement pathname between validation and parse.
+        with os.fdopen(os.dup(fd), encoding="utf-8") as handle:
             return json.load(handle)
     except (OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"cannot read {label}: {exc}") from exc
@@ -146,9 +149,7 @@ try:
         os.close(artifact_fd)
 
     state = parse_json(state_fd, "report-green state")
-    state_fd = -1
     gate = parse_json(gate_fd, "PR gate artifact")
-    gate_fd = -1
 finally:
     os.close(work_fd)
     if state_fd != -1:

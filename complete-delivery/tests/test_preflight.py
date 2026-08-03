@@ -2345,20 +2345,24 @@ class PreflightTests(unittest.TestCase):
                 "import json, os, pathlib, sys\n"
                 "state, gate = os.environ.get('REPORT_GREEN_STATE', ''), os.environ.get('REPORT_GREEN_GATE', '')\n"
                 "target, mode, foreign = (os.environ.get('REPORT_GREEN_SWAP_TARGET', ''), os.environ.get('REPORT_GREEN_SWAP_MODE', ''), os.environ.get('REPORT_GREEN_FOREIGN', ''))\n"
-                "if len(sys.argv) == 8 and sys.argv[1:3] == [state, gate] and target:\n"
+                "marker = os.environ.get('REPORT_GREEN_HOOK_MARKER', '')\n"
+                "checker = (len(sys.argv) == 8 and os.path.normpath(os.path.join(sys.argv[1], sys.argv[3])) == state and os.path.normpath(os.path.join(sys.argv[1], sys.argv[4])) == gate)\n"
+                "if checker and target:\n"
                 "    original_load, calls = json.load, 0\n"
                 "    def load(handle, *args, **kwargs):\n"
                 "        global calls\n"
                 "        calls += 1\n"
                 "        if calls == (1 if target == 'state' else 2):\n"
                 "            source = pathlib.Path(state if target == 'state' else gate)\n"
-                "            trusted = source.with_name(source.name + '.trusted')\n"
                 "            if mode == 'file':\n"
+                "                trusted = source.with_name(source.name + '.trusted')\n"
                 "                source.rename(trusted)\n"
                 "                source.symlink_to(foreign)\n"
                 "            else:\n"
+                "                trusted = source.parent.with_name(source.parent.name + '.trusted')\n"
                 "                source.parent.rename(trusted)\n"
                 "                source.parent.symlink_to(foreign, target_is_directory=True)\n"
+                "            pathlib.Path(marker).write_text(f'{target}:{mode}', encoding='utf-8')\n"
                 "        return original_load(handle, *args, **kwargs)\n"
                 "    json.load = load\n",
                 encoding="utf-8",
@@ -2392,6 +2396,7 @@ class PreflightTests(unittest.TestCase):
                     foreign_directory.mkdir()
                     (foreign_directory / "state.json").write_text("{}", encoding="utf-8")
                     (foreign_directory / "pr-gate.json").write_text("{}", encoding="utf-8")
+                    hook_marker = case_root / "hook-ran"
                     case_metadata = {**metadata, "gc.var.artifact_root": "artifacts"}
                     case_environment = environment | {
                         "GC_WORK_DIR": str(case_root),
@@ -2401,6 +2406,7 @@ class PreflightTests(unittest.TestCase):
                         "REPORT_GREEN_SWAP_TARGET": target,
                         "REPORT_GREEN_SWAP_MODE": mode,
                         "REPORT_GREEN_FOREIGN": str(foreign_file if mode == "file" else foreign_directory),
+                        "REPORT_GREEN_HOOK_MARKER": str(hook_marker),
                         "PYTHONPATH": str(hook_dir),
                     }
                     stable = subprocess.run(
@@ -2410,6 +2416,7 @@ class PreflightTests(unittest.TestCase):
                         env=case_environment,
                     )
                     self.assertEqual(stable.returncode, 0, stable.stderr)
+                    self.assertEqual(hook_marker.read_text(encoding="utf-8"), f"{target}:{mode}")
 
             cases = (
                 ("stale report SHA", {"sha": "b" * 40}, None),
