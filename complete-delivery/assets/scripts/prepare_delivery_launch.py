@@ -862,14 +862,24 @@ def recover_interrupted_materialization(
                 "managed asset transaction does not match the authenticated prior inventory"
             )
     for _, _, relative in plan:
-        if transaction_prior_states[relative] != authorized_prior_states[relative]:
+        # preflight_materialization permits a manifest-owned desired asset to
+        # be absent: the transaction will reinstall it.  In that case its
+        # authenticated journal state is None rather than the manifest's old
+        # digest.  Do not broaden this exception to unowned paths.
+        prior_state_is_absent_managed_asset = (
+            relative in prior_assets and transaction_prior_states[relative] is None
+        )
+        if (
+            transaction_prior_states[relative] != authorized_prior_states[relative]
+            and not prior_state_is_absent_managed_asset
+        ):
             raise LaunchPreflightError("managed asset transaction does not match the authenticated prior inventory")
     if transaction_prior_states[MANIFEST_NAME] != authorized_prior_states[MANIFEST_NAME]:
         raise LaunchPreflightError("managed asset transaction does not match the authenticated prior inventory")
 
     current_states = transaction_states(plan, stale_paths, manifest_path)
     for _, destination, relative in plan:
-        if current_states[relative] not in (authorized_prior_states[relative], desired_hashes[relative]):
+        if current_states[relative] not in (transaction_prior_states[relative], desired_hashes[relative]):
             raise LaunchPreflightError(f"interrupted managed asset transaction found modified asset {relative}")
     for stale_path in stale_paths:
         key = str(stale_path)

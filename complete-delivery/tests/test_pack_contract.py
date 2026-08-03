@@ -1102,6 +1102,34 @@ class MaterializationRecoveryTests(unittest.TestCase):
             prepare_delivery.materialize_assets(PACK_ROOT, rig)
             self.assertFalse((rig / missing_relative).exists())
 
+    def test_recovery_reinstalls_initially_absent_manifest_owned_desired_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rig = self.make_rig(pathlib.Path(directory))
+            self.install_real_v1_inventory(rig)
+            missing_relative = ".gc/scripts/checks/delivery-preflight.sh"
+            (rig / missing_relative).unlink()
+
+            original_copy = prepare_delivery.atomic_copy
+            copies = 0
+
+            def fail_later_copy(*args, **kwargs):
+                nonlocal copies
+                copies += 1
+                if copies == 2:
+                    raise OSError("injected later copy failure")
+                return original_copy(*args, **kwargs)
+
+            with mock.patch.object(prepare_delivery, "atomic_copy", side_effect=fail_later_copy):
+                with self.assertRaisesRegex(OSError, "later copy failure"):
+                    prepare_delivery.materialize_assets(PACK_ROOT, rig)
+
+            self.assertTrue((rig / ".gc" / prepare_delivery.TRANSACTION_NAME).exists())
+            plan = prepare_delivery.materialization_plan(PACK_ROOT, rig)
+            source = next(source for source, _, relative in plan if relative == missing_relative)
+            prepare_delivery.materialize_assets(PACK_ROOT, rig)
+            self.assertEqual((rig / missing_relative).read_bytes(), source.read_bytes())
+            self.assertFalse((rig / ".gc" / prepare_delivery.TRANSACTION_NAME).exists())
+
 
 class ReportSecurityContractTests(unittest.TestCase):
     SOURCE_ID = "fi-123"
