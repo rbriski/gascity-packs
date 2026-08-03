@@ -1448,6 +1448,32 @@ class PreflightTests(unittest.TestCase):
             self.assertIn("merge_sha=" + merge_sha, evidence)
             self.assertIn("delivery.deploy_status=deployed", updates.read_text(encoding="utf-8"))
 
+            delivery_dir = repository / "artifacts" / "delivery"
+            command_label = "sha256:" + hashlib.sha256(success_command.encode()).hexdigest()
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
+                **base_metadata,
+                "gc.var.deploy_command": success_command,
+                "delivery.deploy_status": "deployed",
+                "delivery.deploy_merge_sha": merge_sha,
+                "delivery.deploy_evidence_path": str(delivery_dir / "deploy.log"),
+                "delivery.deploy_stdout_path": str(delivery_dir / "deploy.stdout.log"),
+                "delivery.deploy_stderr_path": str(delivery_dir / "deploy.stderr.log"),
+                "delivery.deploy_command_label": command_label,
+                "delivery.deploy_timeout": "1s",
+                "delivery.deploy_outcome": "passed",
+                "delivery.deploy_child_status": "0",
+                "delivery.deploy_wrapper_status": "0",
+            }}])
+            recovered = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+            self.assertIn("recovered completed deploy command", recovered.stdout)
+            self.assertEqual(marker.read_text(encoding="utf-8"), f"{merge_sha}\n")
+
             nonzero, evidence = run_deploy("exit 42")
             self.assertEqual(nonzero.returncode, 1)
             self.assertIn("outcome=command_failure", evidence)
@@ -1487,7 +1513,11 @@ class PreflightTests(unittest.TestCase):
                         env=environment,
                     )
                     self.assertEqual(repeated.returncode, 1)
-                    self.assertIn("exact-once deployment forbids a rerun", repeated.stderr)
+                    self.assertIn("deploy command recovery is blocked", repeated.stderr)
+                    self.assertIn(
+                        "delivery.deploy_recovery_state=blocked_unknown_execution",
+                        updates.read_text(encoding="utf-8"),
+                    )
                     self.assertFalse(marker.exists())
 
             clear_delivery_dir()
@@ -1529,7 +1559,8 @@ class PreflightTests(unittest.TestCase):
                 text=True,
                 env=environment,
             )
-            for _ in range(100):
+            started_update_deadline = time.monotonic() + 5
+            while time.monotonic() < started_update_deadline:
                 if started_update_signal.exists():
                     break
                 time.sleep(0.01)
@@ -1651,7 +1682,7 @@ class PreflightTests(unittest.TestCase):
                         env=environment,
                     )
                     self.assertEqual(replay.returncode, 1)
-                    self.assertIn("exact-once deployment forbids a rerun", replay.stderr)
+                    self.assertIn("deploy command recovery is blocked", replay.stderr)
                     self.assertEqual(
                         marker.read_text(encoding="utf-8"), marker_before_replay
                     )
@@ -1701,7 +1732,7 @@ class PreflightTests(unittest.TestCase):
                     env=environment,
                 )
                 self.assertEqual(replay.returncode, 1)
-                self.assertIn("exact-once deployment forbids a rerun", replay.stderr)
+                self.assertIn("deploy command recovery is blocked", replay.stderr)
                 self.assertEqual(
                     marker.read_text(encoding="utf-8"), marker_before_replay
                 )
@@ -2331,6 +2362,9 @@ class PreflightTests(unittest.TestCase):
             "sibling stdout/stderr",
         ):
             self.assertIn(term, verification)
+        self.assertIn("preserve `delivery.deploy_status=not_applicable`", verification)
+        self.assertIn("omit `delivery.deployed_sha`", verification)
+        self.assertIn("documented reason plus nonempty\nregular-file deployment evidence", verification)
 
         requirements = (WORKFLOW_ROOT / "requirements.md").read_text(encoding="utf-8")
         self.assertIn("Write requirements to `{{requirements_path}}`", requirements)
@@ -2405,6 +2439,7 @@ class PreflightTests(unittest.TestCase):
 
         for prompt in ("requirements.md", "plan.md", "decompose.md"):
             prompt_text = (WORKFLOW_ROOT / prompt).read_text(encoding="utf-8")
+            normalized_prompt = " ".join(prompt_text.split())
             self.assertIn("exact unfenced H2 heading `## Source Intent`", prompt_text)
             self.assertIn("source.acceptance_criteria_sha256", prompt_text)
             self.assertIn("exact JSON", prompt_text)
@@ -2412,6 +2447,16 @@ class PreflightTests(unittest.TestCase):
             self.assertIn("byte-for-byte", prompt_text)
             self.assertIn("trimming", prompt_text)
             self.assertIn("reformatting", prompt_text)
+            self.assertIn("safe YAML string serialization for every string-valued source field", normalized_prompt)
+            self.assertIn("never interpolate raw source values", normalized_prompt)
+
+        self.assertIn(
+            'cd "$DELIVERY_WORK_DIR" || \\\n  delivery_fail "failed to change to canonical delivery work directory: $DELIVERY_WORK_DIR"',
+            RELEASE_VERIFIED_SCRIPT.read_text(encoding="utf-8"),
+        )
+        self.assertIn("delivery.deploy_invocation_id", RELEASE_VERIFIED_SCRIPT.read_text(encoding="utf-8"))
+        self.assertIn("delivery.deploy_lease_id", RELEASE_VERIFIED_SCRIPT.read_text(encoding="utf-8"))
+        self.assertIn("blocked_unknown_execution", RELEASE_VERIFIED_SCRIPT.read_text(encoding="utf-8"))
 
         for prompt, schema in (
             ("requirements.md", "gc.build.requirements.v1"),

@@ -16,7 +16,8 @@ root as `gc.build.decomposition_path`. In its YAML front matter, set
 `source.acceptance_criteria_sha256` using the exact durable values. The hash is
 `sha256:` plus the SHA-256 digest of the exact JSON `acceptance_criteria`
 string returned by `gc bd show <source-id> --json`, byte-for-byte without
-trimming or reformatting; do not copy the raw criteria into that source mapping. Start its body
+trimming or reformatting; do not copy the raw criteria into that source mapping. Use safe YAML string serialization for every string-valued source field; never interpolate raw source values where quotes,
+newlines, or YAML syntax could change the artifact structure. Start its body
 with the exact unfenced H2 heading `## Source Intent`
 and place that same resolved source ID and title immediately below it.
 

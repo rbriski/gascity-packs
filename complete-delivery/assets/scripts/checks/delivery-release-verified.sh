@@ -230,11 +230,10 @@ delivery_run_deploy_command() {
   previous_status="$(delivery_root_metadata delivery.deploy_status)"
   previous_sha="$(delivery_root_metadata delivery.deploy_merge_sha)"
   if [ "$previous_sha" = "$MERGE_SHA" ] && [ -n "$previous_status" ]; then
-    # This process created the claim after an already durable guard.  It is
-    # safe to release its own claim before reporting the replay rejection.
-    rmdir "$deployment_claim" || \
-      delivery_fail "failed to release deployment execution claim after reading durable started state"
-    delivery_fail "deploy_command already ran for $MERGE_SHA; exact-once deployment forbids a rerun"
+    if delivery_recover_command_deploy "$deployment_claim" "$claim_key"; then
+      return 0
+    fi
+    delivery_fail "deploy command recovery did not reach a terminal outcome"
   fi
 
   evidence_path="$delivery_dir/deploy.log"
@@ -250,7 +249,10 @@ delivery_run_deploy_command() {
   # this fail-closed state in place, so a retry cannot deploy twice.
   gc bd update "$DELIVERY_ROOT_ID" \
     --set-metadata "delivery.deploy_merge_sha=$MERGE_SHA" \
-    --set-metadata "delivery.deploy_status=started" || \
+    --set-metadata "delivery.deploy_status=started" \
+    --set-metadata "delivery.deploy_invocation_id=$claim_key" \
+    --set-metadata "delivery.deploy_lease_id=$claim_key" \
+    --set-metadata "delivery.deploy_recovery_state=started" || \
     delivery_fail "failed to atomically record deployment execution-started guard"
   rmdir "$deployment_claim" || \
     delivery_fail "failed to release deployment execution claim after recording started guard"
@@ -348,7 +350,8 @@ delivery_run_deploy_command() {
     --set-metadata "delivery.deploy_merge_sha=$MERGE_SHA" \
     --set-metadata "delivery.deploy_stdout_path=$stdout_path" \
     --set-metadata "delivery.deploy_stderr_path=$stderr_path" \
-    --set-metadata "delivery.deploy_status=$deploy_status" || {
+    --set-metadata "delivery.deploy_status=$deploy_status" \
+    --set-metadata "delivery.deploy_recovery_state=$deploy_status" || {
       rm -f -- "$evidence_path" "$stdout_path" "$stderr_path"
       delivery_fail "failed to atomically record deployment evidence metadata"
     }
@@ -397,6 +400,7 @@ expected = {
     "stdout_path": stdout_path,
     "stderr_path": stderr_path,
 }
+
 if fields != expected:
     raise SystemExit("deploy evidence does not bind the current command, timeout, and merge SHA")
 for capture_path in (stdout_path, stderr_path):
@@ -406,6 +410,56 @@ for capture_path in (stdout_path, stderr_path):
     except OSError as exc:
         raise SystemExit(f"deploy evidence capture is missing: {exc}")
 PY
+}
+
+delivery_recover_command_deploy() {
+  local deployment_claim="$1" claim_key="$2"
+  local previous_status previous_sha invocation_id evidence_path stdout_path stderr_path
+  local command_label recorded_label recorded_timeout recorded_outcome recorded_child recorded_wrapper
+
+  previous_status="$(delivery_root_metadata delivery.deploy_status)"
+  previous_sha="$(delivery_root_metadata delivery.deploy_merge_sha)"
+  invocation_id="$(delivery_root_metadata delivery.deploy_invocation_id)"
+  [ "$previous_sha" = "$MERGE_SHA" ] && [ -n "$previous_status" ] || return 1
+
+  # A completed command may be recovered only from same-SHA, complete evidence.
+  # Anything less could be a crash after a non-idempotent command began.
+  if [ "$previous_status" = "deployed" ]; then
+    evidence_path="$(delivery_root_metadata delivery.deploy_evidence_path)"
+    stdout_path="$(delivery_root_metadata delivery.deploy_stdout_path)"
+    stderr_path="$(delivery_root_metadata delivery.deploy_stderr_path)"
+    recorded_label="$(delivery_root_metadata delivery.deploy_command_label)"
+    recorded_timeout="$(delivery_root_metadata delivery.deploy_timeout)"
+    recorded_outcome="$(delivery_root_metadata delivery.deploy_outcome)"
+    recorded_child="$(delivery_root_metadata delivery.deploy_child_status)"
+    recorded_wrapper="$(delivery_root_metadata delivery.deploy_wrapper_status)"
+    command_label="$(delivery_command_label "$DEPLOY_COMMAND")"
+    if [ -n "$evidence_path" ] && [ -n "$stdout_path" ] && [ -n "$stderr_path" ] && \
+      [ "$recorded_label" = "$command_label" ] && [ "$recorded_timeout" = "$DEPLOY_TIMEOUT" ] && \
+      [ "$recorded_outcome" = passed ] && [ "$recorded_child" = 0 ] && \
+      [ "$recorded_wrapper" = 0 ] && \
+      delivery_validate_command_deploy_evidence "$evidence_path" "$command_label" "$DEPLOY_TIMEOUT" \
+        "$MERGE_SHA" "$stdout_path" "$stderr_path"; then
+      gc bd update "$DELIVERY_ROOT_ID" \
+        --set-metadata "delivery.deploy_invocation_id=${invocation_id:-$claim_key}" \
+        --set-metadata "delivery.deploy_lease_id=$claim_key" \
+        --set-metadata "delivery.deploy_recovery_state=reconciled_completed" || \
+        delivery_fail "failed to record reconciled deployment recovery"
+      rmdir "$deployment_claim" || \
+        delivery_fail "failed to release deployment execution claim after completed recovery"
+      echo "complete-delivery recovered completed deploy command at $MERGE_SHA"
+      return 0
+    fi
+  fi
+
+  gc bd update "$DELIVERY_ROOT_ID" \
+    --set-metadata "delivery.deploy_invocation_id=${invocation_id:-$claim_key}" \
+    --set-metadata "delivery.deploy_lease_id=$claim_key" \
+    --set-metadata "delivery.deploy_recovery_state=blocked_unknown_execution" || \
+    delivery_fail "failed to record blocked deployment recovery"
+  rmdir "$deployment_claim" || \
+    delivery_fail "failed to release deployment execution claim after blocked recovery"
+  delivery_fail "deploy command recovery is blocked for $MERGE_SHA; exact-once deployment forbids a replay without trusted completed evidence"
 }
 
 delivery_ci_evidence_field() {
@@ -949,7 +1003,8 @@ esac
 
 export DELIVERY_SHA="$MERGE_SHA"
 export DELIVERY_REPO DELIVERY_PR
-cd "$DELIVERY_WORK_DIR"
+cd "$DELIVERY_WORK_DIR" || \
+  delivery_fail "failed to change to canonical delivery work directory: $DELIVERY_WORK_DIR"
 
 VERIFY_COMMAND="$(delivery_var deploy_verify_command "")"
 SMOKE_COMMAND="$(delivery_var smoke_command "")"

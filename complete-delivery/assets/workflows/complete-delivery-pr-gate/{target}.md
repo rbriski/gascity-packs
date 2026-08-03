@@ -19,8 +19,11 @@ any non-success finalization path, invalidate the handoff's `tested_commit`,
 success evidence rather than allowing a prior attempt to authorize the report,
 then close with a non-pass outcome.
 
-After that terminal check has passed, record only the validated current-head
-gate path and close with `gc.outcome=pass`. This nested finalizer is
+Immediately before recording finalizer pass evidence, re-run
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate`; an
+expired deadline closes non-pass without recording that evidence. After that
+terminal check and immediate revalidation have passed, record only the
+validated current-head gate path and close with `gc.outcome=pass`. This nested finalizer is
 evidence-only: it must never mark `external-review` as `passed`, set a
 protected-merge next action, or invoke `report_publish_command`. Top-level
 `complete-delivery/report-green.md`, which runs after this expansion, is the

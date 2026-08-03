@@ -467,6 +467,14 @@ class PrGateContractTests(unittest.TestCase):
         self.assert_prose_contains(precheck, "Immediately before the living-report mutation")
         self.assert_prose_contains(precheck, "Immediately before running `report_publish_command`")
         self.assert_prose_contains(precheck, "revert the just-written active-state mutation")
+        self.assert_prose_contains(
+            precheck,
+            "canonical `tested_commit` is valid, whose `local_gates` status is `passed`, and whose `published_head_matches_tested_commit` is true",
+        )
+
+        finalizer = (workflows / "{target}.md").read_text(encoding="utf-8")
+        self.assert_prose_contains(finalizer, "Immediately before recording finalizer pass evidence")
+        self.assert_prose_contains(finalizer, "terminal check and immediate revalidation have passed")
 
     def test_formula_preserves_the_bounded_resolve_test_publish_handoff(self) -> None:
         loop = self.templates["{target}.external-review-loop"]
