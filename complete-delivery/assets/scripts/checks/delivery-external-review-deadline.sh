@@ -5,7 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=delivery-common.sh
 source "$SCRIPT_DIR/delivery-common.sh"
 command -v timeout >/dev/null 2>&1 || delivery_fail "timeout is required on PATH"
-command -v flock >/dev/null 2>&1 || delivery_fail "flock is required on PATH"
 # Context has to be read before this gate can discover a durable deadline.
 # Bound those bootstrap reads tightly; once a deadline is known, all later gc
 # calls use its remaining time instead.
@@ -63,6 +62,8 @@ delivery_history_before_deadline() {
 # initialization, then re-read durable metadata while holding the lock so a
 # waiter reuses the first persisted pair instead of overwriting it.
 if [ "$MODE" = "--initialize" ] && [ -z "$STARTED_AT" ] && [ -z "$DEADLINE" ]; then
+  command -v flock >/dev/null 2>&1 || \
+    delivery_fail "flock is required on PATH to initialize an external-review deadline"
   # The lock holder performs two bounded metadata reads plus one durable
   # update. Thirty seconds covers loaded concurrent initialization without
   # turning a wedged data plane into an unbounded wait; lock exhaustion fails

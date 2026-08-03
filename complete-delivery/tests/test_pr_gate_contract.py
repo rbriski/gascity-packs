@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -35,6 +36,7 @@ class PrGateContractTests(unittest.TestCase):
         history: list[dict],
         mode: str | None,
         extra_env: dict[str, str] | None = None,
+        without_flock: bool = False,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -79,7 +81,15 @@ class PrGateContractTests(unittest.TestCase):
             })
             if extra_env:
                 env.update(extra_env)
-            command = ["bash", str(DEADLINE_SCRIPT)]
+            if without_flock:
+                commands = root / "commands-without-flock"
+                commands.mkdir()
+                for name in ("cat", "date", "dirname", "mkdir", "mktemp", "python3", "rm", "sleep", "timeout"):
+                    target = shutil.which(name, path=env["PATH"])
+                    assert target is not None, name
+                    (commands / name).symlink_to(target)
+                env["PATH"] = f"{root}:{commands}"
+            command = ["/bin/bash", str(DEADLINE_SCRIPT)]
             if mode is not None:
                 command.append(mode)
             result = subprocess.run(command, capture_output=True, text=True, env=env)
@@ -168,6 +178,22 @@ class PrGateContractTests(unittest.TestCase):
         self.assertNotEqual(timed_out.returncode, 0)
         self.assertIn("during deadline discovery", timed_out.stderr)
         self.assertIn('timeout --signal=KILL 1s gc bd history', DEADLINE_SCRIPT.read_text(encoding="utf-8"))
+
+    def test_only_first_deadline_initialization_requires_flock(self) -> None:
+        initialized, _state, history = self.run_deadline({}, [], "--initialize")
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        metadata = _state[0]["metadata"]
+
+        validated, _, _ = self.run_deadline(
+            metadata, history, "--validate", without_flock=True
+        )
+        self.assertEqual(validated.returncode, 0, validated.stderr)
+
+        unavailable, _, _ = self.run_deadline(
+            {}, [], "--initialize", without_flock=True
+        )
+        self.assertNotEqual(unavailable.returncode, 0)
+        self.assertIn("flock is required", unavailable.stderr)
 
     def test_deadline_recomputes_real_clock_after_internal_reads(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)

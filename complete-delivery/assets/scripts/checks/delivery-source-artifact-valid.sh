@@ -44,8 +44,10 @@ PY
 # an absolute path, parent traversal, or symlink cannot execute another pack.
 ROOT_GENERIC_CHECK="$(delivery_root_metadata gc.var.build_artifact_valid_path)"
 STEP_GENERIC_CHECK="$(delivery_metadata_value "$DELIVERY_STEP_JSON" gc.var.build_artifact_valid_path)"
-[ -z "$STEP_GENERIC_CHECK" ] || \
-  delivery_fail "build-artifact-valid.sh path must be configured on the workflow root"
+if [ "$DELIVERY_BEAD_ID" != "$DELIVERY_ROOT_ID" ]; then
+  [ -z "$STEP_GENERIC_CHECK" ] || \
+    delivery_fail "build-artifact-valid.sh path must be configured on the workflow root"
+fi
 if [ -z "$ROOT_GENERIC_CHECK" ]; then
   GENERIC_CHECK="$SCRIPT_DIR/build-artifact-valid.sh"
 else
@@ -79,8 +81,16 @@ done
 # its schema and trace gate before applying the Complete Delivery refinement.
 bash "$GENERIC_CHECK"
 
-SOURCE_ID="$(delivery_var source_bead_id "")"
-SOURCE_TITLE="$(delivery_var source_title "")"
+STEP_SOURCE_ID="$(delivery_metadata_value "$DELIVERY_STEP_JSON" gc.var.source_bead_id)"
+STEP_SOURCE_TITLE="$(delivery_metadata_value "$DELIVERY_STEP_JSON" gc.var.source_title)"
+if [ "$DELIVERY_BEAD_ID" != "$DELIVERY_ROOT_ID" ]; then
+  [ -z "$STEP_SOURCE_ID" ] || \
+    delivery_fail "gc.var.source_bead_id must be configured on the workflow root"
+  [ -z "$STEP_SOURCE_TITLE" ] || \
+    delivery_fail "gc.var.source_title must be configured on the workflow root"
+fi
+SOURCE_ID="$(delivery_root_metadata gc.var.source_bead_id)"
+SOURCE_TITLE="$(delivery_root_metadata gc.var.source_title)"
 [ -n "$SOURCE_ID" ] || delivery_fail "gc.var.source_bead_id is missing"
 [ -n "$SOURCE_TITLE" ] || delivery_fail "gc.var.source_title is missing"
 python3 -c 'import yaml' >/dev/null 2>&1 || \

@@ -2404,6 +2404,11 @@ class SourceArtifactTests(unittest.TestCase):
         use_variable_artifact_path: bool = False,
         generic_check_value: str | None = "gascity/assets/scripts/checks/build-artifact-valid.sh",
         step_generic_check_value: str | None = None,
+        root_source_id: str | None = "fi-123",
+        root_source_title: str | None = None,
+        step_source_id: str | None = None,
+        step_source_title: str | None = None,
+        root_bead: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -2497,17 +2502,36 @@ class SourceArtifactTests(unittest.TestCase):
                     if step_generic_check_value is not None
                     else {}
                 ),
+                **(
+                    {"gc.var.source_bead_id": step_source_id}
+                    if step_source_id is not None
+                    else {}
+                ),
+                **(
+                    {"gc.var.source_title": step_source_title}
+                    if step_source_title is not None
+                    else {}
+                ),
             }}]
             root_metadata = {
                 artifact_path_key: artifact_path_value,
-                "gc.var.source_bead_id": "fi-123",
-                "gc.var.source_title": source_title,
                 **(
                     {"gc.var.build_artifact_valid_path": generic_check_value}
                     if generic_check is not None and generic_check_value is not None
                     else {}
                 ),
             }
+            if root_source_id is not None:
+                root_metadata["gc.var.source_bead_id"] = root_source_id
+            if root_source_title is not None or root_source_id is not None:
+                root_metadata["gc.var.source_title"] = (
+                    source_title if root_source_title is None else root_source_title
+                )
+            if root_bead:
+                root_metadata.update({
+                    "gc.build.artifact_schema": f"gc.build.{artifact_kind}.v1",
+                    "gc.build.artifact_path_keys": artifact_path_keys or artifact_path_key,
+                })
             if use_variable_artifact_path:
                 root_metadata.pop(artifact_path_key)
                 root_metadata[f"gc.var.{artifact_kind.replace('-', '_')}_path"] = (
@@ -2549,7 +2573,7 @@ class SourceArtifactTests(unittest.TestCase):
             )
             environment = os.environ.copy()
             environment.update({
-                "GC_BEAD_ID": "step-1",
+                "GC_BEAD_ID": "root-1" if root_bead else "step-1",
                 "GC_WORK_DIR": str(work_dir),
                 "FAKE_STEP_JSON": json.dumps(step),
                 "FAKE_ROOT_JSON": json.dumps(workflow_root),
@@ -2598,6 +2622,37 @@ class SourceArtifactTests(unittest.TestCase):
             }],
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_source_artifact_identity_must_be_root_only(self) -> None:
+        root_only = self.run_check(self.artifact(), root_bead=True)
+        self.assertEqual(root_only.returncode, 0, root_only.stdout + root_only.stderr)
+
+        for label, values, expected in (
+            (
+                "step id overrides root",
+                {"step_source_id": "fi-override"},
+                "source_bead_id must be configured on the workflow root",
+            ),
+            (
+                "step title overrides root",
+                {"step_source_title": "Override title"},
+                "source_title must be configured on the workflow root",
+            ),
+            (
+                "step fallback without root",
+                {
+                    "root_source_id": None,
+                    "root_source_title": None,
+                    "step_source_id": "fi-123",
+                    "step_source_title": "Requested delivery",
+                },
+                "source_bead_id must be configured on the workflow root",
+            ),
+        ):
+            with self.subTest(label=label):
+                result = self.run_check(self.artifact(), **values)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
 
     def test_source_and_upstream_artifacts_cannot_escape_work_directory(self) -> None:
         for variant in ("parent", "nested-parent", "absolute-outside", "symlink"):
