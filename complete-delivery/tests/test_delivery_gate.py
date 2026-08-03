@@ -104,6 +104,33 @@ class DeliveryGateTests(unittest.TestCase):
         self.assertEqual(result["required_checks_source"], "branch_protection")
         self.assertTrue(result["coderabbit"]["completed"])
 
+    def test_direct_evaluator_and_cli_default_coderabbit_off(self) -> None:
+        client = FakeClient()
+        client.runs = [client.runs[0]]
+        client.threads = [
+            delivery_gate.ReviewThread(
+                thread_id="T1",
+                author="coderabbitai[bot]",
+                path="app.py",
+                url="https://example.test/thread/1",
+                body="provider-only finding",
+                is_resolved=False,
+                is_outdated=False,
+            )
+        ]
+
+        result = delivery_gate.evaluate(
+            client,
+            repo="owner/repo",
+            pr_number=7,
+            required_checks="auto",
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["coderabbit"]["mode"], "off")
+        args = delivery_gate.parse_args(["--repo", "owner/repo", "--pr", "7"])
+        self.assertEqual(args.coderabbit, "off")
+
     def test_missing_required_check_fails_closed(self) -> None:
         client = FakeClient()
         client.required = ["verify", "secret-scan"]

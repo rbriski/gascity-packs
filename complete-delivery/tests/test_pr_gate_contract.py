@@ -6,11 +6,13 @@ import json
 import os
 import pathlib
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import tomllib
 import unittest
+from datetime import datetime, timedelta, timezone
 
 
 PACK_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -22,9 +24,393 @@ LOCAL_GATES_SCRIPT = (
 TERMINAL_GATE_SCRIPT = (
     PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-pr-approved.sh"
 )
+DEADLINE_SCRIPT = (
+    PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-external-review-deadline.sh"
+)
 
 
 class PrGateContractTests(unittest.TestCase):
+    def run_deadline(
+        self,
+        metadata: dict[str, str],
+        history: list[dict],
+        mode: str | None,
+        extra_env: dict[str, str] | None = None,
+        without_flock: bool = False,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state = root / "state.json"
+            history_path = root / "history.json"
+            state.write_text(json.dumps([{"metadata": metadata}]), encoding="utf-8")
+            history_path.write_text(json.dumps(history), encoding="utf-8")
+            gc = root / "gc"
+            gc.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "state = os.environ['FAKE_GC_STATE']\n"
+                "history = os.environ['FAKE_GC_HISTORY']\n"
+                "args = sys.argv[1:]\n"
+                "subcommand = args[1] if len(args) > 1 and args[0] == 'bd' else ''\n"
+                "if subcommand == 'show':\n"
+                " print(open(state).read())\n"
+                "elif subcommand == 'history':\n"
+                " import time\n"
+                " if os.environ.get('FAKE_GC_HANG_SUBCOMMAND') == subcommand: time.sleep(2)\n"
+                " print(open(history).read())\n"
+                "elif subcommand == 'update':\n"
+                " data = json.load(open(state)); meta = data[0]['metadata']\n"
+                " for index, value in enumerate(args):\n"
+                "  if value == '--set-metadata':\n"
+                "   key, value = args[index + 1].split('=', 1); meta[key] = value\n"
+                " open(state, 'w').write(json.dumps(data))\n"
+                " entries = json.load(open(history)); entries.insert(0, {'Issue': data[0]})\n"
+                " open(history, 'w').write(json.dumps(entries))\n"
+                "else:\n"
+                " raise SystemExit('unexpected gc invocation: ' + repr(args))\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            env = os.environ.copy()
+            env.update({
+                "GC_BEAD_ID": "root-1",
+                "GC_WORK_DIR": str(root),
+                "FAKE_GC_STATE": str(state),
+                "FAKE_GC_HISTORY": str(history_path),
+                "PATH": f"{root}:{env['PATH']}",
+            })
+            if extra_env:
+                env.update(extra_env)
+            if without_flock:
+                commands = root / "commands-without-flock"
+                commands.mkdir()
+                for name in ("cat", "date", "dirname", "mkdir", "mktemp", "python3", "rm", "sleep", "timeout"):
+                    target = shutil.which(name, path=env["PATH"])
+                    assert target is not None, name
+                    (commands / name).symlink_to(target)
+                env["PATH"] = f"{root}:{commands}"
+            command = ["/bin/bash", str(DEADLINE_SCRIPT)]
+            if mode is not None:
+                command.append(mode)
+            result = subprocess.run(command, capture_output=True, text=True, env=env)
+            return result, json.loads(state.read_text(encoding="utf-8")), json.loads(history_path.read_text(encoding="utf-8"))
+
+    def test_external_review_deadline_is_first_write_immutable_and_fail_closed(self) -> None:
+        before = datetime.now(timezone.utc).replace(microsecond=0)
+        initialized, state, history = self.run_deadline({}, [], "--initialize")
+        after = datetime.now(timezone.utc).replace(microsecond=0)
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        metadata = state[0]["metadata"]
+        started = datetime.strptime(
+            metadata["delivery.external_review_started_at"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        deadline = datetime.strptime(
+            metadata["delivery.external_review_deadline"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        self.assertLessEqual(before, started)
+        self.assertLessEqual(started, after)
+        self.assertEqual(deadline, started + timedelta(hours=2))
+        self.assertEqual(len(history), 1)
+
+        resumed, state, resumed_history = self.run_deadline(metadata, history, "--initialize")
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(state[0]["metadata"], metadata)
+        self.assertEqual(resumed_history, history)
+
+        for label, changed_metadata, changed_history, expected in (
+            ("missing", {}, [], "missing"),
+            ("malformed", {"delivery.external_review_started_at": metadata["delivery.external_review_started_at"], "delivery.external_review_deadline": "tomorrow"}, [], "canonical UTC"),
+            (
+                "moved-forward",
+                {
+                    **metadata,
+                    "delivery.external_review_deadline": (
+                        deadline + timedelta(minutes=30)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+                [{"Issue": {"metadata": metadata}}],
+                "no later than two hours",
+            ),
+            (
+                "reset",
+                {
+                    **metadata,
+                    "delivery.external_review_deadline": (
+                        deadline - timedelta(minutes=30)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+                [{"Issue": {"metadata": metadata}}],
+                "does not match immutable first entry",
+            ),
+        ):
+            with self.subTest(label=label):
+                result, _, _ = self.run_deadline(changed_metadata, changed_history, "--validate")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+
+    def test_forged_clock_override_cannot_rescue_an_expired_deadline(self) -> None:
+        expired = {
+            "delivery.external_review_started_at": "2000-01-01T00:00:00Z",
+            "delivery.external_review_deadline": "2000-01-01T02:00:00Z",
+        }
+        result, _, _ = self.run_deadline(
+            expired,
+            [{"Issue": {"metadata": expired}}],
+            "--validate",
+            {"DELIVERY_NOW_UTC": "1970-01-01T00:00:00Z"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expired", result.stderr)
+        self.assertNotIn(
+            'NOW="${DELIVERY_NOW_UTC', DEADLINE_SCRIPT.read_text(encoding="utf-8")
+        )
+
+    def test_deadline_defaults_to_validation_and_bounds_discovery_reads(self) -> None:
+        defaulted, state, history = self.run_deadline({}, [], None)
+        self.assertNotEqual(defaulted.returncode, 0)
+        self.assertIn("missing", defaulted.stderr)
+        self.assertEqual(state[0]["metadata"], {})
+        self.assertEqual(history, [])
+
+        timed_out, _, _ = self.run_deadline(
+            {}, [], "--initialize", {"FAKE_GC_HANG_SUBCOMMAND": "history"}
+        )
+        self.assertNotEqual(timed_out.returncode, 0)
+        self.assertIn("during deadline discovery", timed_out.stderr)
+        self.assertIn('timeout --signal=KILL 1s gc bd history', DEADLINE_SCRIPT.read_text(encoding="utf-8"))
+
+    def test_only_first_deadline_initialization_requires_flock(self) -> None:
+        initialized, _state, history = self.run_deadline({}, [], "--initialize")
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        metadata = _state[0]["metadata"]
+
+        validated, _, _ = self.run_deadline(
+            metadata, history, "--validate", without_flock=True
+        )
+        self.assertEqual(validated.returncode, 0, validated.stderr)
+
+        unavailable, _, _ = self.run_deadline(
+            {}, [], "--initialize", without_flock=True
+        )
+        self.assertNotEqual(unavailable.returncode, 0)
+        self.assertIn("flock is required", unavailable.stderr)
+
+    def test_deadline_recomputes_real_clock_after_internal_reads(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state = root / "state.json"
+            history_path = root / "history.json"
+            state.write_text(json.dumps([{"metadata": {}}]), encoding="utf-8")
+            history_path.write_text("[]", encoding="utf-8")
+            gc = root / "gc"
+            gc.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                "state_path = pathlib.Path(os.environ['FAKE_GC_STATE'])\n"
+                "history_path = pathlib.Path(os.environ['FAKE_GC_HISTORY'])\n"
+                "if sys.argv[2] == 'show': print(state_path.read_text())\n"
+                "elif sys.argv[2] == 'history': print(history_path.read_text())\n"
+                "elif sys.argv[2] == 'update':\n"
+                " data = json.loads(state_path.read_text()); metadata = data[0]['metadata']\n"
+                " for i, value in enumerate(sys.argv):\n"
+                "  if value == '--set-metadata': key, value = sys.argv[i + 1].split('=', 1); metadata[key] = value\n"
+                " state_path.write_text(json.dumps(data))\n"
+                " history = json.loads(history_path.read_text()); history.insert(0, {'Issue': data[0]}); history_path.write_text(json.dumps(history))\n"
+                "else: raise SystemExit('unexpected gc invocation: ' + repr(sys.argv))\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            date = root / "date"
+            date.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, pathlib\n"
+                "counter = pathlib.Path(os.environ['FAKE_DATE_COUNTER'])\n"
+                "index = int(counter.read_text() if counter.exists() else '0')\n"
+                "values = os.environ['FAKE_DATE_VALUES'].split(',')\n"
+                "counter.write_text(str(index + 1))\n"
+                "print(values[min(index, len(values) - 1)])\n",
+                encoding="utf-8",
+            )
+            date.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update({
+                "GC_BEAD_ID": "root-1",
+                "GC_WORK_DIR": str(root),
+                "FAKE_GC_STATE": str(state),
+                "FAKE_GC_HISTORY": str(history_path),
+                "FAKE_DATE_COUNTER": str(root / "date-count"),
+                "FAKE_DATE_VALUES": ",".join((
+                    now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    (now + timedelta(hours=2, seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )),
+                "PATH": f"{root}:{environment['PATH']}",
+            })
+            result = subprocess.run(
+                ["bash", str(DEADLINE_SCRIPT), "--initialize"],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expired", result.stderr)
+
+    def test_deadline_initialization_uses_one_pair_for_concurrent_callers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state = root / "state.json"
+            history_path = root / "history.json"
+            state.write_text(json.dumps([{"metadata": {}}]), encoding="utf-8")
+            history_path.write_text("[]", encoding="utf-8")
+            gc = root / "gc"
+            gc.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys, time\n"
+                "state_path = pathlib.Path(os.environ['FAKE_GC_STATE'])\n"
+                "history_path = pathlib.Path(os.environ['FAKE_GC_HISTORY'])\n"
+                "args = sys.argv[1:]\n"
+                "if args[1] == 'show': print(state_path.read_text())\n"
+                "elif args[1] == 'history': print(history_path.read_text())\n"
+                "elif args[1] == 'update':\n"
+                " if os.environ.get('FAKE_GC_UPDATE_DELAY'): time.sleep(float(os.environ['FAKE_GC_UPDATE_DELAY']))\n"
+                " data = json.loads(state_path.read_text()); metadata = data[0]['metadata']\n"
+                " for i, value in enumerate(args):\n"
+                "  if value == '--set-metadata': key, value = args[i + 1].split('=', 1); metadata[key] = value\n"
+                " state_path.write_text(json.dumps(data))\n"
+                " history = json.loads(history_path.read_text()); history.insert(0, {'Issue': data[0]}); history_path.write_text(json.dumps(history))\n"
+                "else: raise SystemExit('unexpected gc invocation: ' + repr(args))\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            timeout_log = root / "timeout.jsonl"
+            timeout = root / "timeout"
+            timeout.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "with pathlib.Path(os.environ['FAKE_TIMEOUT_LOG']).open('a', encoding='utf-8') as handle:\n"
+                " handle.write(json.dumps(args) + '\\n')\n"
+                "if args and args[0].startswith('--'): args.pop(0)\n"
+                "if not args: raise SystemExit('timeout duration is missing')\n"
+                "args.pop(0)\n"
+                "if not args: raise SystemExit('timeout command is missing')\n"
+                "os.execvp(args[0], args)\n",
+                encoding="utf-8",
+            )
+            timeout.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update({
+                "GC_BEAD_ID": "root-1",
+                "GC_WORK_DIR": str(root),
+                "FAKE_GC_STATE": str(state),
+                "FAKE_GC_HISTORY": str(history_path),
+                "FAKE_GC_UPDATE_DELAY": "2",
+                "FAKE_TIMEOUT_LOG": str(timeout_log),
+                "PATH": f"{root}:{environment['PATH']}",
+            })
+            first = subprocess.Popen(["bash", str(DEADLINE_SCRIPT), "--initialize"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+            second = subprocess.Popen(["bash", str(DEADLINE_SCRIPT), "--initialize"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+            first_stdout, first_stderr = first.communicate(timeout=10)
+            second_stdout, second_stderr = second.communicate(timeout=10)
+            self.assertEqual(first.returncode, 0, first_stderr)
+            self.assertEqual(second.returncode, 0, second_stderr)
+            self.assertIn("deadline valid", first_stdout)
+            self.assertIn("deadline valid", second_stdout)
+            metadata = json.loads(state.read_text(encoding="utf-8"))[0]["metadata"]
+            self.assertEqual(len(json.loads(history_path.read_text(encoding="utf-8"))), 1)
+            self.assertEqual(
+                metadata["delivery.external_review_deadline"],
+                (datetime.strptime(metadata["delivery.external_review_started_at"], "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            self.assertIn("DEADLINE_LOCK_WAIT=30", DEADLINE_SCRIPT.read_text(encoding="utf-8"))
+            self.assertIn("delivery_lock_held_timeout", DEADLINE_SCRIPT.read_text(encoding="utf-8"))
+            self.assertIn('if [ "${cap%s}" -gt "${remaining%s}" ]; then', DEADLINE_SCRIPT.read_text(encoding="utf-8"))
+            timeout_calls = [
+                json.loads(line)
+                for line in timeout_log.read_text(encoding="utf-8").splitlines()
+            ]
+            history_timeouts = []
+            for args in timeout_calls:
+                command_index = 2 if args and args[0].startswith("--") else 1
+                if args[command_index : command_index + 3] == ["gc", "bd", "history"]:
+                    history_timeouts.append(args[command_index - 1])
+            self.assertEqual(sorted(history_timeouts), ["1s", "5s", "5s"])
+
+    def test_external_review_actions_and_terminal_gate_require_deadline_validation(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        for filename in (
+            "{target}.inspect-current-head.md",
+            "{target}.resolve-findings.md",
+            "{target}.rerun-local-gates.md",
+            "{target}.publish-fixes.md",
+            "{target}.report-external-review.md",
+            "{target}.external-review-loop.md",
+            "{target}.md",
+        ):
+            with self.subTest(filename=filename):
+                self.assertIn(".gc/scripts/checks/delivery-external-review-deadline.sh --validate", (workflows / filename).read_text(encoding="utf-8"))
+        self.assertIn(".gc/scripts/checks/delivery-external-review-deadline.sh --initialize", (workflows / "{target}.setup-external-review.md").read_text(encoding="utf-8"))
+        self.assertIn("delivery-external-review-deadline.sh\" --validate", TERMINAL_GATE_SCRIPT.read_text(encoding="utf-8"))
+        formula = tomllib.loads(FORMULA_PATH.read_text(encoding="utf-8"))
+        setup = next(template for template in formula["template"] if template["id"] == "{target}.setup-external-review")
+        self.assertEqual(setup["check"]["check"]["path"], ".gc/scripts/checks/delivery-external-review-deadline.sh")
+        self.assertNotIn("args", setup["check"]["check"])
+        loop = (workflows / "{target}.external-review-loop.md").read_text(encoding="utf-8")
+        self.assertIn("Immediately before every source-editing repair mutation and every commit", loop)
+
+        required_deadline_guards = (
+            "Immediately before every source-editing repair mutation",
+            ".gc/scripts/checks/delivery-external-review-deadline.sh --validate",
+            "Separately, immediately before each `git commit`",
+            "write only blocker-only handoff evidence",
+            "perform neither the source-editing mutation nor any `git commit`",
+        )
+        resolve_findings = (workflows / "{target}.resolve-findings.md").read_text(
+            encoding="utf-8"
+        )
+        for required_guard in required_deadline_guards:
+            with self.subTest(resolve_findings_guard=required_guard):
+                self.assert_prose_contains(resolve_findings, required_guard)
+
+        post_commit_guards = (
+            "Immediately after the final repair commit",
+            "immediately before persisting successful handoff evidence",
+            "either post-commit validation fails",
+            "replace the handoff with blocker-only state",
+            "persist no successful identity, candidate, disposition, fix-commit, tested-commit, publication, or equality evidence",
+            "make no further source-editing mutation or commit",
+        )
+        for required_guard in post_commit_guards:
+            with self.subTest(resolve_findings_post_commit_guard=required_guard):
+                self.assert_prose_contains(resolve_findings, required_guard)
+        resolver = (
+            PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md"
+        ).read_text(encoding="utf-8")
+        for required_guard in required_deadline_guards:
+            with self.subTest(resolver_guard=required_guard):
+                self.assert_prose_contains(resolver, required_guard)
+
+        inspect = (workflows / "{target}.inspect-current-head.md").read_text(
+            encoding="utf-8"
+        )
+        self.assert_prose_contains(
+            inspect,
+            "Immediately after a successful gate invocation and before accepting its JSON",
+        )
+        publish_fixes = (workflows / "{target}.publish-fixes.md").read_text(
+            encoding="utf-8"
+        )
+        self.assert_prose_contains(
+            publish_fixes,
+            "before accepting or persisting any refreshed identity",
+        )
+        report = (workflows / "{target}.report-external-review.md").read_text(
+            encoding="utf-8"
+        )
+        self.assert_prose_contains(
+            report,
+            "Immediately after a successful report publication (or after confirming no publication is configured)",
+        )
     @classmethod
     def setUpClass(cls) -> None:
         with FORMULA_PATH.open("rb") as formula_file:
@@ -65,7 +451,7 @@ class PrGateContractTests(unittest.TestCase):
             "complete-delivery.report-editor",
         )
 
-    def test_only_post_check_finalizer_may_publish_passing_report(self) -> None:
+    def test_only_outer_report_green_may_authorize_passing_report(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
         precheck = (workflows / "{target}.report-external-review.md").read_text(
             encoding="utf-8"
@@ -74,26 +460,112 @@ class PrGateContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         finalizer = (workflows / "{target}.md").read_text(encoding="utf-8")
+        outer_report = (
+            PACK_ROOT / "assets" / "workflows" / "complete-delivery" / "report-green.md"
+        ).read_text(encoding="utf-8")
 
         self.assert_prose_contains(precheck, "Keep `external-review` `active`")
         self.assert_prose_contains(
             precheck,
             "set the immediate next action to the `external-review-loop` terminal mechanical check. "
-            "Only after that check passes may the existing post-check finalizer",
+            "Keep `external-review` active",
         )
         self.assert_prose_contains(precheck, "proven publication whose canonical full-SHA `published_head` exactly equals the updated workflow-root `delivery.head_sha`")
+        self.assert_prose_contains(precheck, "direct `published_head == tested_commit` equality also holds")
         self.assert_prose_contains(precheck, "prior-inspected-head `pr-gate.json` is not current-head evidence")
         self.assert_prose_contains(precheck, "root-head-mismatched other than the exact proven publication transition above")
+        self.assert_prose_contains(precheck, "may publish only configured active or blocked status")
+        self.assert_prose_contains(precheck, "must never publish `external-review` as `passed` or a protected-merge next action")
+        self.assert_prose_contains(precheck, "Immediately before running `report_publish_command`")
+        self.assert_prose_contains(precheck, "If the second validation or publication fails")
+        self.assert_prose_contains(precheck, "revert the just-written active-state mutation to an explicit non-pass blocker")
         self.assertIn("child report pre-terminal", loop)
         self.assertIn("leave `external-review` `active`", loop)
         self.assertIn("must not publish `passed` or a protected-merge next action", loop)
-        self.assertIn("post-check `{target}.md` finalizer", loop)
-        self.assert_prose_contains(finalizer, "sole authority")
+        self.assert_prose_contains(loop, "does not authorize the passing report, protected merge, or report publication")
+        self.assert_prose_contains(finalizer, "evidence-only")
+        self.assert_prose_contains(finalizer, "must never mark `external-review` as `passed`")
+        self.assert_prose_contains(finalizer, "must never mark `external-review` as `passed`, set a protected-merge next action, or invoke `report_publish_command`")
+        self.assert_prose_contains(finalizer, "Top-level `complete-delivery/report-green.md`")
+        self.assert_prose_contains(outer_report, "sole outer report authority")
+        self.assert_prose_contains(outer_report, "report_publish_command")
+        self.assert_prose_contains(outer_report, "require it to succeed")
+        self.assert_prose_contains(outer_report, "leaves the report in its prior non-passing state")
+        self.assert_prose_contains(
+            outer_report, "`schema` set to `gc.complete-delivery.report.v1`"
+        )
+        self.assert_prose_contains(
+            outer_report, "`sha` set to the workflow-root `delivery.head_sha`"
+        )
+        self.assert_prose_contains(
+            outer_report,
+            "the resolved `delivery.pr_gate_path` in that stage's `evidence` list",
+        )
+        self.assert_prose_contains(
+            outer_report, "set `next_action` to exactly `Proceed to protected merge.`"
+        )
+        self.assert_prose_contains(outer_report, "Do not attempt a compensating revert")
+
+    def test_outer_formula_orders_external_review_before_report_green_and_merge(self) -> None:
+        outer_formula_path = PACK_ROOT / "formulas" / "complete-delivery.formula.toml"
+        with outer_formula_path.open("rb") as formula_file:
+            outer_formula = tomllib.load(formula_file)
+        steps = {step["id"]: step for step in outer_formula["steps"]}
+
+        self.assertEqual(steps["report-green"]["needs"], ["external-review"])
+        self.assertEqual(
+            steps["report-green"]["check"]["check"]["path"],
+            ".gc/scripts/checks/delivery-report-green.sh",
+        )
+        self.assertEqual(steps["report-green"]["check"]["check"]["timeout"], "1m")
+        self.assertEqual(steps["merge"]["needs"], ["report-green"])
+
+    def test_terminal_publication_identity_and_deadline_guards_are_fail_closed(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        publish_fixes = (workflows / "{target}.publish-fixes.md").read_text(
+            encoding="utf-8"
+        )
+        rerun_local_gates = (workflows / "{target}.rerun-local-gates.md").read_text(
+            encoding="utf-8"
+        )
+        precheck = (workflows / "{target}.report-external-review.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assert_prose_contains(
+            publish_fixes,
+            "Immediately re-read and exactly verify every just-written workflow-root and handoff identity field before any thread resolution",
+        )
+        self.assert_prose_contains(publish_fixes, "persistence that is failed, partial, malformed, or head-mismatched is a distinct publication blocker")
+        self.assert_prose_contains(publish_fixes, "clear all authority fields")
+        self.assert_prose_contains(publish_fixes, "keep every mapped thread open")
+        for guard in (
+            "Immediately before every source edit",
+            "every local-gate-script invocation",
+            "every commit",
+        ):
+            with self.subTest(guard=guard):
+                self.assert_prose_contains(rerun_local_gates, guard)
+        self.assert_prose_contains(precheck, "Immediately before the living-report mutation")
+        self.assert_prose_contains(precheck, "Immediately before running `report_publish_command`")
+        self.assert_prose_contains(precheck, "revert the just-written active-state mutation")
+        self.assert_prose_contains(
+            precheck,
+            "canonical `tested_commit` is valid, whose `local_gates` status is `passed`, and whose `published_head_matches_tested_commit` is true",
+        )
+
+        finalizer = (workflows / "{target}.md").read_text(encoding="utf-8")
+        self.assert_prose_contains(finalizer, "Immediately before recording finalizer pass evidence")
+        self.assert_prose_contains(finalizer, "terminal check and immediate revalidation have passed")
 
     def test_formula_preserves_the_bounded_resolve_test_publish_handoff(self) -> None:
         loop = self.templates["{target}.external-review-loop"]
         self.assertEqual(loop["needs"], ["{target}.setup-external-review"])
-        self.assertEqual(loop["check"]["max_attempts"], 12)
+        self.assertEqual(loop["check"]["max_attempts"], 2)
+        self.assertEqual(
+            loop["metadata"]["gc.review_policy"],
+            "frozen-candidate-two-cycle",
+        )
         self.assertEqual(
             loop["check"]["check"]["path"],
             ".gc/scripts/checks/delivery-pr-approved.sh",
@@ -134,6 +606,35 @@ class PrGateContractTests(unittest.TestCase):
             "{target}.md",
         ):
             self.assertIn(HANDOFF_PATH, (workflows / filename).read_text(encoding="utf-8"))
+
+    def test_review_policy_defaults_provider_off_and_batches_bounded_repairs(self) -> None:
+        outer_formula = tomllib.loads(
+            (PACK_ROOT / "formulas" / "complete-delivery.formula.toml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(outer_formula["vars"]["coderabbit"]["default"], "off")
+        self.assertEqual(outer_formula["vars"]["max_iterations"]["default"], "2")
+
+        for script_name in ("delivery-preflight.sh", "delivery-pr-approved.sh"):
+            script = (
+                PACK_ROOT / "assets" / "scripts" / "checks" / script_name
+            ).read_text(encoding="utf-8")
+            self.assertIn('delivery_var coderabbit off', script)
+            self.assertNotIn('delivery_var coderabbit required', script)
+
+        external_review = (
+            PACK_ROOT / "assets" / "workflows" / "complete-delivery" / "external-review.md"
+        ).read_text(encoding="utf-8")
+        resolver = (
+            PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md"
+        ).read_text(encoding="utf-8")
+        for content in (external_review, resolver):
+            normalized = " ".join(content.split())
+            self.assertIn("internal gstack review", normalized)
+            self.assertIn("one consolidated repair batch", normalized)
+            self.assertIn("never request it, poll it, wait", normalized)
+        self.assertNotIn("12-attempt", external_review)
 
     def test_resolver_prompt_keeps_publication_and_terminal_gate_in_their_lanes(self) -> None:
         prompt = (PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md").read_text(
@@ -226,7 +727,7 @@ class PrGateContractTests(unittest.TestCase):
             self.assertTrue(all(term in normalized for term in ("shared repository-scoped", "resolveReviewThread")))
             self.assertTrue("between that final check and all" in normalized or "after that final head check and before all" in normalized)
         self.assertTrue(all(term in resolve_findings for term in ("replace the entire handoff object", "only blocker state")))
-        self.assertTrue(all(term in content for content in (prompt, rerun_local_gates) for term in ("at most three complete regression-repair-and-rerun", "fourth repair", "replace the entire handoff", "blocker-only retry-exhausted evidence", "no authority fields", "close with a non-pass outcome")))
+        self.assertTrue(all(term in " ".join(content.split()) for content in (prompt, rerun_local_gates) for term in ("at most one complete regression-repair-and-rerun", "second repair", "replace the entire handoff", "blocker-only retry-exhausted evidence", "no authority fields", "close with a non-pass outcome")))
         self.assertTrue(all(term in rerun_local_gates for term in ("candidate_commit", "tested_commit", "final committed `HEAD`", "individual thread `fix_commit`", "full local-gate sequence passes")))
         for content in (prompt, publish_fixes):
             self.assert_prose_contains(content, "no empty commit/push")
@@ -682,6 +1183,51 @@ class PrGateContractTests(unittest.TestCase):
             workflow, "that invalidates the whole handoff, clear `tested_commit` and `local_gates`"
         )
 
+    def test_terminal_publication_and_merge_recovery_are_deadline_and_state_bound(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        publish_fixes = (workflows / "{target}.publish-fixes.md").read_text(encoding="utf-8")
+        merge = (PACK_ROOT / "assets" / "workflows" / "complete-delivery" / "merge.md").read_text(encoding="utf-8")
+
+        for requirement in (
+            "Bound lock acquisition by the deadline's remaining time",
+            "immediately run `.gc/scripts/checks/delivery-external-review-deadline.sh --validate`",
+            "perform no push, refresh, or resolution",
+            "exhausted deadline, attempt budget, or recovery budget is a non-pass outcome",
+        ):
+            self.assert_prose_contains(publish_fixes, requirement)
+        self.assert_prose_contains(
+            publish_fixes,
+            "after the final permitted resolution and before recording any pass outcome",
+        )
+        self.assert_prose_contains(publish_fixes, "write blocker-only expiry evidence")
+        self.assert_prose_contains(publish_fixes, "preserve the truth of any already-resolved threads")
+        self.assert_prose_contains(publish_fixes, "must not claim to reopen a thread")
+        self.assert_prose_contains(merge, "Do not invoke `delivery-pr-open.sh` for this already-merged recovery")
+        self.assert_prose_contains(merge, "only after that fresh reconciliation proves `merged=false` and `state=open`")
+        self.assert_prose_contains(publish_fixes, "immediately persist all refreshed workflow-root identity fields before any thread resolution")
+        for field in (
+            "delivery.head_sha",
+            "delivery.repo",
+            "delivery.branch",
+            "delivery.pr_number",
+            "delivery.pr_url",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, publish_fixes)
+        self.assert_prose_contains(publish_fixes, "deadline validation failure is a deadline blocker, a refresh failure is a publication blocker, and a thread-resolution failure is a resolution blocker")
+
+    def test_local_gate_success_is_invalidated_if_the_deadline_expires(self) -> None:
+        workflow = (
+            PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate" / "{target}.rerun-local-gates.md"
+        ).read_text(encoding="utf-8")
+        self.assert_prose_contains(workflow, "Immediately after all local gates pass and before recording any success evidence")
+        self.assert_prose_contains(
+            workflow,
+            "Immediately after that final deadline validation and before atomically writing any passing authority",
+        )
+        self.assert_prose_contains(workflow, "repeat the clean-tree check")
+        self.assert_prose_contains(workflow, "erase `tested_commit`, `local_gates`, `published_head`, and `published_head_matches_tested_commit`")
+
     def test_local_gates_execute_an_allowed_local_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             marker = pathlib.Path(directory) / "local-gate-ran"
@@ -708,13 +1254,16 @@ class PrGateContractTests(unittest.TestCase):
             bin_dir = root / "bin"
             bin_dir.mkdir()
             gc = bin_dir / "gc"
+            started = datetime.now(timezone.utc).replace(microsecond=0)
             metadata = {
                 "delivery.repo": "owner/repo",
                 "delivery.pr_number": "8",
                 "gc.var.artifact_root": str(artifact_root),
+                "delivery.external_review_started_at": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "delivery.external_review_deadline": (started + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
             gc.write_text(
-                '#!/bin/sh\nprintf "%s\\n" "$FAKE_GC_STEP_JSON"\n',
+                '#!/bin/sh\nif [ "${2:-}" = history ]; then\n  printf "%s\\n" "$FAKE_GC_HISTORY_JSON"\nelse\n  printf "%s\\n" "$FAKE_GC_STEP_JSON"\nfi\n',
                 encoding="utf-8",
             )
             gc.chmod(0o755)
@@ -750,6 +1299,7 @@ class PrGateContractTests(unittest.TestCase):
                 {
                     "GC_BEAD_ID": "step-1",
                     "FAKE_GC_STEP_JSON": json.dumps([{"metadata": metadata}]),
+                    "FAKE_GC_HISTORY_JSON": json.dumps([{"Issue": {"metadata": metadata}}]),
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                     "REAL_PYTHON": sys.executable,
                 }
@@ -855,7 +1405,7 @@ class PrGateContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_terminal_gate_canonicalizes_valid_full_sha_evidence_before_comparison(self) -> None:
+    def test_terminal_gate_requires_direct_canonical_sha_evidence(self) -> None:
         commit = "aB" * 20
         result = self.run_terminal_gate(
             {
@@ -867,7 +1417,8 @@ class PrGateContractTests(unittest.TestCase):
             },
             {"passed": True, "head_sha": commit.upper()},
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("proven passing local-gate evidence", result.stderr)
 
     def test_terminal_gate_rejects_failed_or_wrong_head_delivery_gate_report(self) -> None:
         commit = "a" * 40

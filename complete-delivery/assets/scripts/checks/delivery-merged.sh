@@ -10,31 +10,70 @@ command -v gh >/dev/null 2>&1 || delivery_fail "gh is required on PATH"
 REPO="$(delivery_root_metadata delivery.repo)"
 PR_NUMBER="$(delivery_root_metadata delivery.pr_number)"
 RECORDED_SHA="$(delivery_root_metadata delivery.merge_sha)"
+RECORDED_HEAD="$(delivery_root_metadata delivery.head_sha)"
+RECORDED_URL="$(delivery_root_metadata delivery.pr_url)"
+BASE_BRANCH="$(delivery_var base_branch '')"
 [ -n "$REPO" ] || delivery_fail "workflow root metadata delivery.repo is missing"
 [ -n "$PR_NUMBER" ] || delivery_fail "workflow root metadata delivery.pr_number is missing"
 [ -n "$RECORDED_SHA" ] || delivery_fail "workflow root metadata delivery.merge_sha is missing"
+[ -n "$RECORDED_HEAD" ] || delivery_fail "workflow root metadata delivery.head_sha is missing"
+[[ "$RECORDED_HEAD" =~ ^[0-9a-f]{40}$ ]] || \
+  delivery_fail "workflow root metadata delivery.head_sha must be a full lowercase 40-hex SHA"
+[ -n "$RECORDED_URL" ] || delivery_fail "workflow root metadata delivery.pr_url is missing"
+[ -n "$BASE_BRANCH" ] || delivery_fail "configured base_branch is required"
+[[ "$RECORDED_SHA" =~ ^[0-9a-f]{40}$ ]] || \
+  delivery_fail "workflow root metadata delivery.merge_sha must be a full lowercase 40-hex SHA"
 
-PR_JSON="$(gh api "repos/$REPO/pulls/$PR_NUMBER")" || delivery_fail "failed to read PR $REPO#$PR_NUMBER"
-RESULT="$(printf '%s' "$PR_JSON" | python3 -c '
+command -v timeout >/dev/null 2>&1 || delivery_fail "timeout is required on PATH"
+PR_JSON="$(timeout --kill-after=5s 30s gh api "repos/$REPO/pulls/$PR_NUMBER")" || delivery_fail "failed to read PR $REPO#$PR_NUMBER"
+if ! RESULT="$(printf '%s' "$PR_JSON" | python3 -c '
 import json
+import re
 import sys
-data = json.load(sys.stdin)
-print("\t".join([
-    str(bool(data.get("merged"))).lower(),
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"PR response is malformed JSON: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit("PR response must be an object")
+merged = data.get("merged")
+if not isinstance(merged, bool):
+    raise SystemExit("PR response has no boolean merged field")
+merge_sha = str(data.get("merge_commit_sha") or "")
+if not re.fullmatch(r"[0-9a-f]{40}", merge_sha):
+    raise SystemExit("PR response has no full lowercase merge SHA")
+print("\x1f".join([
+    str(merged).lower(),
+    str(data.get("state") or ""),
+    str(data.get("merged_at") or ""),
     str(data.get("merge_commit_sha") or ""),
+    str((data.get("head") or {}).get("sha") or ""),
     str((data.get("base") or {}).get("ref") or ""),
+    str(data.get("html_url") or ""),
 ]))
-')"
-IFS=$'\t' read -r MERGED REMOTE_SHA BASE_REF <<<"$RESULT"
+' 2>&1)"; then
+  delivery_fail "$RESULT"
+fi
+IFS=$'\x1f' read -r MERGED STATE MERGED_AT REMOTE_SHA REMOTE_HEAD BASE_REF PR_URL <<<"$RESULT"
 [ "$MERGED" = "true" ] || delivery_fail "PR $REPO#$PR_NUMBER is not merged"
+[ "$STATE" = "closed" ] || delivery_fail "merged PR $REPO#$PR_NUMBER is not closed (state=$STATE)"
+[ -n "$MERGED_AT" ] || delivery_fail "merged PR $REPO#$PR_NUMBER has no merged_at timestamp"
 [ "$REMOTE_SHA" = "$RECORDED_SHA" ] || \
   delivery_fail "recorded merge SHA $RECORDED_SHA does not match GitHub $REMOTE_SHA"
+# A merged PR's remote head is mutable after merge (for example, a branch can
+# be deleted and recreated). The durable merge identity, base, merge SHA, URL,
+# and base reachability above are the recovery contract; only an open PR gate
+# must require equality with its current mutable head.
+[ "$BASE_REF" = "$BASE_BRANCH" ] || \
+  delivery_fail "GitHub PR base $BASE_REF does not match configured base_branch $BASE_BRANCH"
+[ "$PR_URL" = "$RECORDED_URL" ] || \
+  delivery_fail "GitHub PR URL $PR_URL does not match recorded URL $RECORDED_URL"
 
-COMPARE="$(gh api "repos/$REPO/compare/$RECORDED_SHA...$BASE_REF" --jq .status)" || \
-  delivery_fail "could not verify merge SHA reachability from $BASE_REF"
+COMPARE="$(timeout --kill-after=5s 30s gh api "repos/$REPO/compare/$RECORDED_SHA...$BASE_BRANCH" --jq .status)" || \
+  delivery_fail "could not verify merge SHA reachability from configured base_branch $BASE_BRANCH"
 case "$COMPARE" in
   identical|ahead) ;;
-  *) delivery_fail "merge SHA is not reachable from $BASE_REF (compare=$COMPARE)" ;;
+  *) delivery_fail "merge SHA is not reachable from configured base_branch $BASE_BRANCH (compare=$COMPARE)" ;;
 esac
 
-echo "complete-delivery merge verified: $REPO#$PR_NUMBER -> $BASE_REF @ $RECORDED_SHA"
+echo "complete-delivery merge verified: $REPO#$PR_NUMBER -> $BASE_BRANCH @ $RECORDED_SHA"

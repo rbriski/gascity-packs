@@ -1,12 +1,20 @@
 Resolve valid findings from the current-head gate snapshot.
 
+Before reading external evidence, reproducing a finding, or starting any repair,
+run `.gc/scripts/checks/delivery-external-review-deadline.sh --validate`.
+Do not mutate code when it fails.
+
 Read the gate JSON and, before reading the diff, logs, or threads, require a
 clean worktree (`git status --porcelain` empty) and canonical full-SHA
 `HEAD == inspected_head`. If either fails, replace the handoff with blocker-only
 state and restart inspection; do not reproduce, edit, or commit. Then read
-every unresolved thread in full and reproduce each concern. Apply the smallest
-correct fix and focused regression coverage for valid findings. For invalid or
-already superseded findings, respond with concrete evidence.
+every unresolved thread in full and reproduce each concern. When `coderabbit`
+is `off`, ignore bot-only CodeRabbit threads and never ask the provider for a
+new review. Record every disposition before editing, then apply one consolidated
+repair batch containing the smallest correct fixes and focused regression
+coverage for all valid findings. For invalid or already superseded findings,
+respond with concrete evidence. Do not start a second repair batch in this
+Formula cycle.
 
 Keep every thread open while editing and committing. Write the durable handoff
 artifact `<artifact_root>/delivery/external-review-handoff.json` before closing
@@ -17,6 +25,22 @@ non-actionable finding). It must also always name a full-SHA
 use the final committed `HEAD` after every valid source fix in this iteration.
 Never use an individual thread's `fix_commit` as `candidate_commit` when later
 fixes exist.
+
+Immediately before every source-editing repair mutation, run
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate`. If that
+validation fails, write only blocker-only handoff evidence and perform neither
+the source-editing mutation nor any `git commit`. Separately, immediately before
+each `git commit`, run the same validation again. If it fails, write only
+blocker-only handoff evidence and perform neither that commit nor any further
+source-editing mutation.
+
+Immediately after the final repair commit, run
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate` again, and
+run it once more immediately before persisting successful handoff evidence. If
+either post-commit validation fails, replace the handoff with blocker-only state:
+persist no successful identity, candidate, disposition, fix-commit,
+tested-commit, publication, or equality evidence, and make no further
+source-editing mutation or commit.
 
 Before every resolution attempt, replace the entire handoff object rather than
 clearing selected fields. A successful object contains only this attempt's

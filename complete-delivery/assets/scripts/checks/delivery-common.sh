@@ -32,7 +32,7 @@ delivery_read_bead_json() {
   local bead_id="$1"
   local attempt=1
   local max_attempts=3
-  local output
+  local output status
   local diagnostic_file
   local -a diagnostics=()
 
@@ -42,10 +42,38 @@ delivery_read_bead_json() {
   # deliberately small and bounded: callers still fail closed after three
   # unsuccessful read-only attempts.
   while [ "$attempt" -le "$max_attempts" ]; do
-    if output="$(gc bd show "$bead_id" --json 2>"$diagnostic_file")"; then
+    if [ -n "${DELIVERY_GC_TIMEOUT:-}" ]; then
+      command -v timeout >/dev/null 2>&1 || {
+        echo "complete-delivery-check: timeout is required for bounded gc bd show" >&2
+        rm -f "$diagnostic_file"
+        return 1
+      }
+      if output="$(timeout --signal=KILL "$DELIVERY_GC_TIMEOUT" gc bd show "$bead_id" --json 2>"$diagnostic_file")"; then
+        status=0
+      else
+        status=$?
+      fi
+    else
+      if output="$(gc bd show "$bead_id" --json 2>"$diagnostic_file")"; then
+        status=0
+      else
+        status=$?
+      fi
+    fi
+    if [ "$status" -eq 0 ]; then
       rm -f "$diagnostic_file"
       printf '%s' "$output"
       return 0
+    fi
+
+    # A timeout is a fail-closed condition, not a transient Dolt failure to
+    # retry: another attempt would extend the caller's declared time budget.
+    if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+      # The timeout's stderr is the only useful diagnostic for a bounded read;
+      # retain it while removing the temporary file before returning failure.
+      [ -s "$diagnostic_file" ] && cat "$diagnostic_file" >&2
+      rm -f "$diagnostic_file"
+      return 1
     fi
 
     diagnostics+=("$(<"$diagnostic_file")")

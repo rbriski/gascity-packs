@@ -1,14 +1,29 @@
-Run one bounded current-head external-review iteration.
+Run one bounded frozen-head review and repair cycle.
 
-The children inspect evidence, resolve valid findings, rerun exact local gates,
-publish fixes, and update the living report. The loop check then evaluates
-required CI, CodeRabbit completion, all live unresolved review threads, human
-change requests, PR/draft state, and head stability.
+Before admitting any child action or running the terminal check, require
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate`.
+The terminal checker independently repeats this validation before its provider
+action; no expired or rewritten deadline may authorize another iteration.
+
+Immediately before every source-editing repair mutation and every commit, run
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate` again.
+Earlier iteration or evidence validation does not authorize a later edit or
+commit after the immutable deadline has elapsed.
+
+The children freeze the candidate head, gather every current finding, apply at
+most one consolidated repair batch, rerun exact local gates, publish fixes, and
+update the living report. The loop check then evaluates required CI, all live
+unresolved human review threads, human change requests, PR/draft state, and head
+stability. When `coderabbit` is `off`, do not request, poll, wait for, or block
+on CodeRabbit. Explicit `optional` or `required` configuration evaluates it as
+configured.
 
 Keep the child report pre-terminal: it must leave `external-review` `active`
-and must not publish `passed` or a protected-merge next action. Only this
-terminal mechanical check, followed by the post-check `{target}.md` finalizer,
-may authorize that passed report and protected-merge publication.
+and must not publish `passed` or a protected-merge next action. This terminal
+mechanical check records only current-head gate evidence; it does not authorize
+the passing report, protected merge, or report publication. After the expansion
+finishes, top-level `complete-delivery/report-green.md` is the sole authority
+for those actions.
 
 Never weaken a gate or resolve a thread unless the durable handoff proves
 `published_head` is exactly equal to `tested_commit`; commit containment or a

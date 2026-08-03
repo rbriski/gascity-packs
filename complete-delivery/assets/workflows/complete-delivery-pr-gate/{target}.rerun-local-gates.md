@@ -1,5 +1,10 @@
 Rerun the repository-native quality gates after review resolution.
 
+Immediately before every source edit, every local-gate-script invocation, and
+every commit, run `.gc/scripts/checks/delivery-external-review-deadline.sh
+--validate`. A prior attempt or gate validation does not authorize a later edit,
+script invocation, or commit. Do not repair or test when it fails.
+
 Read `<artifact_root>/delivery/external-review-handoff.json` and, before every
 test attempt, clear prior `tested_commit`, `local_gates`, `published_head`, and
 `published_head_matches_tested_commit` success evidence. Require a clean
@@ -8,8 +13,11 @@ that `HEAD` is its exact full-SHA `candidate_commit` before testing. The
 resolver must set that candidate to `inspected_head` when no source changed, or
 to the final committed `HEAD` after every valid source fix in the iteration
 otherwise; individual thread `fix_commit` values remain thread evidence, not
-the test candidate. Permit at most three complete regression-repair-and-rerun attempts per Formula iteration: count each regression repair, commit and record it as the new
-`candidate_commit`, then rerun the complete sequence from the start. If a fourth repair is required, stop committing, replace the entire handoff with blocker-only retry-exhausted evidence containing no authority fields,
+the test candidate. Permit at most one complete regression-repair-and-rerun
+attempt per Formula iteration: count that regression repair, commit and record
+it as the new `candidate_commit`, then rerun the complete sequence from the
+start. If a second repair is required, stop committing, replace the entire
+handoff with blocker-only retry-exhausted evidence containing no authority fields,
 and close with a non-pass outcome. Invoke
 `{{pack_root}}/assets/scripts/checks/delivery-local-gates.sh` with this claimed
 bead as `GC_BEAD_ID`. The complete nonterminal local-gate set is the configured
@@ -34,7 +42,18 @@ any new regression and repeat until every configured command passes. Repository
 gate configuration is trusted policy; the restricted argv boundary prevents it
 from being interpreted as shell source. After every configured command passes, require the checkout to
 remain clean and `HEAD` to still equal `candidate_commit`; otherwise do not
-record passing evidence. Then record `candidate_commit` as a full-SHA
+record passing evidence. Immediately after all local gates pass and before
+recording any success evidence, run
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate` again.
+Immediately after that final deadline validation and before atomically writing
+any passing authority, repeat the clean-tree check and verify `HEAD` still
+exactly equals `candidate_commit`. If either check fails, erase `tested_commit`,
+`local_gates`, `published_head`, and `published_head_matches_tested_commit`,
+write blocker-only evidence, and do not return a local-gates pass. If the
+immutable deadline expired during local gates, erase `tested_commit`,
+`local_gates`, `published_head`, and `published_head_matches_tested_commit`,
+write blocker-only expiry evidence, and do not return a local-gates pass. Then
+record `candidate_commit` as a full-SHA
 `tested_commit`, matching `local_gates.tested_commit`, and
 `local_gates.status: "passed"` in the same durable handoff artifact. A failed,
 blocked, skipped, unavailable, or mismatched local gate must leave all of those

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Fail-closed GitHub delivery gate for a pull request's current head.
 
-The gate combines repository-required CI, CodeRabbit completion, unresolved
-review threads, and outstanding human change requests.  It never trusts a
-result from an older head SHA.  The CLI emits one JSON document and exits 0
-only when every configured condition passes.
+The gate combines repository-required CI, unresolved review threads,
+outstanding human change requests, and optional CodeRabbit evidence. It never
+trusts a result from an older head SHA. The CLI emits one JSON document and
+exits 0 only when every configured condition passes.
 """
 
 from __future__ import annotations
@@ -624,7 +624,7 @@ def evaluate(
     repo: str,
     pr_number: int,
     required_checks: str = "auto",
-    coderabbit_mode: str = "required",
+    coderabbit_mode: str = "off",
     allow_no_ci: bool = False,
 ) -> dict[str, Any]:
     if "/" not in repo:
@@ -779,7 +779,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--coderabbit",
         choices=("required", "optional", "off"),
-        default="required",
+        default="off",
     )
     parser.add_argument("--allow-no-ci", action="store_true")
     parser.add_argument("--fixture", type=Path, help="Offline JSON fixture")

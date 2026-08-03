@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=delivery-common.sh
 source "$SCRIPT_DIR/delivery-common.sh"
 delivery_initialize_context
+"$SCRIPT_DIR/delivery-external-review-deadline.sh" --validate
 
 REPO="$(delivery_root_metadata delivery.repo)"
 PR_NUMBER="$(delivery_root_metadata delivery.pr_number)"
@@ -12,7 +13,7 @@ PR_NUMBER="$(delivery_root_metadata delivery.pr_number)"
 [ -n "$PR_NUMBER" ] || delivery_fail "workflow root metadata delivery.pr_number is missing"
 
 REQUIRED_CHECKS="$(delivery_var required_checks auto)"
-CODERABBIT="$(delivery_var coderabbit required)"
+CODERABBIT="$(delivery_var coderabbit off)"
 ALLOW_NO_CI="$(delivery_var allow_no_ci false)"
 ARTIFACT_ROOT="$(delivery_var artifact_root "")"
 [ -n "$ARTIFACT_ROOT" ] || delivery_fail "gc.var.artifact_root is missing"
@@ -37,9 +38,9 @@ if not isinstance(handoff, dict):
     raise SystemExit("external-review handoff must be an object")
 
 def canonical_full_sha(value, field):
-    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", value):
-        raise SystemExit(f"external-review handoff does not prove a full {field}")
-    return value.lower()
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise SystemExit(f"external-review handoff does not prove a canonical full lowercase {field}")
+    return value
 
 candidate_commit = canonical_full_sha(handoff.get("candidate_commit"), "candidate_commit")
 tested_commit = canonical_full_sha(handoff.get("tested_commit"), "tested_commit")
@@ -95,8 +96,8 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 if report.get("passed") is not True:
     raise SystemExit("delivery_gate.py did not report a passing gate")
 head_sha = report.get("head_sha")
-if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
-    raise SystemExit("delivery_gate.py did not report a full head SHA")
-if head_sha.lower() != sys.argv[2].lower():
+if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+    raise SystemExit("delivery_gate.py did not report a full lowercase head SHA")
+if head_sha != sys.argv[2]:
     raise SystemExit("delivery_gate.py evaluated a head other than the tested commit")
 PY
