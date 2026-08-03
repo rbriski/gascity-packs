@@ -180,7 +180,7 @@ delivery_run_bounded_command() {
 delivery_run_deploy_command() {
   local artifact_root delivery_dir evidence_path evidence_tmp stdout_path stderr_path stdout_tmp stderr_tmp
   local status_dir status_marker command_label child_status wrapper_status outcome deploy_status
-  local previous_status previous_sha
+  local previous_status previous_sha current_merge_sha claim_key deployment_claim
 
   MERGE_SHA="$(delivery_root_metadata delivery.merge_sha)"
   DEPLOY_COMMAND="$(delivery_var deploy_command '')"
@@ -201,15 +201,42 @@ delivery_run_deploy_command() {
   [ -n "$artifact_root" ] || delivery_fail "gc.var.artifact_root is missing"
   command -v timeout >/dev/null 2>&1 || delivery_fail "timeout is required on PATH"
 
-  previous_status="$(delivery_root_metadata delivery.deploy_status)"
-  previous_sha="$(delivery_root_metadata delivery.deploy_merge_sha)"
-  if [ "$previous_sha" = "$MERGE_SHA" ] && [ -n "$previous_status" ]; then
-    delivery_fail "deploy_command already ran for $MERGE_SHA; exact-once deployment forbids a rerun"
-  fi
-
   artifact_root="$(delivery_resolve_contained_path "$artifact_root" "artifact_root")"
   mkdir -p "$artifact_root/delivery" || delivery_fail "failed to create deployment evidence directory"
   delivery_dir="$(delivery_resolve_contained_path "$artifact_root/delivery" "deployment evidence directory")"
+
+  # mkdir is an atomic, portable claim.  It is keyed by both the workflow
+  # root and merge SHA, so independent roots sharing an artifact directory do
+  # not contend, while retries for the same deployment fail closed.
+  claim_key="$(delivery_value_sha256 "$DELIVERY_ROOT_ID:$MERGE_SHA")" || \
+    delivery_fail "failed to derive deployment execution claim key"
+  deployment_claim="$delivery_dir/deploy-command-claim-$claim_key"
+  if ! mkdir "$deployment_claim"; then
+    if [ -d "$deployment_claim" ] || [ -L "$deployment_claim" ]; then
+      delivery_fail "deployment execution claim already exists for $MERGE_SHA; refusing a possible crash-residue replay"
+    fi
+    delivery_fail "failed to acquire deployment execution claim for $MERGE_SHA"
+  fi
+
+  # The initial root snapshot may predate another contender's started guard.
+  # Re-read only after acquiring the claim, then keep any residue fail closed.
+  DELIVERY_ROOT_JSON="$(delivery_read_bead_json "$DELIVERY_ROOT_ID")" || \
+    delivery_fail "failed to re-read deployment metadata after acquiring execution claim"
+  delivery_json_is_valid "$DELIVERY_ROOT_JSON" || \
+    delivery_fail "re-read deployment metadata after acquiring execution claim is invalid JSON"
+  current_merge_sha="$(delivery_root_metadata delivery.merge_sha)"
+  [ "$current_merge_sha" = "$MERGE_SHA" ] || \
+    delivery_fail "delivery.merge_sha changed while acquiring deployment execution claim"
+  previous_status="$(delivery_root_metadata delivery.deploy_status)"
+  previous_sha="$(delivery_root_metadata delivery.deploy_merge_sha)"
+  if [ "$previous_sha" = "$MERGE_SHA" ] && [ -n "$previous_status" ]; then
+    # This process created the claim after an already durable guard.  It is
+    # safe to release its own claim before reporting the replay rejection.
+    rmdir "$deployment_claim" || \
+      delivery_fail "failed to release deployment execution claim after reading durable started state"
+    delivery_fail "deploy_command already ran for $MERGE_SHA; exact-once deployment forbids a rerun"
+  fi
+
   evidence_path="$delivery_dir/deploy.log"
   stdout_path="$delivery_dir/deploy.stdout.log"
   stderr_path="$delivery_dir/deploy.stderr.log"
@@ -225,6 +252,8 @@ delivery_run_deploy_command() {
     --set-metadata "delivery.deploy_merge_sha=$MERGE_SHA" \
     --set-metadata "delivery.deploy_status=started" || \
     delivery_fail "failed to atomically record deployment execution-started guard"
+  rmdir "$deployment_claim" || \
+    delivery_fail "failed to release deployment execution claim after recording started guard"
 
   evidence_tmp="$(mktemp "$delivery_dir/deploy.log.tmp.XXXXXX")" || \
     delivery_fail "failed to create deployment evidence file"

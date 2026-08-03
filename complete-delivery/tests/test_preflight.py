@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 
@@ -1200,10 +1201,26 @@ class PreflightTests(unittest.TestCase):
                 "  if [ \"${FAKE_GC_FAIL_FINAL_UPDATE:-}\" = true ] && printf '%s\\n' \"$*\" | grep -Fq 'delivery.deploy_evidence_path='; then\n"
                 "    exit 1\n"
                 "  fi\n"
+                "  if [ -n \"${FAKE_GC_ROOT_STATE:-}\" ] && printf '%s\\n' \"$*\" | grep -Fq 'delivery.deploy_status=started'; then\n"
+                "    python3 - \"$FAKE_GC_ROOT_STATE\" <<'PY'\n"
+                "import json\n"
+                "import pathlib\n"
+                "import sys\n"
+                "\n"
+                "path = pathlib.Path(sys.argv[1])\n"
+                "payload = json.loads(path.read_text(encoding='utf-8'))\n"
+                "payload[0]['metadata']['delivery.deploy_status'] = 'started'\n"
+                "path.write_text(json.dumps(payload), encoding='utf-8')\n"
+                "PY\n"
+                "  fi\n"
+                "  if [ -n \"${FAKE_GC_STARTED_UPDATE_DELAY:-}\" ] && printf '%s\\n' \"$*\" | grep -Fq 'delivery.deploy_status=started'; then\n"
+                "    [ -z \"${FAKE_GC_STARTED_UPDATE_SIGNAL:-}\" ] || : > \"$FAKE_GC_STARTED_UPDATE_SIGNAL\"\n"
+                "    sleep \"$FAKE_GC_STARTED_UPDATE_DELAY\"\n"
+                "  fi\n"
                 "  exit 0\n"
                 "fi\n"
                 "if [ \"${3:-}\" = root-1 ]; then\n"
-                "  printf '%s\\n' \"$FAKE_GC_ROOT_JSON\"\n"
+                "  if [ -n \"${FAKE_GC_ROOT_STATE:-}\" ]; then cat \"$FAKE_GC_ROOT_STATE\"; else printf '%s\\n' \"$FAKE_GC_ROOT_JSON\"; fi\n"
                 "else\n"
                 "  printf '%s\\n' \"$FAKE_GC_STEP_JSON\"\n"
                 "fi\n",
@@ -1366,7 +1383,10 @@ class PreflightTests(unittest.TestCase):
                 delivery_dir = repository / "artifacts" / "delivery"
                 if delivery_dir.exists():
                     for path in delivery_dir.iterdir():
-                        path.unlink()
+                        if path.is_dir():
+                            shutil.rmtree(path)
+                        else:
+                            path.unlink()
                 if marker.exists():
                     marker.unlink()
                 if updates.exists():
@@ -1388,6 +1408,15 @@ class PreflightTests(unittest.TestCase):
                     )
                     return result, ""
                 return result, evidence.read_text(encoding="utf-8")
+
+            def clear_delivery_dir() -> None:
+                delivery_dir = repository / "artifacts" / "delivery"
+                if delivery_dir.exists():
+                    for path in delivery_dir.iterdir():
+                        if path.is_dir():
+                            shutil.rmtree(path)
+                        else:
+                            path.unlink()
 
             success_command = 'printf "%s\\n" "$DELIVERY_SHA" >> "$COMMAND_MARKER"'
             succeeded, evidence = run_deploy(success_command)
@@ -1421,8 +1450,7 @@ class PreflightTests(unittest.TestCase):
             deploy_log = delivery_dir / "deploy.log"
             stdout = delivery_dir / "deploy.stdout.log"
             stderr = delivery_dir / "deploy.stderr.log"
-            for path in delivery_dir.iterdir():
-                path.unlink()
+            clear_delivery_dir()
             for status in ("started", "deployed", "failed", "verified"):
                 with self.subTest(existing_deploy_status=status):
                     if marker.exists():
@@ -1443,12 +1471,71 @@ class PreflightTests(unittest.TestCase):
                     self.assertIn("exact-once deployment forbids a rerun", repeated.stderr)
                     self.assertFalse(marker.exists())
 
+            clear_delivery_dir()
+
+            claim_key = hashlib.sha256(f"root-1:{merge_sha}".encode()).hexdigest()
+            stale_claim = delivery_dir / f"deploy-command-claim-{claim_key}"
+            stale_claim.mkdir()
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
+                **base_metadata,
+                "gc.var.deploy_command": success_command,
+            }}])
+            stale = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(stale.returncode, 1)
+            self.assertIn("deployment execution claim already exists", stale.stderr)
+            self.assertFalse(marker.exists())
+            stale_claim.rmdir()
+
+            root_state = root / "root-state.json"
+            root_state.write_text(
+                json.dumps([{"metadata": {
+                    **base_metadata,
+                    "gc.var.deploy_command": success_command,
+                }}]),
+                encoding="utf-8",
+            )
+            environment["FAKE_GC_ROOT_STATE"] = str(root_state)
+            started_update_signal = root / "started-update"
+            environment["FAKE_GC_STARTED_UPDATE_SIGNAL"] = str(started_update_signal)
+            environment["FAKE_GC_STARTED_UPDATE_DELAY"] = "2"
+            first = subprocess.Popen(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=environment,
+            )
+            for _ in range(100):
+                if started_update_signal.exists():
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("first deploy check did not reach the guarded started update")
+            second = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            first_stdout, first_stderr = first.communicate(timeout=5)
+            self.assertEqual(first.returncode, 0, first_stdout + first_stderr)
+            self.assertEqual(second.returncode, 1)
+            self.assertIn("deployment execution claim already exists", second.stderr)
+            self.assertEqual(marker.read_text(encoding="utf-8"), f"{merge_sha}\n")
+            environment.pop("FAKE_GC_ROOT_STATE")
+            environment.pop("FAKE_GC_STARTED_UPDATE_SIGNAL")
+            environment.pop("FAKE_GC_STARTED_UPDATE_DELAY")
+
             for capture_name in ("deploy.log", "deploy.stdout.log", "deploy.stderr.log"):
                 with self.subTest(existing_final_capture=capture_name):
                     if marker.exists():
                         marker.unlink()
-                    for path in delivery_dir.iterdir():
-                        path.unlink()
+                    clear_delivery_dir()
                     (delivery_dir / capture_name).write_text("partial evidence\n", encoding="utf-8")
                     environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
                         **base_metadata,
@@ -1464,8 +1551,7 @@ class PreflightTests(unittest.TestCase):
                     self.assertIn("deploy evidence or capture already exists", repeated.stderr)
                     self.assertFalse(marker.exists())
 
-            for path in delivery_dir.iterdir():
-                path.unlink()
+            clear_delivery_dir()
             if marker.exists():
                 marker.unlink()
             environment["FAKE_GC_FAIL_STARTED_UPDATE"] = "true"
@@ -1482,7 +1568,8 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(guard_failure.returncode, 1)
             self.assertIn("failed to atomically record deployment execution-started guard", guard_failure.stderr)
             self.assertFalse(marker.exists())
-            self.assertFalse(any(delivery_dir.iterdir()))
+            self.assertTrue(any(delivery_dir.iterdir()))
+            clear_delivery_dir()
             environment.pop("FAKE_GC_FAIL_STARTED_UPDATE")
 
             # Each publication boundary must clean up all final evidence after
@@ -1493,8 +1580,7 @@ class PreflightTests(unittest.TestCase):
                 ("deploy evidence", "deploy.log"),
             ):
                 with self.subTest(publication_failure=failure_name):
-                    for path in delivery_dir.iterdir():
-                        path.unlink()
+                    clear_delivery_dir()
                     if marker.exists():
                         marker.unlink()
                     if updates.exists():
@@ -1552,8 +1638,7 @@ class PreflightTests(unittest.TestCase):
                     )
 
             with self.subTest(publication_failure="final metadata update"):
-                for path in delivery_dir.iterdir():
-                    path.unlink()
+                clear_delivery_dir()
                 if marker.exists():
                     marker.unlink()
                 if updates.exists():
