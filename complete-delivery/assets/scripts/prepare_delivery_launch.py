@@ -682,6 +682,11 @@ def preflight_materialization(
     for relative in sorted(prior_assets - set(planned_sources)):
         destination = rig_root / relative
         ensure_regular_untracked_destination(rig_root, destination, relative)
+        # Record the complete authenticated stale inventory, including assets
+        # already absent when this attempt starts.  A retry must be able to
+        # distinguish a previously removed managed asset from a journal that
+        # was edited to omit a cleanup target.
+        stale_paths.append(destination)
         if not destination.exists():
             continue
         expected = prior_hashes.get(relative)
@@ -694,7 +699,6 @@ def preflight_materialization(
             expected = asset_digest(source)
         if asset_digest(destination) != expected:
             raise LaunchPreflightError(f"stale managed asset {relative} was modified after installation")
-        stale_paths.append(destination)
     return desired_hashes, stale_paths
 
 
@@ -768,6 +772,22 @@ def apply_materialization(
     atomic_write_text(manifest_path, manifest_content, rig_root, MANIFEST_NAME)
 
 
+def verify_materialization_postcondition(
+    plan: list[tuple[Path, Path, str]],
+    stale_paths: list[Path],
+    manifest_path: Path,
+    desired_hashes: dict[str, str],
+    expected_manifest: str,
+) -> None:
+    """Require the complete managed inventory before deleting its journal."""
+
+    expected_states = {relative: digest for relative, digest in desired_hashes.items()}
+    expected_states.update({str(path): None for path in stale_paths})
+    expected_states[MANIFEST_NAME] = expected_manifest
+    if transaction_states(plan, stale_paths, manifest_path) != expected_states:
+        raise LaunchPreflightError("completed managed asset transaction has unexpected file contents")
+
+
 def recover_interrupted_materialization(
     pack_root: Path, rig_root: Path, plan: list[tuple[Path, Path, str]]
 ) -> None:
@@ -788,10 +808,16 @@ def recover_interrupted_materialization(
     installed = [relative for _, _, relative in plan]
     manifest_content = serialized_manifest(installed, desired_hashes)
     expected_new_manifest = f"sha256:{hashlib.sha256(manifest_content.encode()).hexdigest()}"
-    stale_paths = [rig_root / relative for relative in transaction["stale_paths"]]
-    if any(not isinstance(relative, str) or Path(relative).is_absolute() or ".." in Path(relative).parts
-           for relative in transaction["stale_paths"]):
+    stale_relatives = transaction["stale_paths"]
+    if any(
+        not isinstance(relative, str)
+        or not relative
+        or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+        for relative in stale_relatives
+    ):
         raise LaunchPreflightError("managed asset transaction journal has unsafe stale paths")
+    stale_paths = [rig_root / relative for relative in stale_relatives]
     for _, destination, relative in plan:
         ensure_regular_untracked_destination(rig_root, destination, relative)
     for stale_path in stale_paths:
@@ -800,19 +826,20 @@ def recover_interrupted_materialization(
     current_manifest = path_digest(manifest_path)
 
     if current_manifest == expected_new_manifest:
-        expected_states = {relative: digest for relative, digest in desired_hashes.items()}
-        expected_states.update({str(path): None for path in stale_paths})
-        if transaction_states(plan, stale_paths, manifest_path) != {
-            **expected_states,
-            MANIFEST_NAME: expected_new_manifest,
-        }:
-            raise LaunchPreflightError("completed managed asset transaction has unexpected file contents")
+        verify_materialization_postcondition(
+            plan, stale_paths, manifest_path, desired_hashes, expected_new_manifest
+        )
         transaction_path(rig_root).unlink()
         return
 
     prior = load_prior_manifest(rig_root)
     prior_hashes = prior["asset_hashes"] if prior else {}
     prior_assets = prior["assets"] if prior else set()
+    expected_stale_relatives = sorted(prior_assets - set(desired_hashes))
+    if stale_relatives != expected_stale_relatives:
+        raise LaunchPreflightError(
+            "managed asset transaction stale paths do not match the authenticated prior inventory"
+        )
     authorized_prior_states = {
         relative: prior_hashes.get(relative) if relative in prior_assets else None
         for _, _, relative in plan
@@ -821,7 +848,23 @@ def recover_interrupted_materialization(
         {str(path): prior_hashes.get(str(path.relative_to(rig_root))) for path in stale_paths}
     )
     authorized_prior_states[MANIFEST_NAME] = current_manifest
-    if transaction["prior_states"] != authorized_prior_states:
+    transaction_prior_states = transaction["prior_states"]
+    if set(transaction_prior_states) != set(authorized_prior_states):
+        raise LaunchPreflightError("managed asset transaction does not match the authenticated prior inventory")
+
+    # A stale managed asset may already have been absent when the journal was
+    # written, or may have been unlinked before an interrupted retry.  Both
+    # states are safe, but a journal may never authorize any third digest.
+    for stale_path in stale_paths:
+        key = str(stale_path)
+        if transaction_prior_states[key] not in (authorized_prior_states[key], None):
+            raise LaunchPreflightError(
+                "managed asset transaction does not match the authenticated prior inventory"
+            )
+    for _, _, relative in plan:
+        if transaction_prior_states[relative] != authorized_prior_states[relative]:
+            raise LaunchPreflightError("managed asset transaction does not match the authenticated prior inventory")
+    if transaction_prior_states[MANIFEST_NAME] != authorized_prior_states[MANIFEST_NAME]:
         raise LaunchPreflightError("managed asset transaction does not match the authenticated prior inventory")
 
     current_states = transaction_states(plan, stale_paths, manifest_path)
@@ -830,11 +873,14 @@ def recover_interrupted_materialization(
             raise LaunchPreflightError(f"interrupted managed asset transaction found modified asset {relative}")
     for stale_path in stale_paths:
         key = str(stale_path)
-        if current_states[key] not in (authorized_prior_states[key], None):
+        if current_states[key] not in (transaction_prior_states[key], None):
             raise LaunchPreflightError(f"interrupted managed asset transaction found modified stale asset {key}")
     if current_states[MANIFEST_NAME] != authorized_prior_states[MANIFEST_NAME]:
         raise LaunchPreflightError("interrupted managed asset transaction found a modified manifest")
     apply_materialization(plan, stale_paths, manifest_path, manifest_content, rig_root)
+    verify_materialization_postcondition(
+        plan, stale_paths, manifest_path, desired_hashes, expected_new_manifest
+    )
     transaction_path(rig_root).unlink()
 
 
@@ -895,6 +941,10 @@ def materialize_assets(pack_root: Path, rig_root: Path) -> list[str]:
         TRANSACTION_NAME,
     )
     apply_materialization(plan, stale_paths, manifest_path, manifest_content, rig_root)
+    expected_manifest = f"sha256:{hashlib.sha256(manifest_content.encode()).hexdigest()}"
+    verify_materialization_postcondition(
+        plan, stale_paths, manifest_path, desired_hashes, expected_manifest
+    )
     transaction_path(rig_root).unlink()
     return installed
 

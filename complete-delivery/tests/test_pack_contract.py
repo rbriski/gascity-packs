@@ -1038,6 +1038,70 @@ class MaterializationRecoveryTests(unittest.TestCase):
             prepare_delivery.materialize_assets(PACK_ROOT, completed_rig)
             self.assertFalse((completed_rig / ".gc" / prepare_delivery.TRANSACTION_NAME).exists())
 
+    def test_recovery_rejects_tampered_or_malformed_stale_path_journals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+
+            tampered_rig = self.make_rig(root / "tampered-stale-path")
+            self.install_real_v1_inventory(tampered_rig)
+
+            with mock.patch.object(
+                prepare_delivery, "atomic_copy", side_effect=OSError("injected copy failure")
+            ):
+                with self.assertRaises(OSError):
+                    prepare_delivery.materialize_assets(PACK_ROOT, tampered_rig)
+
+            journal_path = tampered_rig / ".gc" / prepare_delivery.TRANSACTION_NAME
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            desired_relative = ".gc/scripts/checks/delivery-preflight.sh"
+            desired_path = tampered_rig / desired_relative
+            before = desired_path.read_bytes()
+            journal["stale_paths"].append(desired_relative)
+            # This matches the desired path's original state, as an attacker
+            # would need to do to satisfy the old per-path state check.
+            journal["prior_states"][str(desired_path)] = journal["prior_states"][desired_relative]
+            journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+            with self.assertRaisesRegex(prepare_delivery.LaunchPreflightError, "stale paths"):
+                prepare_delivery.materialize_assets(PACK_ROOT, tampered_rig)
+            self.assertEqual(desired_path.read_bytes(), before)
+            self.assertTrue(journal_path.exists())
+
+            malformed_rig = self.make_rig(root / "malformed-stale-path")
+            self.install_real_v1_inventory(malformed_rig)
+            with mock.patch.object(
+                prepare_delivery, "atomic_copy", side_effect=OSError("injected copy failure")
+            ):
+                with self.assertRaises(OSError):
+                    prepare_delivery.materialize_assets(PACK_ROOT, malformed_rig)
+            malformed_journal_path = malformed_rig / ".gc" / prepare_delivery.TRANSACTION_NAME
+            malformed_journal = json.loads(malformed_journal_path.read_text(encoding="utf-8"))
+            malformed_journal["stale_paths"] = [42]
+            malformed_journal_path.write_text(json.dumps(malformed_journal), encoding="utf-8")
+
+            with self.assertRaisesRegex(prepare_delivery.LaunchPreflightError, "unsafe stale paths"):
+                prepare_delivery.materialize_assets(PACK_ROOT, malformed_rig)
+
+    def test_recovery_allows_initially_absent_authenticated_stale_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rig = self.make_rig(pathlib.Path(directory))
+            self.install_real_v1_inventory(rig)
+            missing_relative = "schemas/build/requirements.v1.yaml"
+            (rig / missing_relative).unlink()
+
+            with mock.patch.object(
+                prepare_delivery, "atomic_copy", side_effect=OSError("injected copy failure")
+            ):
+                with self.assertRaises(OSError):
+                    prepare_delivery.materialize_assets(PACK_ROOT, rig)
+
+            journal = json.loads(
+                (rig / ".gc" / prepare_delivery.TRANSACTION_NAME).read_text(encoding="utf-8")
+            )
+            self.assertIn(missing_relative, journal["stale_paths"])
+            prepare_delivery.materialize_assets(PACK_ROOT, rig)
+            self.assertFalse((rig / missing_relative).exists())
+
 
 class ReportSecurityContractTests(unittest.TestCase):
     SOURCE_ID = "fi-123"
