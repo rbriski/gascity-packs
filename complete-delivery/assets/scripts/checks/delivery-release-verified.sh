@@ -414,17 +414,21 @@ PY
 
 delivery_recover_command_deploy() {
   local deployment_claim="$1" claim_key="$2"
-  local previous_status previous_sha invocation_id evidence_path stdout_path stderr_path
+  local previous_status previous_sha invocation_id lease_id evidence_path stdout_path stderr_path
   local command_label recorded_label recorded_timeout recorded_outcome recorded_child recorded_wrapper
 
   previous_status="$(delivery_root_metadata delivery.deploy_status)"
   previous_sha="$(delivery_root_metadata delivery.deploy_merge_sha)"
   invocation_id="$(delivery_root_metadata delivery.deploy_invocation_id)"
+  lease_id="$(delivery_root_metadata delivery.deploy_lease_id)"
   [ "$previous_sha" = "$MERGE_SHA" ] && [ -n "$previous_status" ] || return 1
 
   # A completed command may be recovered only from same-SHA, complete evidence.
-  # Anything less could be a crash after a non-idempotent command began.
-  if [ "$previous_status" = "deployed" ]; then
+  # The durable invocation and lease must already bind this exact root/SHA
+  # claim.  Never synthesize a binding while recovering: anything less could
+  # be a crash after a non-idempotent command began under another invocation.
+  if [ "$previous_status" = "deployed" ] && \
+    [ "$invocation_id" = "$claim_key" ] && [ "$lease_id" = "$claim_key" ]; then
     evidence_path="$(delivery_root_metadata delivery.deploy_evidence_path)"
     stdout_path="$(delivery_root_metadata delivery.deploy_stdout_path)"
     stderr_path="$(delivery_root_metadata delivery.deploy_stderr_path)"
@@ -441,8 +445,6 @@ delivery_recover_command_deploy() {
       delivery_validate_command_deploy_evidence "$evidence_path" "$command_label" "$DEPLOY_TIMEOUT" \
         "$MERGE_SHA" "$stdout_path" "$stderr_path"; then
       gc bd update "$DELIVERY_ROOT_ID" \
-        --set-metadata "delivery.deploy_invocation_id=${invocation_id:-$claim_key}" \
-        --set-metadata "delivery.deploy_lease_id=$claim_key" \
         --set-metadata "delivery.deploy_recovery_state=reconciled_completed" || \
         delivery_fail "failed to record reconciled deployment recovery"
       rmdir "$deployment_claim" || \
@@ -453,8 +455,6 @@ delivery_recover_command_deploy() {
   fi
 
   gc bd update "$DELIVERY_ROOT_ID" \
-    --set-metadata "delivery.deploy_invocation_id=${invocation_id:-$claim_key}" \
-    --set-metadata "delivery.deploy_lease_id=$claim_key" \
     --set-metadata "delivery.deploy_recovery_state=blocked_unknown_execution" || \
     delivery_fail "failed to record blocked deployment recovery"
   rmdir "$deployment_claim" || \

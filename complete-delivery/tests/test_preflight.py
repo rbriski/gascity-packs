@@ -1450,11 +1450,14 @@ class PreflightTests(unittest.TestCase):
 
             delivery_dir = repository / "artifacts" / "delivery"
             command_label = "sha256:" + hashlib.sha256(success_command.encode()).hexdigest()
-            environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
+            claim_key = hashlib.sha256(f"root-1:{merge_sha}".encode()).hexdigest()
+            completed_recovery_metadata = {
                 **base_metadata,
                 "gc.var.deploy_command": success_command,
                 "delivery.deploy_status": "deployed",
                 "delivery.deploy_merge_sha": merge_sha,
+                "delivery.deploy_invocation_id": claim_key,
+                "delivery.deploy_lease_id": claim_key,
                 "delivery.deploy_evidence_path": str(delivery_dir / "deploy.log"),
                 "delivery.deploy_stdout_path": str(delivery_dir / "deploy.stdout.log"),
                 "delivery.deploy_stderr_path": str(delivery_dir / "deploy.stderr.log"),
@@ -1463,7 +1466,8 @@ class PreflightTests(unittest.TestCase):
                 "delivery.deploy_outcome": "passed",
                 "delivery.deploy_child_status": "0",
                 "delivery.deploy_wrapper_status": "0",
-            }}])
+            }
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": completed_recovery_metadata}])
             recovered = subprocess.run(
                 ["bash", str(RELEASE_VERIFIED_SCRIPT)],
                 capture_output=True,
@@ -1473,6 +1477,53 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(recovered.returncode, 0, recovered.stderr)
             self.assertIn("recovered completed deploy command", recovered.stdout)
             self.assertEqual(marker.read_text(encoding="utf-8"), f"{merge_sha}\n")
+
+            alternate_claim_key = hashlib.sha256(
+                f"root-1:{'0' * 40}".encode()
+            ).hexdigest()
+            stale_claim_key = hashlib.sha256(
+                f"previous-root:{merge_sha}".encode()
+            ).hexdigest()
+            for binding_name, binding_changes in (
+                ("missing invocation", {"delivery.deploy_invocation_id": None}),
+                ("missing lease", {"delivery.deploy_lease_id": None}),
+                ("mismatched invocation", {"delivery.deploy_invocation_id": alternate_claim_key}),
+                ("mismatched lease", {"delivery.deploy_lease_id": alternate_claim_key}),
+                ("malformed binding", {
+                    "delivery.deploy_invocation_id": "not-a-claim-key",
+                    "delivery.deploy_lease_id": "not-a-claim-key",
+                }),
+                ("stale root binding", {
+                    "delivery.deploy_invocation_id": stale_claim_key,
+                    "delivery.deploy_lease_id": stale_claim_key,
+                }),
+            ):
+                with self.subTest(completed_recovery_binding=binding_name):
+                    recovery_metadata = {**completed_recovery_metadata, **binding_changes}
+                    for field, value in binding_changes.items():
+                        if value is None:
+                            recovery_metadata.pop(field)
+                    if updates.exists():
+                        updates.unlink()
+                    environment["FAKE_GC_ROOT_JSON"] = json.dumps(
+                        [{"metadata": recovery_metadata}]
+                    )
+                    blocked = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(blocked.returncode, 1)
+                    self.assertIn("deploy command recovery is blocked", blocked.stderr)
+                    self.assertEqual(marker.read_text(encoding="utf-8"), f"{merge_sha}\n")
+                    update_log = updates.read_text(encoding="utf-8")
+                    self.assertIn(
+                        "delivery.deploy_recovery_state=blocked_unknown_execution",
+                        update_log,
+                    )
+                    self.assertNotIn("delivery.deploy_invocation_id=", update_log)
+                    self.assertNotIn("delivery.deploy_lease_id=", update_log)
 
             nonzero, evidence = run_deploy("exit 42")
             self.assertEqual(nonzero.returncode, 1)
