@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import ipaddress
 import json
 import os
 import re
@@ -12,7 +13,7 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 
 SCHEMA = "gc.complete-delivery.report.v1"
@@ -32,6 +33,8 @@ STAGES = (
 )
 STATUSES = frozenset({"pending", "active", "passed", "failed", "blocked", "skipped"})
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+SOURCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 
 CSS = """
 :root{--ink:#17201d;--muted:#68736e;--paper:#f5f3ed;--card:#fffefa;--line:#d9ddd6;--green:#176b50;--soft:#dff2e9;--gold:#d89a32;--red:#b84e3a;--navy:#142d31;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--ink);background:var(--paper)}
@@ -81,9 +84,91 @@ def overall_status(state: dict[str, Any]) -> str:
         return "failed"
     if "blocked" in values:
         return "blocked"
-    if (stages.get("complete") or {}).get("status") == "passed":
+    if final_state_is_live(state):
         return "live"
     return "in progress"
+
+
+def final_state_is_live(state: dict[str, Any]) -> bool:
+    """Return true only for a mechanically finalized, internally bound state."""
+
+    stages = state.get("stages")
+    delivery = state.get("delivery")
+    validation = state.get("final_validation")
+    if not all(isinstance(value, dict) for value in (stages, delivery, validation)):
+        return False
+    deploy_status = delivery.get("deploy_status")
+    if deploy_status not in {"verified", "not_applicable"}:
+        return False
+    for stage in (stage for stage in STAGES if stage != "deploy"):
+        if (stages.get(stage) or {}).get("status") != "passed":
+            return False
+    allowed_deploy = {"passed", "skipped"} if deploy_status == "not_applicable" else {"passed"}
+    if (stages.get("deploy") or {}).get("status") not in allowed_deploy:
+        return False
+
+    merge_sha = delivery.get("merge_sha")
+    if not isinstance(merge_sha, str) or not FULL_SHA.fullmatch(merge_sha):
+        return False
+    if state.get("sha") != merge_sha:
+        return False
+    if deploy_status == "verified":
+        if delivery.get("deployed_sha") != merge_sha:
+            return False
+    elif delivery.get("deployed_sha") != "":
+        return False
+
+    pr_url = state.get("pr_url")
+    production_url = state.get("production_url") or ""
+    if not safe_href(pr_url) or delivery.get("pr_url") != pr_url:
+        return False
+    if delivery.get("production_url") != production_url:
+        return False
+    if production_url and not safe_href(production_url):
+        return False
+
+    if validation.get("schema") != "gc.complete-delivery.final-validation.v1":
+        return False
+    if validation.get("passed") is not True:
+        return False
+    for field in (
+        "merge_sha",
+        "deployed_sha",
+        "deploy_status",
+        "pr_url",
+        "production_url",
+    ):
+        if validation.get(field) != delivery.get(field):
+            return False
+
+    if validation.get("source_binding_required") is True:
+        source_id = state.get("source_bead_id")
+        source_title = state.get("source_title")
+        if not isinstance(source_id, str) or not SOURCE_ID.fullmatch(source_id):
+            return False
+        if not isinstance(source_title, str) or not source_title:
+            return False
+        if state.get("bead_id") != source_id or state.get("title") != source_title:
+            return False
+        if validation.get("source_bead_id") != source_id:
+            return False
+        if validation.get("source_title") != source_title:
+            return False
+
+    no_smoke_required = delivery.get("no_smoke_required") is True
+    reason = delivery.get("no_smoke_reason")
+    if no_smoke_required:
+        if not isinstance(reason, str) or not reason.strip():
+            return False
+        if state.get("no_smoke_reason") != reason:
+            return False
+    elif reason != "" or state.get("no_smoke_reason") not in (None, ""):
+        return False
+    if validation.get("no_smoke_required") is not no_smoke_required:
+        return False
+    if validation.get("no_smoke_reason") != (reason or ""):
+        return False
+    return True
 
 
 def esc(value: Any) -> str:
@@ -91,9 +176,35 @@ def esc(value: Any) -> str:
 
 
 def safe_href(value: Any) -> str:
-    raw = str(value or "").strip()
-    parsed = urlparse(raw)
-    if parsed.scheme != "https" or not parsed.netloc:
+    raw = str(value or "")
+    if raw != raw.strip() or any(
+        character.isspace() or ord(character) < 32 or ord(character) == 127
+        for character in raw
+    ):
+        return ""
+    try:
+        parsed = urlsplit(raw)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return ""
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        if (
+            len(hostname) > 253
+            or hostname.endswith(".")
+            or not all(HOST_LABEL.fullmatch(label) for label in hostname.split("."))
+        ):
+            return ""
+    if not raw:
         return ""
     return esc(raw)
 
@@ -125,11 +236,19 @@ def render(state: dict[str, Any]) -> str:
     if production_url:
         links.append(f'<a href="{production_url}">Production</a>')
     links_html = f'<div class="links">{"".join(links)}</div>' if links else ""
+    no_smoke_reason = str(state.get("no_smoke_reason") or "").strip()
+    no_smoke_html = ""
+    if no_smoke_reason:
+        no_smoke_html = (
+            '<section class="section"><div class="shell"><div class="next">'
+            '<strong>Production smoke-test exception</strong>'
+            f'<p>{esc(no_smoke_reason)}</p></div></div></section>'
+        )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow,noarchive"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"><title>{esc(state.get('title'))} — Delivery Report</title><link rel="stylesheet" href="styles.css"></head>
 <body><main><section class="top"><div class="shell"><p class="eyebrow">Living delivery report · {esc(state.get('bead_id'))}</p><h1>{esc(state.get('title'))}</h1><p class="lede">{esc(state.get('goal'))}</p><div class="summary"><div><span>Status</span><strong class="state {esc(status)}">{esc(status.title())}</strong></div><div><span>Repository</span><strong>{esc(state.get('repo') or 'Resolving')}</strong></div><div><span>Delivery SHA</span><strong>{esc(state.get('sha') or 'Pending')}</strong></div><div><span>Updated</span><strong>{esc(state.get('updated_at'))}</strong></div></div></div></section>
 <section class="section"><div class="shell"><p class="eyebrow">Lifecycle</p><h2>One path from intent to verified production</h2><ol class="timeline">{"".join(stage_rows)}</ol></div></section>
-<section class="section"><div class="shell"><div class="next"><strong>Next action</strong><p>{esc(state.get('next_action') or 'Continue the active lifecycle stage.')}</p>{links_html}</div></div></section></main>
+<section class="section"><div class="shell"><div class="next"><strong>Next action</strong><p>{esc(state.get('next_action') or 'Continue the active lifecycle stage.')}</p>{links_html}</div></div></section>{no_smoke_html}</main>
 <footer><div class="shell"><strong>Complete Delivery</strong><span>Generated from durable milestone evidence · {esc(SCHEMA)}</span></div></footer></body></html>
 """
 
@@ -150,6 +269,8 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             goal=args.goal,
             repo=args.repo or state.get("repo", ""),
             bead_id=args.bead_id or state.get("bead_id", ""),
+            source_bead_id=args.bead_id or state.get("source_bead_id", ""),
+            source_title=args.title,
         )
     else:
         state = {
@@ -158,9 +279,12 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             "goal": args.goal,
             "repo": args.repo,
             "bead_id": args.bead_id,
+            "source_bead_id": args.bead_id,
+            "source_title": args.title,
             "sha": "",
             "pr_url": "",
             "production_url": "",
+            "no_smoke_reason": "",
             "next_action": "Produce and approve the implementation plan.",
             "created_at": now(),
             "updated_at": now(),
@@ -193,12 +317,32 @@ def update(args: argparse.Namespace) -> dict[str, Any]:
         value = getattr(args, field)
         if value:
             state[field] = value
+    no_smoke_reason = getattr(args, "no_smoke_reason", "")
+    if no_smoke_reason:
+        state["no_smoke_reason"] = no_smoke_reason
     persist(args.state, state)
     return state
 
 
+def require_exact_rendered_bundle(state_path: Path, state: dict[str, Any]) -> None:
+    report = state_path.parent / "index.html"
+    stylesheet = state_path.parent / "styles.css"
+    try:
+        document = report.read_text(encoding="utf-8")
+        css = stylesheet.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ReportError(f"cannot read rendered report bundle: {exc}") from exc
+    if document != render(state):
+        raise ReportError("HTML report is stale or tampered; it is not the exact rendering of state")
+    if css != CSS + "\n":
+        raise ReportError("report stylesheet is stale or tampered")
+
+
 def validate_final(args: argparse.Namespace) -> dict[str, Any]:
     state = load_state(args.state)
+    # Reject a stale or modified public bundle before final validation can
+    # rewrite it. This makes the existing state/render pair part of authority.
+    require_exact_rendered_bundle(args.state, state)
     if not FULL_SHA.fullmatch(args.merge_sha):
         raise ReportError("merge SHA must be a full lowercase Git SHA")
     if args.deploy_status not in {"verified", "not_applicable"}:
@@ -227,30 +371,69 @@ def validate_final(args: argparse.Namespace) -> dict[str, Any]:
         raise ReportError("report delivery SHA does not match the verified merge SHA")
     if args.deploy_status == "verified" and args.deployed_sha != args.merge_sha:
         raise ReportError("verified deployed SHA does not match the merge SHA")
+    if args.deploy_status == "not_applicable" and args.deployed_sha:
+        raise ReportError("not_applicable deployment must not record a deployed SHA")
     if not safe_href(args.pr_url) or state.get("pr_url") != args.pr_url:
         raise ReportError("report pull-request URL is missing, unsafe, or stale")
-    if args.production_url:
-        if not safe_href(args.production_url) or state.get("production_url") != args.production_url:
-            raise ReportError("report production URL is missing, unsafe, or stale")
-    if overall_status(state) != "live":
-        raise ReportError("report top-line status is not live")
+    state_production_url = state.get("production_url") or ""
+    if state_production_url != args.production_url:
+        raise ReportError("report production URL is stale")
+    if args.production_url and not safe_href(args.production_url):
+        raise ReportError("report production URL is unsafe")
 
-    report = args.state.parent / "index.html"
-    stylesheet = args.state.parent / "styles.css"
-    try:
-        document = report.read_text(encoding="utf-8")
-        css = stylesheet.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ReportError(f"cannot read rendered report bundle: {exc}") from exc
-    for required in (
-        "Living delivery report",
-        "One path from intent to verified production",
-        args.merge_sha,
-    ):
-        if required not in document:
-            raise ReportError(f"HTML report is missing required content: {required}")
-    if not css.strip():
-        raise ReportError("report stylesheet is empty")
+    source_id = getattr(args, "source_bead_id", "")
+    source_title = getattr(args, "source_title", "")
+    source_binding_required = bool(source_id or source_title)
+    if source_binding_required:
+        if not source_id or not source_title:
+            raise ReportError("final report source ID and title must both be provided")
+        if not isinstance(source_id, str) or not SOURCE_ID.fullmatch(source_id):
+            raise ReportError("final report source ID is invalid")
+        if any(ord(character) < 32 or ord(character) == 127 for character in source_title):
+            raise ReportError("final report source title contains control characters")
+        if state.get("bead_id") != source_id or state.get("source_bead_id") != source_id:
+            raise ReportError("report source bead ID does not match durable workflow authority")
+        if state.get("title") != source_title or state.get("source_title") != source_title:
+            raise ReportError("report source title does not match durable workflow authority")
+
+    no_smoke_required = bool(getattr(args, "require_no_smoke_reason", False))
+    recorded_reason = getattr(args, "no_smoke_reason", "")
+    expected_reason = getattr(args, "expected_no_smoke_reason", "")
+    if no_smoke_required:
+        if not recorded_reason.strip() or not expected_reason.strip():
+            raise ReportError("a nonblank no-smoke reason is required for the final report")
+        if recorded_reason != expected_reason:
+            raise ReportError("delivery.no_smoke_reason does not match gc.var.no_smoke_reason")
+        if state.get("no_smoke_reason") != recorded_reason:
+            raise ReportError("living report does not expose the exact no-smoke reason")
+    elif recorded_reason or expected_reason:
+        raise ReportError("no-smoke reason is stale because a smoke exception is not required")
+    elif state.get("no_smoke_reason") not in (None, ""):
+        raise ReportError("living report contains a stale no-smoke reason")
+
+    delivery = {
+        "merge_sha": args.merge_sha,
+        "deployed_sha": args.deployed_sha,
+        "deploy_status": args.deploy_status,
+        "pr_url": args.pr_url,
+        "production_url": args.production_url,
+        "no_smoke_required": no_smoke_required,
+        "no_smoke_reason": recorded_reason if no_smoke_required else "",
+    }
+    state["delivery"] = delivery
+    state["final_validation"] = {
+        "schema": "gc.complete-delivery.final-validation.v1",
+        "passed": True,
+        **delivery,
+        "source_binding_required": source_binding_required,
+        "source_bead_id": source_id if source_binding_required else "",
+        "source_title": source_title if source_binding_required else "",
+        "validated_at": now(),
+    }
+    persist(args.state, state)
+    if overall_status(state) != "live":
+        raise ReportError("report top-line status is not live after final validation")
+    require_exact_rendered_bundle(args.state, state)
     return state
 
 
@@ -275,6 +458,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     change.add_argument("--pr-url", default="")
     change.add_argument("--production-url", default="")
     change.add_argument("--next-action", default="")
+    change.add_argument("--no-smoke-reason", default="")
 
     validate = subparsers.add_parser("validate")
     validate.add_argument("--state", required=True, type=Path)
@@ -285,6 +469,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     validate.add_argument("--pr-url", required=True)
     validate.add_argument("--production-url", default="")
+    validate.add_argument("--source-bead-id", default="")
+    validate.add_argument("--source-title", default="")
+    validate.add_argument("--no-smoke-reason", default="")
+    validate.add_argument("--expected-no-smoke-reason", default="")
+    validate.add_argument("--require-no-smoke-reason", action="store_true")
     return parser.parse_args(argv)
 
 

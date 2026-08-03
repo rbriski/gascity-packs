@@ -19,7 +19,7 @@ it as the new `candidate_commit`, then rerun the complete sequence from the
 start. If a second repair is required, stop committing, replace the entire
 handoff with blocker-only retry-exhausted evidence containing no authority fields,
 and close with a non-pass outcome. Invoke
-`{{pack_root}}/assets/scripts/checks/delivery-local-gates.sh` with this claimed
+`.gc/scripts/checks/delivery-local-gates.sh` from the launcher worktree with this claimed
 bead as `GC_BEAD_ID`. The complete nonterminal local-gate set is the configured
 `setup_command`, `lint_command`, `typecheck_command`, `test_command`,
 `build_command`, `browser_test_command`, `security_command`, and
@@ -64,3 +64,5 @@ because only remote checks are pending, test and record the inspected-head
 candidate through the same local gate sequence.
 
 Close with `gc.outcome=pass` only after the full local-gate sequence passes; otherwise close with a non-pass outcome. Do not invoke provider-native subagents.
+
+Compatibility warning: never invoke `{{pack_root}}/assets/scripts/checks/delivery-local-gates.sh`; Formula descriptions do not interpolate that value. The managed `.gc/scripts/checks/delivery-local-gates.sh` path above is the only runtime authority.
