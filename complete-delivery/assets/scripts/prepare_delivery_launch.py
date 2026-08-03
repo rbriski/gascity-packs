@@ -21,7 +21,7 @@ import tempfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 
 class LaunchPreflightError(RuntimeError):
@@ -397,6 +397,87 @@ def validate_profile(profile: dict[str, Any]) -> list[str]:
     return errors
 
 
+def run_github_command(arguments: list[str], *, cwd: Path, purpose: str) -> str:
+    """Run a launcher-only GitHub prerequisite without exposing credentials."""
+
+    timeout_seconds = gc_config_timeout_seconds()
+    try:
+        result = subprocess.run(
+            ["gh", *arguments],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise LaunchPreflightError("gh is required on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise LaunchPreflightError(
+            f"{purpose} timed out after {timeout_seconds:g}s"
+        ) from exc
+    except OSError as exc:
+        raise LaunchPreflightError(f"could not execute {purpose}: {exc}") from exc
+    if result.returncode:
+        diagnostic = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
+        raise LaunchPreflightError(
+            f"{purpose} failed with status {result.returncode}: {diagnostic}"
+        )
+    return result.stdout
+
+
+def verify_github_delivery_prerequisites(rig_root: Path, profile: dict[str, Any]) -> None:
+    """Verify credentialed GitHub facts before Formula ConditionEnv is sanitized.
+
+    Formula v2 executes its mechanical checks with a deliberately restricted
+    HOME, so the launcher is the only valid boundary for checking the user's
+    gh credential store.  The Formula receives a versioned durable attestation
+    only after all three live GitHub predicates below have passed.
+    """
+
+    timeout_seconds = gc_config_timeout_seconds()
+    try:
+        repository = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=rig_root,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LaunchPreflightError("registered rig is not a readable git worktree") from exc
+    if repository.returncode or repository.stdout.strip() != "true":
+        raise LaunchPreflightError("registered rig is not a readable git worktree")
+
+    run_github_command(["auth", "status"], cwd=rig_root, purpose="gh authentication check")
+    repo_json = run_github_command(
+        ["repo", "view", "--json", "nameWithOwner"],
+        cwd=rig_root,
+        purpose="GitHub repository resolution",
+    )
+    try:
+        payload = json.loads(repo_json)
+    except json.JSONDecodeError as exc:
+        raise LaunchPreflightError("GitHub repository resolution returned malformed JSON") from exc
+    name_with_owner = payload.get("nameWithOwner") if isinstance(payload, dict) else None
+    if not isinstance(name_with_owner, str) or not name_with_owner.strip():
+        raise LaunchPreflightError("GitHub repository resolution returned no nameWithOwner")
+
+    base_branch = string_var(profile, "base_branch", "main")
+    if not is_nonblank(base_branch):
+        raise LaunchPreflightError("base_branch must be nonblank")
+    run_github_command(
+        [
+            "api",
+            f"repos/{{owner}}/{{repo}}/branches/{quote(base_branch, safe='')}/protection",
+            "--silent",
+        ],
+        cwd=rig_root,
+        purpose=f"protected base branch check for {base_branch}",
+    )
+
+
 def materialization_plan(pack_root: Path, rig_root: Path) -> list[tuple[Path, Path, str]]:
     gascity_root = inherited_gascity_root(pack_root)
     plan: list[tuple[Path, Path, str]] = []
@@ -498,6 +579,10 @@ def main(argv: list[str] | None = None) -> int:
         if errors:
             joined = "\n  - ".join(errors)
             raise LaunchPreflightError(f"Complete Delivery profile is invalid:\n  - {joined}")
+
+        # This must run before Formula v2 creates a root whose future
+        # ConditionEnv deliberately cannot read the launcher's gh config.
+        verify_github_delivery_prerequisites(rig_root, profile)
 
         # Every validation above, including the collision check and the complete
         # source/destination plan, runs before the first target-rig mutation.

@@ -116,6 +116,7 @@ class PreflightTests(unittest.TestCase):
             "gc.var.production_url": "https://service.example.test",
             "gc.var.source_bead_id": "fi-123",
             "gc.var.source_title": "Requested delivery",
+            "gc.var.launcher_github_preflight": "github-v1",
         }
         values.update(overrides)
         return values
@@ -128,6 +129,10 @@ class PreflightTests(unittest.TestCase):
         step_json: str | None = None,
         root_json: str | None = None,
         source_json: str | None = None,
+        control_json: str | None = None,
+        bead_id: str = "step-1",
+        control_id: str = "",
+        gh_available: bool = True,
         transient_gc_failures: int = 0,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
@@ -152,6 +157,8 @@ class PreflightTests(unittest.TestCase):
                 "fi\n"
                 "if [ \"${3:-}\" = \"${FAKE_GC_SOURCE_ID:-}\" ]; then\n"
                 "  printf '%s\\n' \"$FAKE_GC_SOURCE_JSON\"\n"
+                "elif [ \"${3:-}\" = \"${FAKE_GC_CONTROL_ID:-}\" ]; then\n"
+                "  printf '%s\\n' \"$FAKE_GC_CONTROL_JSON\"\n"
                 "elif [ \"${3:-}\" = \"${FAKE_GC_ROOT_ID:-}\" ]; then\n"
                 "  printf '%s\\n' \"$FAKE_GC_ROOT_JSON\"\n"
                 "else\n"
@@ -163,6 +170,7 @@ class PreflightTests(unittest.TestCase):
             gh = bin_dir / "gh"
             gh.write_text(
                 "#!/bin/sh\n"
+                "[ \"${FAKE_GH_AVAILABLE:-true}\" = true ] || exit 1\n"
                 "if [ \"${1:-}\" = api ] && [ \"$FAKE_GH_PROTECTED\" != true ]; then\n"
                 "  printf '%s\\n' 'gh: Branch not protected (HTTP 404)' >&2\n"
                 "  exit 1\n"
@@ -176,7 +184,7 @@ class PreflightTests(unittest.TestCase):
             failures_file.write_text(str(transient_gc_failures), encoding="utf-8")
             environment.update(
                 {
-                    "GC_BEAD_ID": "step-1",
+                    "GC_BEAD_ID": bead_id,
                     "GC_WORK_DIR": str(repository),
                     "FAKE_GC_STEP_JSON": step_json
                     or json.dumps([{"metadata": metadata}]),
@@ -185,7 +193,10 @@ class PreflightTests(unittest.TestCase):
                     "FAKE_GC_SOURCE_ID": metadata.get("gc.var.source_bead_id", ""),
                     "FAKE_GC_SOURCE_JSON": source_json
                     or json.dumps([{"title": metadata.get("gc.var.source_title", "")}]),
+                    "FAKE_GC_CONTROL_ID": control_id,
+                    "FAKE_GC_CONTROL_JSON": control_json or "",
                     "FAKE_GH_PROTECTED": str(protected).lower(),
+                    "FAKE_GH_AVAILABLE": str(gh_available).lower(),
                     "FAKE_GC_FAILURES_FILE": str(failures_file),
                     "PATH": f"{bin_dir}:{environment['PATH']}",
                 }
@@ -557,9 +568,74 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("unique, nonempty exact check names", result.stderr)
 
     def test_unprotected_base_branch_fails_preflight(self) -> None:
-        result = self.run_preflight(self.metadata(), protected=False)
+        result = self.run_preflight(
+            self.metadata(**{"gc.var.launcher_github_preflight": ""}),
+            protected=False,
+        )
         self.assertEqual(result.returncode, 1)
-        self.assertIn("base branch must be protected", result.stderr)
+        self.assertIn("durable authenticated launcher GitHub preflight evidence", result.stderr)
+
+    def test_sanitized_retry_check_requires_launcher_evidence_without_reading_gh(self) -> None:
+        result = self.run_preflight(self.metadata(), gh_available=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        missing = self.run_preflight(
+            self.metadata(**{"gc.var.launcher_github_preflight": ""}),
+            gh_available=False,
+        )
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("durable authenticated launcher GitHub preflight evidence", missing.stderr)
+
+    def test_blank_retry_recovers_only_exact_control_bead_lineage(self) -> None:
+        root_id = "root-1"
+        control_id = "control-1"
+        attempt = {
+            "id": "retry-3",
+            "title": "Validate the repository delivery profile",
+            "description": "",
+            "metadata": {
+                "gc.root_bead_id": root_id,
+                "gc.control_for": control_id,
+                "gc.step_id": "delivery-preflight",
+                "gc.step_ref": "complete-delivery.delivery-preflight.iteration.3",
+                "gc.attempt": "3",
+                "gc.idempotency_key": "control-1:attempt:3",
+                "gc.run_target": "complete-delivery.delivery-engineer",
+            },
+        }
+        control = {
+            "id": control_id,
+            "title": attempt["title"],
+            "description": "Validate the durable delivery profile.",
+            "metadata": {
+                "gc.root_bead_id": root_id,
+                "gc.step_id": "delivery-preflight",
+                "gc.step_ref": "complete-delivery.delivery-preflight",
+                "gc.run_target": "complete-delivery.delivery-engineer",
+            },
+        }
+        result = self.run_preflight(
+            self.metadata(),
+            step_json=json.dumps([attempt]),
+            root_json=json.dumps([{"metadata": self.metadata()}]),
+            bead_id=attempt["id"],
+            control_id=control_id,
+            control_json=json.dumps([control]),
+            gh_available=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        control["metadata"]["gc.run_target"] = "other-role"
+        ambiguous = self.run_preflight(
+            self.metadata(),
+            step_json=json.dumps([attempt]),
+            root_json=json.dumps([{"metadata": self.metadata()}]),
+            bead_id=attempt["id"],
+            control_id=control_id,
+            control_json=json.dumps([control]),
+        )
+        self.assertEqual(ambiguous.returncode, 1)
+        self.assertIn("ambiguous or invalid logical lineage", ambiguous.stderr)
 
     def test_release_verification_requires_metadata_before_running_commands(self) -> None:
         for missing_key in ("delivery.repo", "delivery.pr_number"):

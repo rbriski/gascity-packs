@@ -4,8 +4,13 @@ Run `.gc/scripts/checks/delivery-preflight.sh` with this
 claimed bead as `GC_BEAD_ID`. It validates the one-step contract: repository-native gates,
 exact required-check policy, optional CodeRabbit posture, merge method, deployment
 mode, exact-SHA verification, production smoke, and safe report publication.
-Confirm `gh auth status` and repository resolution succeed without printing
-credentials.
+On the first worker attempt, confirm `gh auth status`, repository resolution,
+and protected-base access succeed without printing credentials. The launcher
+performs the same checks before pouring the workflow and writes durable
+`launcher_github_preflight=github-v1` evidence. The Ralph mechanical check
+runs in a deliberately sanitized ConditionEnv, so it must require that
+evidence and all credential-free profile/worktree checks rather than attempting
+to rediscover the user's `gh` credential files.
 
 Repair durable rig `formula_vars` when configuration is incomplete; do not
 weaken a gate for this run or ask the user to re-enter routine settings. If an

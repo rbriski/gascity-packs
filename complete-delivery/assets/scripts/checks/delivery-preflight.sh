@@ -108,6 +108,7 @@ PRODUCTION_URL="$(delivery_var production_url '')"
 BASE_BRANCH="$(delivery_var base_branch main)"
 SOURCE_BEAD_ID="$(delivery_var source_bead_id '')"
 SOURCE_TITLE="$(delivery_var source_title '')"
+LAUNCHER_GITHUB_PREFLIGHT="$(delivery_var launcher_github_preflight '')"
 
 require_bool push "$PUSH"
 require_bool open_pr "$OPEN_PR"
@@ -218,28 +219,10 @@ if [ -n "$PRODUCTION_URL" ] && ! is_https_url "$PRODUCTION_URL"; then
   errors+=("production_url must be an https URL")
 fi
 
-command -v git >/dev/null 2>&1 || errors+=("git is required on PATH")
-command -v gh >/dev/null 2>&1 || errors+=("gh is required on PATH")
-if command -v gh >/dev/null 2>&1; then
-  if ! gh auth status >/dev/null 2>&1; then
-    errors+=("gh is not authenticated")
-  elif ! (cd "$DELIVERY_WORK_DIR" && gh repo view --json nameWithOwner >/dev/null 2>&1); then
-    errors+=("gh cannot resolve the repository from the launcher worktree")
-  else
-    ENCODED_BRANCH="$(python3 - "$BASE_BRANCH" <<'PY'
-import sys
-from urllib.parse import quote
-
-print(quote(sys.argv[1], safe=""))
-PY
-)"
-    if ! (cd "$DELIVERY_WORK_DIR" && \
-      gh api "repos/{owner}/{repo}/branches/$ENCODED_BRANCH/protection" \
-        --silent >/dev/null 2>&1); then
-      errors+=("base branch must be protected and readable through GitHub: $BASE_BRANCH")
-    fi
-  fi
+if [ "$LAUNCHER_GITHUB_PREFLIGHT" != "github-v1" ]; then
+  errors+=("missing durable authenticated launcher GitHub preflight evidence")
 fi
+command -v git >/dev/null 2>&1 || errors+=("git is required on PATH")
 if command -v git >/dev/null 2>&1; then
   git -C "$DELIVERY_WORK_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
     errors+=("launcher work directory is not a git worktree: $DELIVERY_WORK_DIR")

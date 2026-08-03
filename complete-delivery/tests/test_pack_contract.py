@@ -296,7 +296,9 @@ class CommandContractTests(unittest.TestCase):
             root = pathlib.Path(directory)
             rig = root / "rig"
             rig.mkdir()
+            subprocess.run(["git", "init", "-q", str(rig)], check=True)
             fake_gc = pathlib.Path(directory) / "gc"
+            fake_gh = pathlib.Path(directory) / "gh"
             config = {
                 "config": {
                     "Rigs": [{"Name": "finance", "Path": str(rig), "FormulaVars": profile or {
@@ -331,6 +333,17 @@ class CommandContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_gc.chmod(0o755)
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$FAKE_GH_CALLS\"\n"
+                "[ \"${FAKE_GH_AUTHENTICATED:-true}\" = true ] || exit 1\n"
+                "if [ \"${1:-}\" = repo ] && [ \"${2:-}\" = view ]; then\n"
+                "  printf '%s\\n' '{\"nameWithOwner\":\"example/repo\"}'\n"
+                "fi\n"
+                "if [ \"${1:-}\" = api ] && [ \"${FAKE_GH_PROTECTED:-true}\" != true ]; then exit 1; fi\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
             environment = os.environ.copy()
             environment["GC_PACK_DIR"] = str(PACK_ROOT)
             environment["PATH"] = f"{directory}:{environment['PATH']}"
@@ -342,6 +355,7 @@ class CommandContractTests(unittest.TestCase):
             )
             environment["FAKE_GC_SINK"] = str(sink)
             environment["FAKE_GC_CALLS"] = str(calls)
+            environment["FAKE_GH_CALLS"] = str(root / "gh-calls")
             if environment_updates:
                 environment.update(environment_updates)
             if setup:
@@ -356,6 +370,8 @@ class CommandContractTests(unittest.TestCase):
             result.sink = sink
             result.slinged = sink.exists()
             result.calls = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+            gh_calls = root / "gh-calls"
+            result.gh_calls = gh_calls.read_text(encoding="utf-8").splitlines() if gh_calls.exists() else []
             result.materialized = {
                 "delivery_preflight": (rig / ".gc/scripts/checks/delivery-preflight.sh").is_file(),
                 "build_artifact": (rig / ".gc/scripts/checks/build-artifact-valid.sh").is_file(),
@@ -388,6 +404,7 @@ class CommandContractTests(unittest.TestCase):
         for value in (
             "source_bead_id=fi-123",
             "source_title=Requested delivery",
+            "launcher_github_preflight=github-v1",
             "report_title=Requested delivery",
             "interaction_mode=autonomous",
             "review_mode=agent",
@@ -430,6 +447,14 @@ class CommandContractTests(unittest.TestCase):
             sorted(result.manifest["assets"]),
             [path for path in result.materialized_paths if path != ".gc/complete-delivery-assets.json"],
         )
+        self.assertEqual(
+            result.gh_calls,
+            [
+                "auth status",
+                "repo view --json nameWithOwner",
+                "api repos/{owner}/{repo}/branches/main/protection --silent",
+            ],
+        )
 
     def test_interactive_is_one_flag(self) -> None:
         result = self.run_command("fi-123", "--rig=finance", "--interactive")
@@ -449,6 +474,28 @@ class CommandContractTests(unittest.TestCase):
         self.assertIn("source_bead_id=fi-123", args)
         self.assertIn("source_title=Reject dirty checkout", args)
         self.assertIn("report_title=Reject dirty checkout", args)
+
+    def test_unauthenticated_launcher_fails_before_assets_or_dispatch(self) -> None:
+        result = self.run_command(
+            "fi-123",
+            "--rig=finance",
+            environment_updates={"FAKE_GH_AUTHENTICATED": "false"},
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("gh authentication check failed", result.stderr)
+        self.assertFalse(result.slinged)
+        self.assertEqual(result.materialized_paths, [])
+
+    def test_unprotected_launcher_base_branch_fails_before_dispatch(self) -> None:
+        result = self.run_command(
+            "fi-123",
+            "--rig=finance",
+            environment_updates={"FAKE_GH_PROTECTED": "false"},
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("protected base branch check for main failed", result.stderr)
+        self.assertFalse(result.slinged)
+        self.assertEqual(result.materialized_paths, [])
 
     def test_missing_or_ambiguous_source_fails_before_dispatch(self) -> None:
         for source_json in ("[]", '[{"title":"one"},{"title":"two"}]', '[{}]'):
