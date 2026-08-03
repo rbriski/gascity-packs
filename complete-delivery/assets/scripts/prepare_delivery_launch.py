@@ -55,6 +55,35 @@ GASCITY_SCHEMAS = (
 )
 MANIFEST_NAME = "complete-delivery-assets.json"
 MANIFEST_VERSION = 2
+TRANSACTION_NAME = "complete-delivery-transaction.json"
+TRANSACTION_VERSION = 1
+# Version 1 did not record asset digests.  These are the SHA-256 digests of
+# the complete-delivery 0.1.0 release inventory, rather than of whichever
+# sources happen to be installed by the launcher that is performing an
+# upgrade.  They make the one supported legacy migration fail closed.
+LEGACY_V1_ASSET_HASHES = {
+    ".gc/scripts/checks/build-artifact-valid.sh": "sha256:8178312263aab109472ddb6b5fe2e93d835cd6c9b470e7427f22a670f0e13e94",
+    ".gc/scripts/checks/delivery-common.sh": "sha256:73e91e14c96eb75e37f9232db830a4849290298ba3b257ed1112ca9eaeda346a",
+    ".gc/scripts/checks/delivery-external-review-deadline.sh": "sha256:0935b7c1ea7e1fee35539f050a13698180a9df129c76cbccd96e5e610fad91b3",
+    ".gc/scripts/checks/delivery-local-gates.sh": "sha256:a76787b5ea0c1f1cc29a7234db63f70e068dfe5578df0841eef24c39d68232c3",
+    ".gc/scripts/checks/delivery-merged.sh": "sha256:218740575c743ca7050d27c00446aa854dbb21b9daeded36423e5547bd707185",
+    ".gc/scripts/checks/delivery-pr-approved.sh": "sha256:dbf9db95c2ce8cc79267e724557e264690b2ecfcdd0453bbdf68baf3bcb2c66d",
+    ".gc/scripts/checks/delivery-pr-open.sh": "sha256:8a1bac06babd14cf84ebee1c537bb117a80a35fd502140ea9369f372d904e363",
+    ".gc/scripts/checks/delivery-preflight.sh": "sha256:55c48cfd39610cb2e93627635d5c65179a5d24e660b6ff2b77b35c0182db3400",
+    ".gc/scripts/checks/delivery-release-verified.sh": "sha256:6f0571b2e689f11c7fef21d474b3c46946544f7847fc0bd7cf37f155edb0076b",
+    ".gc/scripts/checks/delivery-report-green.sh": "sha256:b7aefacf51f873437f6ec699a438b8aed940c59720f32b7026a9e46872717f64",
+    ".gc/scripts/checks/delivery-report-valid.sh": "sha256:1e85ca850808a454f9d5bc0c8560d243fcb07d4f0099354dcc80325811387291",
+    ".gc/scripts/checks/delivery-source-artifact-valid.sh": "sha256:3a6f17483424e7b7a592e61cbec7aa4382b95c4795d614e82c1e5d4a535d6299",
+    ".gc/scripts/delivery_gate.py": "sha256:d9b335eb280d5a926c2b6182a8d46ab4fbd7e490d038c8e18937e7b118081b5a",
+    ".gc/scripts/delivery_report.py": "sha256:ea4a2da346e9aae8ec53949f9f263da0109d555c40533c80b54b88fd9a8eb1a6",
+    ".gc/scripts/validate_build_artifact.py": "sha256:083fa0706605ed9e4247bc9ff2755706dde9e4e500650a0775caab55690ad4c2",
+    "schemas/build/decomposition.v1.yaml": "sha256:ef10d410d17e06c869afe3b08bcf49f9276cdee7ba3f250e063d742bf131415d",
+    "schemas/build/final-report.v1.yaml": "sha256:6ebc3e474032a5e21450b911f550ff7aa6cee882b35b63ce177125a1636bf6bf",
+    "schemas/build/implementation-summary.v1.yaml": "sha256:ab3c877a9555854a462116c2d3551b12fe3794eb8f29772de058a4cf5efa2197",
+    "schemas/build/plan.v1.yaml": "sha256:91b4c39a92c73bd9ea2c853793087870aa19872bd6e0d75be5aa2ba65e807327",
+    "schemas/build/requirements.v1.yaml": "sha256:09310e8466377a22c153a6cbf93287eec699a11092c2bc26f96bd6440aac01c5",
+    "schemas/build/review.v1.yaml": "sha256:4e9773e44a271204b743d429d0751e3c71a32bb66597c47da0c9c34edc5ac454",
+}
 GC_CONFIG_TIMEOUT_SECONDS = 15
 MAX_DURATION_SECONDS = Decimal(3600)
 DURATION = re.compile(r"([0-9]+(?:\.[0-9]+)?|\.[0-9]+)([smhd]?)")
@@ -562,10 +591,21 @@ def load_prior_manifest(rig_root: Path) -> dict[str, Any] | None:
             for value in hashes.values()
         )
     )
-    if (payload["version"] == MANIFEST_VERSION and not hashes_are_valid) or (
-        payload["version"] == 1 and hashes and not hashes_are_valid
-    ):
+    if payload["version"] == MANIFEST_VERSION and not hashes_are_valid:
         raise LaunchPreflightError("managed asset manifest has invalid asset hashes")
+    if payload["version"] == 1:
+        try:
+            legacy_hashes = {asset: LEGACY_V1_ASSET_HASHES[asset] for asset in assets}
+        except KeyError as exc:
+            raise LaunchPreflightError(
+                "managed asset manifest contains an unknown Complete Delivery 0.1.0 asset"
+            ) from exc
+        # A v1 manifest normally has no hashes.  If an operator supplied them,
+        # they must attest exactly to the known release bytes, not merely be
+        # well-formed attacker-controlled digest strings.
+        if hashes and (not hashes_are_valid or hashes != legacy_hashes):
+            raise LaunchPreflightError("managed asset manifest has invalid legacy asset hashes")
+        hashes = legacy_hashes
     return {"assets": set(assets), "asset_hashes": hashes}
 
 
@@ -658,6 +698,146 @@ def preflight_materialization(
     return desired_hashes, stale_paths
 
 
+def serialized_manifest(installed: list[str], desired_hashes: dict[str, str]) -> str:
+    return json.dumps(
+        {
+            "asset_hashes": desired_hashes,
+            "assets": installed,
+            "inherited_from": "gascity",
+            "owner": "complete-delivery",
+            "version": MANIFEST_VERSION,
+        },
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+
+
+def path_digest(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return asset_digest(path)
+
+
+def transaction_path(rig_root: Path) -> Path:
+    path = rig_root / ".gc" / TRANSACTION_NAME
+    require_contained_destination(rig_root, path, TRANSACTION_NAME)
+    return path
+
+
+def transaction_states(
+    plan: list[tuple[Path, Path, str]], stale_paths: list[Path], manifest_path: Path
+) -> dict[str, str | None]:
+    states = {relative: path_digest(destination) for _, destination, relative in plan}
+    states.update({str(path): path_digest(path) for path in stale_paths})
+    states[MANIFEST_NAME] = path_digest(manifest_path)
+    return states
+
+
+def load_transaction(rig_root: Path) -> dict[str, Any] | None:
+    path = transaction_path(rig_root)
+    if not (path.exists() or path.is_symlink()):
+        return None
+    ensure_regular_untracked_destination(rig_root, path, TRANSACTION_NAME)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LaunchPreflightError("managed asset transaction journal is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("owner") != "complete-delivery"
+        or payload.get("version") != TRANSACTION_VERSION
+        or not isinstance(payload.get("desired_hashes"), dict)
+        or not isinstance(payload.get("prior_states"), dict)
+        or not isinstance(payload.get("stale_paths"), list)
+    ):
+        raise LaunchPreflightError("managed asset transaction journal is invalid")
+    return payload
+
+
+def apply_materialization(
+    plan: list[tuple[Path, Path, str]],
+    stale_paths: list[Path],
+    manifest_path: Path,
+    manifest_content: str,
+    rig_root: Path,
+) -> None:
+    for source, destination, relative in plan:
+        atomic_copy(source, destination, rig_root, relative)
+    for stale_path in stale_paths:
+        stale_path.unlink(missing_ok=True)
+    atomic_write_text(manifest_path, manifest_content, rig_root, MANIFEST_NAME)
+
+
+def recover_interrupted_materialization(
+    pack_root: Path, rig_root: Path, plan: list[tuple[Path, Path, str]]
+) -> None:
+    """Finish only a verified interrupted materialization transaction.
+
+    The journal is written before the first target-rig mutation.  Recovery
+    accepts each path only when it has the authorized prior digest or the
+    current source digest; a third value is treated as a user modification.
+    """
+
+    transaction = load_transaction(rig_root)
+    if transaction is None:
+        return
+    desired_hashes = {relative: asset_digest(source) for source, _, relative in plan}
+    if transaction["desired_hashes"] != desired_hashes:
+        raise LaunchPreflightError("managed asset transaction does not match this Complete Delivery release")
+    manifest_path = rig_root / ".gc" / MANIFEST_NAME
+    installed = [relative for _, _, relative in plan]
+    manifest_content = serialized_manifest(installed, desired_hashes)
+    expected_new_manifest = f"sha256:{hashlib.sha256(manifest_content.encode()).hexdigest()}"
+    stale_paths = [rig_root / relative for relative in transaction["stale_paths"]]
+    if any(not isinstance(relative, str) or Path(relative).is_absolute() or ".." in Path(relative).parts
+           for relative in transaction["stale_paths"]):
+        raise LaunchPreflightError("managed asset transaction journal has unsafe stale paths")
+    for _, destination, relative in plan:
+        ensure_regular_untracked_destination(rig_root, destination, relative)
+    for stale_path in stale_paths:
+        ensure_regular_untracked_destination(rig_root, stale_path, str(stale_path.relative_to(rig_root)))
+    ensure_regular_untracked_destination(rig_root, manifest_path, MANIFEST_NAME)
+    current_manifest = path_digest(manifest_path)
+
+    if current_manifest == expected_new_manifest:
+        expected_states = {relative: digest for relative, digest in desired_hashes.items()}
+        expected_states.update({str(path): None for path in stale_paths})
+        if transaction_states(plan, stale_paths, manifest_path) != {
+            **expected_states,
+            MANIFEST_NAME: expected_new_manifest,
+        }:
+            raise LaunchPreflightError("completed managed asset transaction has unexpected file contents")
+        transaction_path(rig_root).unlink()
+        return
+
+    prior = load_prior_manifest(rig_root)
+    prior_hashes = prior["asset_hashes"] if prior else {}
+    prior_assets = prior["assets"] if prior else set()
+    authorized_prior_states = {
+        relative: prior_hashes.get(relative) if relative in prior_assets else None
+        for _, _, relative in plan
+    }
+    authorized_prior_states.update(
+        {str(path): prior_hashes.get(str(path.relative_to(rig_root))) for path in stale_paths}
+    )
+    authorized_prior_states[MANIFEST_NAME] = current_manifest
+    if transaction["prior_states"] != authorized_prior_states:
+        raise LaunchPreflightError("managed asset transaction does not match the authenticated prior inventory")
+
+    current_states = transaction_states(plan, stale_paths, manifest_path)
+    for _, destination, relative in plan:
+        if current_states[relative] not in (authorized_prior_states[relative], desired_hashes[relative]):
+            raise LaunchPreflightError(f"interrupted managed asset transaction found modified asset {relative}")
+    for stale_path in stale_paths:
+        key = str(stale_path)
+        if current_states[key] not in (authorized_prior_states[key], None):
+            raise LaunchPreflightError(f"interrupted managed asset transaction found modified stale asset {key}")
+    if current_states[MANIFEST_NAME] != authorized_prior_states[MANIFEST_NAME]:
+        raise LaunchPreflightError("interrupted managed asset transaction found a modified manifest")
+    apply_materialization(plan, stale_paths, manifest_path, manifest_content, rig_root)
+    transaction_path(rig_root).unlink()
+
+
 def atomic_copy(source: Path, destination: Path, rig_root: Path, label: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     require_contained_destination(rig_root, destination, label)
@@ -697,25 +877,25 @@ def materialize_assets(pack_root: Path, rig_root: Path) -> list[str]:
     plan = materialization_plan(pack_root, rig_root)
     manifest_path = rig_root / ".gc" / MANIFEST_NAME
     require_contained_destination(rig_root, manifest_path, MANIFEST_NAME)
+    recover_interrupted_materialization(pack_root, rig_root, plan)
     desired_hashes, stale_paths = preflight_materialization(pack_root, rig_root, plan)
     installed = [relative for _, _, relative in plan]
-    for source, destination, relative in plan:
-        atomic_copy(source, destination, rig_root, relative)
-    for stale_path in stale_paths:
-        stale_path.unlink()
-    manifest = {
-        "asset_hashes": desired_hashes,
-        "assets": installed,
-        "inherited_from": "gascity",
+    manifest_content = serialized_manifest(installed, desired_hashes)
+    journal = {
+        "desired_hashes": desired_hashes,
         "owner": "complete-delivery",
-        "version": MANIFEST_VERSION,
+        "prior_states": transaction_states(plan, stale_paths, manifest_path),
+        "stale_paths": [str(path.relative_to(rig_root)) for path in stale_paths],
+        "version": TRANSACTION_VERSION,
     }
     atomic_write_text(
-        manifest_path,
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        transaction_path(rig_root),
+        json.dumps(journal, indent=2, sort_keys=True) + "\n",
         rig_root,
-        MANIFEST_NAME,
+        TRANSACTION_NAME,
     )
+    apply_materialization(plan, stale_paths, manifest_path, manifest_content, rig_root)
+    transaction_path(rig_root).unlink()
     return installed
 
 
