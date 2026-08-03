@@ -2274,6 +2274,28 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("Immediately before\nrunning `report_publish_command`", pr_gate_finalizer)
         self.assertIn("prevents publication", pr_gate_finalizer)
 
+        report_green = (WORKFLOW_ROOT / "report-green.md").read_text(encoding="utf-8")
+        deadline_check = (
+            "`.gc/scripts/checks/delivery-external-review-deadline.sh --validate`"
+        )
+        passing_mutation = "stage `external-review` as `passed`"
+        pre_mutation = report_green.index("Immediately before the passing report mutation")
+        mutation = report_green.index(passing_mutation)
+        pre_publish = report_green.index("Immediately before running `report_publish_command`")
+        publish = report_green.index("`report_publish_command` with `DELIVERY_REPORT_DIR` only after")
+        self.assertLess(pre_mutation, report_green.index(deadline_check, pre_mutation))
+        self.assertLess(report_green.index(deadline_check, pre_mutation), mutation)
+        self.assertLess(mutation, pre_publish)
+        self.assertLess(pre_publish, report_green.index(deadline_check, pre_publish))
+        self.assertLess(report_green.index(deadline_check, pre_publish), publish)
+        self.assertEqual(report_green.count(deadline_check), 2)
+        for failure_clause in (
+            "invalidate the handoff's `tested_commit`, `local_gates`,\n`published_head`, and `published_head_matches_tested_commit` pass evidence",
+            "write no passing report state, do not publish, and close with a non-pass\noutcome",
+            "make no passing report\nmutation or publication, and close with a non-pass outcome",
+        ):
+            self.assertIn(failure_clause, report_green)
+
         readiness = (WORKFLOW_ROOT / "release-readiness.md").read_text(encoding="utf-8")
         for term in ("deploy_mode=command", "deploy_mode=not-applicable", "deploy_not_applicable_reason", "allow_no_smoke=true", "no_smoke_reason", "verify-production"):
             self.assertIn(term, readiness)
