@@ -2251,6 +2251,10 @@ class PreflightTests(unittest.TestCase):
             now = datetime.now(timezone.utc).replace(microsecond=0)
             metadata = {
                 "delivery.report_state_path": str(state_path),
+                "delivery.head_sha": "a" * 40,
+                "delivery.repo": "example/repo",
+                "delivery.pr_number": "123",
+                "delivery.pr_gate_path": "pr-gate.json",
                 "delivery.external_review_started_at": (
                     now - timedelta(minutes=1)
                 ).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -2258,6 +2262,7 @@ class PreflightTests(unittest.TestCase):
                     now + timedelta(hours=1)
                 ).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
+            gate_path = root / "pr-gate.json"
             gc = bin_dir / "gc"
             gc.write_text(
                 "#!/bin/sh\n"
@@ -2288,15 +2293,33 @@ class PreflightTests(unittest.TestCase):
             )
             passed_state = {
                 "schema": "gc.complete-delivery.report.v1",
+                "sha": metadata["delivery.head_sha"],
                 "next_action": "Proceed to protected merge.",
                 "stages": {
                     "external-review": {
                         "status": "passed",
                         "summary": "External review passed.",
-                        "evidence": ["artifacts/delivery/pr-gate.json"],
+                        "evidence": [str(gate_path)],
                     }
                 },
             }
+            passed_gate = {
+                "schema": "gc.complete-delivery.pr-gate.v1",
+                "passed": True,
+                "state": "passed",
+                "repo": metadata["delivery.repo"],
+                "pr_number": int(metadata["delivery.pr_number"]),
+                "head_sha": metadata["delivery.head_sha"],
+                "required_checks": [],
+                "coderabbit": {
+                    "unresolved_threads": 0,
+                    "active_change_requests": [],
+                },
+                "unresolved_threads": [],
+                "human_change_requests": [],
+                "blockers": [],
+            }
+            gate_path.write_text(json.dumps(passed_gate), encoding="utf-8")
             state_path.write_text(json.dumps(passed_state), encoding="utf-8")
             passed = subprocess.run(
                 ["bash", str(REPORT_GREEN_SCRIPT)],
@@ -2306,16 +2329,33 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(passed.returncode, 0, passed.stderr)
 
-            passed_state["next_action"] = "Wait for a human decision."
-            state_path.write_text(json.dumps(passed_state), encoding="utf-8")
-            blocked = subprocess.run(
-                ["bash", str(REPORT_GREEN_SCRIPT)],
-                capture_output=True,
-                text=True,
-                env=environment,
+            cases = (
+                ("stale report SHA", {"sha": "b" * 40}, None),
+                ("arbitrary evidence", {"stages": {"external-review": {**passed_state["stages"]["external-review"], "evidence": ["arbitrary-evidence"]}}}, None),
+                ("malformed gate", {}, "not-json"),
+                ("blocked gate", {}, {**passed_gate, "passed": False, "state": "blocked", "blockers": ["blocked"]}),
+                ("wrong-head gate", {}, {**passed_gate, "head_sha": "b" * 40}),
+                ("negated protected merge", {"next_action": "Do not proceed to protected merge."}, None),
             )
-            self.assertEqual(blocked.returncode, 1)
-            self.assertIn("report next action does not require protected merge", blocked.stderr)
+            for name, state_mutation, gate_mutation in cases:
+                with self.subTest(name=name):
+                    state = json.loads(json.dumps(passed_state))
+                    state.update(state_mutation)
+                    state_path.write_text(json.dumps(state), encoding="utf-8")
+                    if gate_mutation == "not-json":
+                        gate_path.write_text("not-json", encoding="utf-8")
+                    else:
+                        gate_path.write_text(
+                            json.dumps(passed_gate if gate_mutation is None else gate_mutation),
+                            encoding="utf-8",
+                        )
+                    blocked = subprocess.run(
+                        ["bash", str(REPORT_GREEN_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(blocked.returncode, 1, blocked.stderr)
 
     def test_pr_open_validates_full_recorded_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
