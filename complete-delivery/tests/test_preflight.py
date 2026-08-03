@@ -508,7 +508,9 @@ class PreflightTests(unittest.TestCase):
             bin_dir = root / "bin"
             bin_dir.mkdir()
             for command in ("mktemp", "rm"):
-                (bin_dir / command).symlink_to(pathlib.Path("/usr/bin") / command)
+                command_path = shutil.which(command)
+                self.assertIsNotNone(command_path, f"{command} is required for this test")
+                (bin_dir / command).symlink_to(command_path)
             environment = os.environ.copy()
             environment.update({
                 "PATH": str(bin_dir),
@@ -1994,6 +1996,25 @@ class PreflightTests(unittest.TestCase):
                         [],
                     )
             environment["FAKE_RUN_JSON"] = json.dumps(run)
+
+            for label, metadata in (
+                ("missing", {key: value for key, value in base_metadata.items() if key != "gc.var.base_branch"}),
+                ("empty", {**base_metadata, "gc.var.base_branch": ""}),
+            ):
+                with self.subTest(base_branch=label):
+                    evidence_before = deploy_log.read_text(encoding="utf-8")
+                    environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": metadata}])
+                    rejected = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(rejected.returncode, 1)
+                    self.assertIn("base_branch", rejected.stderr)
+                    self.assertEqual(deploy_log.read_text(encoding="utf-8"), evidence_before)
+
+            environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": base_metadata}])
 
             environment["FAKE_GC_ROOT_JSON"] = json.dumps(
                 [{"metadata": {**base_metadata, "gc.var.deploy_environment": ""}}]

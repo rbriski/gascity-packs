@@ -411,7 +411,7 @@ delivery_collect_ci_deploy_evidence() {
   ci_run_id="$(delivery_root_metadata delivery.deploy_run_id)"
   ci_workflow="$(delivery_var deploy_ci_workflow '')"
   ci_environment="$(delivery_var deploy_environment '')"
-  ci_base="$(delivery_var base_branch main)"
+  ci_base="$(delivery_var base_branch '')"
 
   if ! python3 - "$ci_repo" "$ci_pr" "$ci_sha" "$ci_run_id" "$ci_workflow" "$ci_environment" "$ci_base" <<'PY'
 import re
