@@ -26,11 +26,14 @@ PR_NUMBER="$(delivery_root_metadata delivery.pr_number)"
 PR_GATE="$(delivery_root_metadata delivery.pr_gate_path)"
 [ -n "$PR_GATE" ] || delivery_fail "workflow root metadata delivery.pr_gate_path is missing"
 
-# These artifacts become authority for a protected merge.  Metadata must name
-# relative, in-worktree paths; accepting lexical normalization here would let a
-# traversal, absolute path, or symlinked component substitute foreign evidence.
-mapfile -t GREEN_ARTIFACTS < <(python3 - "$DELIVERY_WORK_DIR" "$ARTIFACT_ROOT" "$STATE" "$PR_GATE" <<'PY'
+# These artifacts become authority for a protected merge.  Open every
+# directory and authority document through stable no-follow descriptors and
+# parse the documents from those descriptors.  Checking paths and reopening
+# them later would leave a replacement window for foreign evidence.
+python3 - "$DELIVERY_WORK_DIR" "$ARTIFACT_ROOT" "$STATE" "$PR_GATE" "$HEAD_SHA" "$REPO" "$PR_NUMBER" <<'PY'
+import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -49,87 +52,109 @@ def metadata_path(value, label):
     return path
 
 
-def nonsymlink_path(work_dir, relative, label):
-    current = work_dir
-    for component in relative.parts:
-        if component in ("", "."):
-            continue
-        current /= component
-        try:
-            mode = os.lstat(current).st_mode
-        except OSError as exc:
-            fail(f"{label} is unavailable: {exc}")
-        if stat.S_ISLNK(mode):
-            fail(f"{label} contains a symlinked component: {current}")
+def require_directory(fd, label):
     try:
-        resolved = current.resolve(strict=True)
-        resolved.relative_to(work_dir)
-    except (OSError, ValueError) as exc:
-        fail(f"{label} does not resolve within the canonical work directory: {exc}")
-    return current, resolved
+        mode = os.fstat(fd).st_mode
+    except OSError as exc:
+        fail(f"{label} is unavailable: {exc}")
+    if not stat.S_ISDIR(mode):
+        fail(f"{label} is not a directory")
+
+
+def open_directory(parent_fd, parts, label):
+    fd = os.dup(parent_fd)
+    try:
+        for component in parts:
+            try:
+                child_fd = os.open(
+                    component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
+                )
+            except OSError as exc:
+                fail(f"{label} is unavailable or contains a symlinked component: {exc}")
+            os.close(fd)
+            fd = child_fd
+            require_directory(fd, label)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def open_regular(parent_fd, name, label, require_nonempty=False):
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError as exc:
+        fail(f"{label} is unavailable or a symlink: {exc}")
+    try:
+        details = os.fstat(fd)
+        if not stat.S_ISREG(details.st_mode) or (require_nonempty and details.st_size == 0):
+            fail(f"{label} is missing, not a non-symlink regular file, or empty")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def parse_json(fd, label):
+    try:
+        with os.fdopen(fd, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"cannot read {label}: {exc}") from exc
 
 
 work_dir = Path(sys.argv[1]).resolve(strict=True)
 artifact_root_value = metadata_path(sys.argv[2], "gc.var.artifact_root")
 state_value = metadata_path(sys.argv[3], "delivery.report_state_path")
 gate_value = metadata_path(sys.argv[4], "delivery.pr_gate_path")
+head_sha, repo, pr_number = sys.argv[5:]
+artifact_parts = artifact_root_value.parts
+state_parts = state_value.parts
+gate_parts = gate_value.parts
 
-artifact_root, artifact_root_canonical = nonsymlink_path(
-    work_dir, artifact_root_value, "gc.var.artifact_root"
-)
-if not artifact_root.is_dir():
-    fail("gc.var.artifact_root is not a directory")
-
-report_directory = artifact_root / "delivery-report"
-report_directory_canonical = artifact_root_canonical / "delivery-report"
-state_path, state_canonical = nonsymlink_path(
-    work_dir, state_value, "delivery.report_state_path"
-)
-try:
-    state_canonical.relative_to(report_directory_canonical)
-except ValueError:
+if state_parts[: len(artifact_parts) + 1] != artifact_parts + ("delivery-report",):
     fail("delivery.report_state_path must resolve within the canonical artifact delivery-report directory")
-if not stat.S_ISREG(os.lstat(state_path).st_mode) or state_path.stat().st_size == 0:
-    fail("report state is missing, not a non-symlink regular file, or empty")
-
-gate_path, gate_canonical = nonsymlink_path(
-    work_dir, gate_value, "delivery.pr_gate_path"
-)
-expected_gate = artifact_root / "delivery" / "pr-gate.json"
-expected_gate_canonical = artifact_root_canonical / "delivery" / "pr-gate.json"
-if gate_path != expected_gate or gate_canonical != expected_gate_canonical:
+if gate_parts != artifact_parts + ("delivery", "pr-gate.json"):
     fail("delivery.pr_gate_path must be exactly the canonical artifact delivery/pr-gate.json path")
-if not stat.S_ISREG(os.lstat(gate_path).st_mode):
-    fail("PR gate artifact is missing or not a non-symlink regular file")
-
-print(state_canonical)
-print(gate_canonical)
-PY
-) || delivery_fail "report-green authority artifacts must be canonical, contained, and non-symlinked"
-
-[ "${#GREEN_ARTIFACTS[@]}" -eq 2 ] || \
-  delivery_fail "report-green authority artifact resolution returned an invalid result"
-STATE="${GREEN_ARTIFACTS[0]}"
-PR_GATE="${GREEN_ARTIFACTS[1]}"
-
-python3 - "$STATE" "$PR_GATE" "$HEAD_SHA" "$REPO" "$PR_NUMBER" "$DELIVERY_WORK_DIR" <<'PY'
-import json
-import os
-import re
-import sys
-
-state_path, gate_path, head_sha, repo, pr_number, work_dir = sys.argv[1:]
-try:
-    with open(state_path, encoding="utf-8") as handle:
-        state = json.load(handle)
-except (OSError, json.JSONDecodeError) as exc:
-    raise SystemExit(f"cannot read report-green state: {exc}") from exc
 
 try:
-    with open(gate_path, encoding="utf-8") as handle:
-        gate = json.load(handle)
-except (OSError, json.JSONDecodeError) as exc:
-    raise SystemExit(f"cannot read PR gate artifact: {exc}") from exc
+    work_fd = os.open(work_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError as exc:
+    fail(f"canonical work directory is unavailable: {exc}")
+
+state_fd = gate_fd = -1
+try:
+    require_directory(work_fd, "canonical work directory")
+    artifact_fd = open_directory(work_fd, artifact_parts, "gc.var.artifact_root")
+    try:
+        state_parent_fd = open_directory(
+            artifact_fd, state_parts[len(artifact_parts) : -1], "delivery.report_state_path"
+        )
+        try:
+            state_fd = open_regular(
+                state_parent_fd, state_parts[-1], "report state", require_nonempty=True
+            )
+        finally:
+            os.close(state_parent_fd)
+
+        gate_parent_fd = open_directory(artifact_fd, ("delivery",), "delivery.pr_gate_path")
+        try:
+            gate_fd = open_regular(gate_parent_fd, "pr-gate.json", "PR gate artifact")
+        finally:
+            os.close(gate_parent_fd)
+    finally:
+        os.close(artifact_fd)
+
+    state = parse_json(state_fd, "report-green state")
+    state_fd = -1
+    gate = parse_json(gate_fd, "PR gate artifact")
+    gate_fd = -1
+finally:
+    os.close(work_fd)
+    if state_fd != -1:
+        os.close(state_fd)
+    if gate_fd != -1:
+        os.close(gate_fd)
 
 def require_full_lower_sha(value, field):
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
@@ -156,7 +181,7 @@ if not isinstance(evidence, list) or not evidence:
 if not any(
     isinstance(item, str)
     and os.path.normpath(item if os.path.isabs(item) else os.path.join(work_dir, item))
-    == os.path.normpath(gate_path)
+    == os.path.normpath(os.path.join(work_dir, *gate_parts))
     for item in evidence
 ):
     raise SystemExit("report external-review evidence does not name the resolved PR gate artifact")

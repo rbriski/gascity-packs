@@ -2335,6 +2335,82 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(passed.returncode, 0, passed.stderr)
 
+            # The authority documents are opened before they are parsed.  Use
+            # sitecustomize only in this subprocess fixture to replace one
+            # pathname at that boundary; a pathname reopen would read the
+            # foreign document and fail, while a stable descriptor succeeds.
+            hook_dir = root / "json-load-hook"
+            hook_dir.mkdir()
+            (hook_dir / "sitecustomize.py").write_text(
+                "import json, os, pathlib, sys\n"
+                "state, gate = os.environ.get('REPORT_GREEN_STATE', ''), os.environ.get('REPORT_GREEN_GATE', '')\n"
+                "target, mode, foreign = (os.environ.get('REPORT_GREEN_SWAP_TARGET', ''), os.environ.get('REPORT_GREEN_SWAP_MODE', ''), os.environ.get('REPORT_GREEN_FOREIGN', ''))\n"
+                "if len(sys.argv) == 8 and sys.argv[1:3] == [state, gate] and target:\n"
+                "    original_load, calls = json.load, 0\n"
+                "    def load(handle, *args, **kwargs):\n"
+                "        global calls\n"
+                "        calls += 1\n"
+                "        if calls == (1 if target == 'state' else 2):\n"
+                "            source = pathlib.Path(state if target == 'state' else gate)\n"
+                "            trusted = source.with_name(source.name + '.trusted')\n"
+                "            if mode == 'file':\n"
+                "                source.rename(trusted)\n"
+                "                source.symlink_to(foreign)\n"
+                "            else:\n"
+                "                source.parent.rename(trusted)\n"
+                "                source.parent.symlink_to(foreign, target_is_directory=True)\n"
+                "        return original_load(handle, *args, **kwargs)\n"
+                "    json.load = load\n",
+                encoding="utf-8",
+            )
+            for target, mode in (
+                ("state", "file"),
+                ("state", "directory"),
+                ("gate", "file"),
+                ("gate", "directory"),
+            ):
+                with self.subTest(toctou_target=target, replacement=mode), tempfile.TemporaryDirectory() as case_directory:
+                    case_root = pathlib.Path(case_directory)
+                    case_artifact_root = case_root / "artifacts"
+                    case_report_directory = case_artifact_root / "delivery-report"
+                    case_delivery_directory = case_artifact_root / "delivery"
+                    case_report_directory.mkdir(parents=True)
+                    case_delivery_directory.mkdir()
+                    case_state = case_report_directory / "state.json"
+                    case_gate = case_delivery_directory / "pr-gate.json"
+                    case_state.write_text(
+                        json.dumps({
+                            **passed_state,
+                            "stages": {"external-review": {**passed_state["stages"]["external-review"], "evidence": [str(case_gate)]}},
+                        }),
+                        encoding="utf-8",
+                    )
+                    case_gate.write_text(json.dumps(passed_gate), encoding="utf-8")
+                    foreign_file = case_root / "foreign.json"
+                    foreign_file.write_text("{}", encoding="utf-8")
+                    foreign_directory = case_root / "foreign-directory"
+                    foreign_directory.mkdir()
+                    (foreign_directory / "state.json").write_text("{}", encoding="utf-8")
+                    (foreign_directory / "pr-gate.json").write_text("{}", encoding="utf-8")
+                    case_metadata = {**metadata, "gc.var.artifact_root": "artifacts"}
+                    case_environment = environment | {
+                        "GC_WORK_DIR": str(case_root),
+                        "FAKE_ROOT_JSON": json.dumps([{"metadata": case_metadata}]),
+                        "REPORT_GREEN_STATE": str(case_state),
+                        "REPORT_GREEN_GATE": str(case_gate),
+                        "REPORT_GREEN_SWAP_TARGET": target,
+                        "REPORT_GREEN_SWAP_MODE": mode,
+                        "REPORT_GREEN_FOREIGN": str(foreign_file if mode == "file" else foreign_directory),
+                        "PYTHONPATH": str(hook_dir),
+                    }
+                    stable = subprocess.run(
+                        ["bash", str(REPORT_GREEN_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=case_environment,
+                    )
+                    self.assertEqual(stable.returncode, 0, stable.stderr)
+
             cases = (
                 ("stale report SHA", {"sha": "b" * 40}, None),
                 ("arbitrary evidence", {"stages": {"external-review": {**passed_state["stages"]["external-review"], "evidence": ["arbitrary-evidence"]}}}, None),
