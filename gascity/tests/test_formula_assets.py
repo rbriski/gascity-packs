@@ -761,6 +761,7 @@ class FormulaAssetTests(unittest.TestCase):
                 **os.environ,
                 "BEADS_ACTOR": "worker",
                 "GC_AGENT": "gc.implementation-worker",
+                "GC_TEMPLATE": "gc.implementation-worker",
                 "GC_PACK_DIR": str(root),
                 "GC_PACK_NAME": "gc",
                 "PATH": f"{bin_dir}:/usr/bin:/bin",
@@ -775,6 +776,7 @@ class FormulaAssetTests(unittest.TestCase):
                 "bead_id": "bd-123",
                 "root_bead_id": "root-1",
                 "continuation_group": "group-1",
+                "logical_bead_id": "bd-123",
                 "bead": {
                     "id": "bd-123",
                     "status": "in_progress",
@@ -787,6 +789,99 @@ class FormulaAssetTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_city_claim_command_recovers_blank_retry_for_imported_workers(self) -> None:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        command = root / "commands" / "claim" / "run.sh"
+        retry_id = "retry-3"
+        control_id = "control-1"
+        description = "Run the exact durable delivery contract."
+        retry = {
+            "id": retry_id,
+            "title": "Validate delivery",
+            "description": "",
+            "status": "in_progress",
+            "assignee": "worker",
+            "metadata": {
+                "gc.routed_to": "gstack.office-hours",
+                "gc.root_bead_id": "root-1",
+                "gc.continuation_group": "group-1",
+                "gc.control_for": control_id,
+                "gc.step_id": "delivery-preflight",
+                "gc.step_ref": "complete-delivery.delivery-preflight.iteration.3",
+                "gc.attempt": "3",
+                "gc.idempotency_key": "control-1:attempt:3",
+                "gc.run_target": "gstack.office-hours",
+            },
+        }
+        control = {
+            "id": control_id,
+            "title": retry["title"],
+            "description": description,
+            "metadata": {
+                "gc.root_bead_id": "root-1",
+                "gc.step_id": "delivery-preflight",
+                "gc.step_ref": "complete-delivery.delivery-preflight",
+                "gc.run_target": "gstack.office-hours",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            fake_gc = bin_dir / "gc"
+            fake_gc.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = hook ]; then\n"
+                f"  printf '%s\\n' '{json.dumps({'action': 'work', 'bead_id': retry_id, 'assignee': 'worker', 'route': 'gstack.office-hours'})}'\n"
+                f"elif [ \"$1\" = bd ] && [ \"$2\" = show ] && [ \"$3\" = {retry_id} ]; then\n"
+                f"  printf '%s\\n' '{json.dumps(retry)}'\n"
+                f"elif [ \"$1\" = bd ] && [ \"$2\" = show ] && [ \"$3\" = {control_id} ]; then\n"
+                f"  printf '%s\\n' '{json.dumps(control)}'\n"
+                "else\n"
+                "  exit 2\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            fake_gc.chmod(0o755)
+            env = {
+                **os.environ,
+                "BEADS_ACTOR": "worker",
+                "GC_AGENT": "gstack.office-hours",
+                "GC_TEMPLATE": "gstack.office-hours",
+                "GC_PACK_DIR": str(root),
+                "GC_PACK_NAME": "gc",
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+            }
+            result = subprocess.run([str(command)], capture_output=True, env=env, text=True)
+
+            control["metadata"]["gc.run_target"] = "other-role"
+            fake_gc.write_text(
+                fake_gc.read_text(encoding="utf-8").replace(
+                    json.dumps({
+                        "id": control_id,
+                        "title": retry["title"],
+                        "description": description,
+                        "metadata": {
+                            "gc.root_bead_id": "root-1",
+                            "gc.step_id": "delivery-preflight",
+                            "gc.step_ref": "complete-delivery.delivery-preflight",
+                            "gc.run_target": "gstack.office-hours",
+                        },
+                    }),
+                    json.dumps(control),
+                ),
+                encoding="utf-8",
+            )
+            ambiguous = subprocess.run([str(command)], capture_output=True, env=env, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        claimed = json.loads(result.stdout)
+        self.assertEqual(claimed["bead_id"], retry_id)
+        self.assertEqual(claimed["logical_bead_id"], control_id)
+        self.assertEqual(claimed["bead"]["description"], description)
+        self.assertEqual(ambiguous.returncode, 1)
+        self.assertIn("ambiguous or invalid logical lineage", ambiguous.stderr)
 
     def test_city_claim_command_returns_drain_without_bead_lookup(self) -> None:
         root = pathlib.Path(__file__).resolve().parents[1]
