@@ -9,6 +9,7 @@ atomically installs the declared runtime assets inside the registered rig root.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
@@ -21,7 +22,7 @@ import tempfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 
 class LaunchPreflightError(RuntimeError):
@@ -53,6 +54,36 @@ GASCITY_SCHEMAS = (
     "review.v1.yaml",
 )
 MANIFEST_NAME = "complete-delivery-assets.json"
+MANIFEST_VERSION = 2
+TRANSACTION_NAME = "complete-delivery-transaction.json"
+TRANSACTION_VERSION = 1
+# Version 1 did not record asset digests.  These are the SHA-256 digests of
+# the complete-delivery 0.1.0 release inventory, rather than of whichever
+# sources happen to be installed by the launcher that is performing an
+# upgrade.  They make the one supported legacy migration fail closed.
+LEGACY_V1_ASSET_HASHES = {
+    ".gc/scripts/checks/build-artifact-valid.sh": "sha256:8178312263aab109472ddb6b5fe2e93d835cd6c9b470e7427f22a670f0e13e94",
+    ".gc/scripts/checks/delivery-common.sh": "sha256:73e91e14c96eb75e37f9232db830a4849290298ba3b257ed1112ca9eaeda346a",
+    ".gc/scripts/checks/delivery-external-review-deadline.sh": "sha256:0935b7c1ea7e1fee35539f050a13698180a9df129c76cbccd96e5e610fad91b3",
+    ".gc/scripts/checks/delivery-local-gates.sh": "sha256:a76787b5ea0c1f1cc29a7234db63f70e068dfe5578df0841eef24c39d68232c3",
+    ".gc/scripts/checks/delivery-merged.sh": "sha256:218740575c743ca7050d27c00446aa854dbb21b9daeded36423e5547bd707185",
+    ".gc/scripts/checks/delivery-pr-approved.sh": "sha256:dbf9db95c2ce8cc79267e724557e264690b2ecfcdd0453bbdf68baf3bcb2c66d",
+    ".gc/scripts/checks/delivery-pr-open.sh": "sha256:8a1bac06babd14cf84ebee1c537bb117a80a35fd502140ea9369f372d904e363",
+    ".gc/scripts/checks/delivery-preflight.sh": "sha256:55c48cfd39610cb2e93627635d5c65179a5d24e660b6ff2b77b35c0182db3400",
+    ".gc/scripts/checks/delivery-release-verified.sh": "sha256:6f0571b2e689f11c7fef21d474b3c46946544f7847fc0bd7cf37f155edb0076b",
+    ".gc/scripts/checks/delivery-report-green.sh": "sha256:b7aefacf51f873437f6ec699a438b8aed940c59720f32b7026a9e46872717f64",
+    ".gc/scripts/checks/delivery-report-valid.sh": "sha256:1e85ca850808a454f9d5bc0c8560d243fcb07d4f0099354dcc80325811387291",
+    ".gc/scripts/checks/delivery-source-artifact-valid.sh": "sha256:3a6f17483424e7b7a592e61cbec7aa4382b95c4795d614e82c1e5d4a535d6299",
+    ".gc/scripts/delivery_gate.py": "sha256:d9b335eb280d5a926c2b6182a8d46ab4fbd7e490d038c8e18937e7b118081b5a",
+    ".gc/scripts/delivery_report.py": "sha256:ea4a2da346e9aae8ec53949f9f263da0109d555c40533c80b54b88fd9a8eb1a6",
+    ".gc/scripts/validate_build_artifact.py": "sha256:083fa0706605ed9e4247bc9ff2755706dde9e4e500650a0775caab55690ad4c2",
+    "schemas/build/decomposition.v1.yaml": "sha256:ef10d410d17e06c869afe3b08bcf49f9276cdee7ba3f250e063d742bf131415d",
+    "schemas/build/final-report.v1.yaml": "sha256:6ebc3e474032a5e21450b911f550ff7aa6cee882b35b63ce177125a1636bf6bf",
+    "schemas/build/implementation-summary.v1.yaml": "sha256:ab3c877a9555854a462116c2d3551b12fe3794eb8f29772de058a4cf5efa2197",
+    "schemas/build/plan.v1.yaml": "sha256:91b4c39a92c73bd9ea2c853793087870aa19872bd6e0d75be5aa2ba65e807327",
+    "schemas/build/requirements.v1.yaml": "sha256:09310e8466377a22c153a6cbf93287eec699a11092c2bc26f96bd6440aac01c5",
+    "schemas/build/review.v1.yaml": "sha256:4e9773e44a271204b743d429d0751e3c71a32bb66597c47da0c9c34edc5ac454",
+}
 GC_CONFIG_TIMEOUT_SECONDS = 15
 MAX_DURATION_SECONDS = Decimal(3600)
 DURATION = re.compile(r"([0-9]+(?:\.[0-9]+)?|\.[0-9]+)([smhd]?)")
@@ -397,6 +428,87 @@ def validate_profile(profile: dict[str, Any]) -> list[str]:
     return errors
 
 
+def run_github_command(arguments: list[str], *, cwd: Path, purpose: str) -> str:
+    """Run a launcher-only GitHub prerequisite without exposing credentials."""
+
+    timeout_seconds = gc_config_timeout_seconds()
+    try:
+        result = subprocess.run(
+            ["gh", *arguments],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise LaunchPreflightError("gh is required on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise LaunchPreflightError(
+            f"{purpose} timed out after {timeout_seconds:g}s"
+        ) from exc
+    except OSError as exc:
+        raise LaunchPreflightError(f"could not execute {purpose}: {exc}") from exc
+    if result.returncode:
+        diagnostic = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
+        raise LaunchPreflightError(
+            f"{purpose} failed with status {result.returncode}: {diagnostic}"
+        )
+    return result.stdout
+
+
+def verify_github_delivery_prerequisites(rig_root: Path, profile: dict[str, Any]) -> None:
+    """Verify credentialed GitHub facts before Formula ConditionEnv is sanitized.
+
+    Formula v2 executes its mechanical checks with a deliberately restricted
+    HOME, so the launcher is the only valid boundary for checking the user's
+    gh credential store.  The Formula receives a versioned durable attestation
+    only after all three live GitHub predicates below have passed.
+    """
+
+    timeout_seconds = gc_config_timeout_seconds()
+    try:
+        repository = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=rig_root,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LaunchPreflightError("registered rig is not a readable git worktree") from exc
+    if repository.returncode or repository.stdout.strip() != "true":
+        raise LaunchPreflightError("registered rig is not a readable git worktree")
+
+    run_github_command(["auth", "status"], cwd=rig_root, purpose="gh authentication check")
+    repo_json = run_github_command(
+        ["repo", "view", "--json", "nameWithOwner"],
+        cwd=rig_root,
+        purpose="GitHub repository resolution",
+    )
+    try:
+        payload = json.loads(repo_json)
+    except json.JSONDecodeError as exc:
+        raise LaunchPreflightError("GitHub repository resolution returned malformed JSON") from exc
+    name_with_owner = payload.get("nameWithOwner") if isinstance(payload, dict) else None
+    if not isinstance(name_with_owner, str) or not name_with_owner.strip():
+        raise LaunchPreflightError("GitHub repository resolution returned no nameWithOwner")
+
+    base_branch = string_var(profile, "base_branch", "main")
+    if not is_nonblank(base_branch):
+        raise LaunchPreflightError("base_branch must be nonblank")
+    run_github_command(
+        [
+            "api",
+            f"repos/{name_with_owner}/branches/{quote(base_branch, safe='')}/protection",
+            "--silent",
+        ],
+        cwd=rig_root,
+        purpose=f"protected base branch check for {base_branch}",
+    )
+
+
 def materialization_plan(pack_root: Path, rig_root: Path) -> list[tuple[Path, Path, str]]:
     gascity_root = inherited_gascity_root(pack_root)
     plan: list[tuple[Path, Path, str]] = []
@@ -417,8 +529,369 @@ def materialization_plan(pack_root: Path, rig_root: Path) -> list[tuple[Path, Pa
     for name in GASCITY_SCRIPTS:
         add(gascity_root / "assets" / "scripts" / name, f".gc/scripts/{name}")
     for name in GASCITY_SCHEMAS:
-        add(gascity_root / "schemas" / "build" / name, f"schemas/build/{name}")
+        # Schemas are runtime assets, not source files owned by the target rig.
+        # Keep them under the rig's ignored .gc directory beside the installed
+        # validator so a delivery launch never writes to schemas/build.
+        add(gascity_root / "schemas" / "build" / name, f".gc/schemas/build/{name}")
     return plan
+
+
+def asset_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def manifest_relative_path(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        raise LaunchPreflightError("managed asset manifest has an invalid asset path")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or path.parts in ((), (".",)):
+        raise LaunchPreflightError("managed asset manifest has an unsafe asset path")
+    return value
+
+
+def load_prior_manifest(rig_root: Path) -> dict[str, Any] | None:
+    """Return the prior Complete Delivery inventory, or fail closed.
+
+    The manifest is the ownership boundary: an existing file is mutable only
+    when a previous launcher recorded it and its recorded bytes are intact.
+    """
+
+    manifest_path = rig_root / ".gc" / MANIFEST_NAME
+    require_contained_destination(rig_root, manifest_path, MANIFEST_NAME)
+    if not (manifest_path.exists() or manifest_path.is_symlink()):
+        return None
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise LaunchPreflightError("managed asset manifest is not a regular file")
+    if git_tracked(rig_root, manifest_path):
+        raise LaunchPreflightError("managed asset manifest is tracked by the target rig")
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LaunchPreflightError("managed asset manifest is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("owner") != "complete-delivery"
+        or payload.get("version") not in (1, MANIFEST_VERSION)
+        or not isinstance(payload.get("assets"), list)
+    ):
+        raise LaunchPreflightError("managed asset manifest is not a valid Complete Delivery inventory")
+    assets = [manifest_relative_path(value) for value in payload["assets"]]
+    if len(assets) != len(set(assets)):
+        raise LaunchPreflightError("managed asset manifest contains duplicate asset paths")
+    hashes = payload.get("asset_hashes", {})
+    hashes_are_valid = (
+        isinstance(hashes, dict)
+        and set(hashes) == set(assets)
+        and all(
+            isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+            for value in hashes.values()
+        )
+    )
+    if payload["version"] == MANIFEST_VERSION and not hashes_are_valid:
+        raise LaunchPreflightError("managed asset manifest has invalid asset hashes")
+    if payload["version"] == 1:
+        try:
+            legacy_hashes = {asset: LEGACY_V1_ASSET_HASHES[asset] for asset in assets}
+        except KeyError as exc:
+            raise LaunchPreflightError(
+                "managed asset manifest contains an unknown Complete Delivery 0.1.0 asset"
+            ) from exc
+        # A v1 manifest normally has no hashes.  If an operator supplied them,
+        # they must attest exactly to the known release bytes, not merely be
+        # well-formed attacker-controlled digest strings.
+        if hashes and (not hashes_are_valid or hashes != legacy_hashes):
+            raise LaunchPreflightError("managed asset manifest has invalid legacy asset hashes")
+        hashes = legacy_hashes
+    return {"assets": set(assets), "asset_hashes": hashes}
+
+
+def git_tracked(rig_root: Path, destination: Path) -> bool:
+    relative = destination.relative_to(rig_root)
+    result = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", str(relative)],
+        cwd=rig_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise LaunchPreflightError(f"could not determine whether {relative} is tracked by the target rig")
+
+
+def ensure_regular_untracked_destination(rig_root: Path, destination: Path, label: str) -> None:
+    require_contained_destination(rig_root, destination, label)
+    relative = destination.relative_to(rig_root)
+    parent = rig_root
+    for component in relative.parts[:-1]:
+        parent /= component
+        if parent.exists() or parent.is_symlink():
+            if parent.is_symlink() or not parent.is_dir():
+                raise LaunchPreflightError(f"{label} has a non-directory ancestor")
+    if not (destination.exists() or destination.is_symlink()):
+        return
+    if destination.is_symlink() or not destination.is_file():
+        raise LaunchPreflightError(f"{label} is not a regular file")
+    if git_tracked(rig_root, destination):
+        raise LaunchPreflightError(f"{label} is tracked by the target rig")
+
+
+def source_for_prior_asset(
+    relative: str, planned_sources: dict[str, Path], gascity_root: Path
+) -> Path | None:
+    """Resolve legacy v1 root schemas only when their source is unambiguous."""
+
+    if relative in planned_sources:
+        return planned_sources[relative]
+    prefix = "schemas/build/"
+    if relative.startswith(prefix):
+        candidate = gascity_root / "schemas" / "build" / relative.removeprefix(prefix)
+        return candidate if candidate.is_file() else None
+    return None
+
+
+def preflight_materialization(
+    pack_root: Path, rig_root: Path, plan: list[tuple[Path, Path, str]]
+) -> tuple[dict[str, str], list[Path]]:
+    """Validate every write and cleanup before changing the target rig."""
+
+    prior = load_prior_manifest(rig_root)
+    prior_assets = prior["assets"] if prior else set()
+    prior_hashes = prior["asset_hashes"] if prior else {}
+    planned_sources = {relative: source for source, _, relative in plan}
+    gascity_root = inherited_gascity_root(pack_root)
+    desired_hashes = {relative: asset_digest(source) for source, _, relative in plan}
+
+    for source, destination, relative in plan:
+        ensure_regular_untracked_destination(rig_root, destination, relative)
+        if not destination.exists():
+            continue
+        if relative not in prior_assets:
+            raise LaunchPreflightError(f"{relative} already exists but is not owned by Complete Delivery")
+        expected = prior_hashes.get(relative, desired_hashes[relative])
+        if asset_digest(destination) != expected:
+            raise LaunchPreflightError(f"{relative} was modified after Complete Delivery installed it")
+
+    stale_paths: list[Path] = []
+    for relative in sorted(prior_assets - set(planned_sources)):
+        destination = rig_root / relative
+        ensure_regular_untracked_destination(rig_root, destination, relative)
+        # Record the complete authenticated stale inventory, including assets
+        # already absent when this attempt starts.  A retry must be able to
+        # distinguish a previously removed managed asset from a journal that
+        # was edited to omit a cleanup target.
+        stale_paths.append(destination)
+        if not destination.exists():
+            continue
+        expected = prior_hashes.get(relative)
+        if expected is None:
+            source = source_for_prior_asset(relative, planned_sources, gascity_root)
+            if source is None:
+                raise LaunchPreflightError(
+                    f"cannot safely clean stale managed asset {relative} without a recorded digest"
+                )
+            expected = asset_digest(source)
+        if asset_digest(destination) != expected:
+            raise LaunchPreflightError(f"stale managed asset {relative} was modified after installation")
+    return desired_hashes, stale_paths
+
+
+def serialized_manifest(installed: list[str], desired_hashes: dict[str, str]) -> str:
+    return json.dumps(
+        {
+            "asset_hashes": desired_hashes,
+            "assets": installed,
+            "inherited_from": "gascity",
+            "owner": "complete-delivery",
+            "version": MANIFEST_VERSION,
+        },
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+
+
+def path_digest(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return asset_digest(path)
+
+
+def transaction_path(rig_root: Path) -> Path:
+    path = rig_root / ".gc" / TRANSACTION_NAME
+    require_contained_destination(rig_root, path, TRANSACTION_NAME)
+    return path
+
+
+def transaction_states(
+    plan: list[tuple[Path, Path, str]], stale_paths: list[Path], manifest_path: Path
+) -> dict[str, str | None]:
+    states = {relative: path_digest(destination) for _, destination, relative in plan}
+    states.update({str(path): path_digest(path) for path in stale_paths})
+    states[MANIFEST_NAME] = path_digest(manifest_path)
+    return states
+
+
+def load_transaction(rig_root: Path) -> dict[str, Any] | None:
+    path = transaction_path(rig_root)
+    if not (path.exists() or path.is_symlink()):
+        return None
+    ensure_regular_untracked_destination(rig_root, path, TRANSACTION_NAME)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LaunchPreflightError("managed asset transaction journal is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("owner") != "complete-delivery"
+        or payload.get("version") != TRANSACTION_VERSION
+        or not isinstance(payload.get("desired_hashes"), dict)
+        or not isinstance(payload.get("prior_states"), dict)
+        or not isinstance(payload.get("stale_paths"), list)
+    ):
+        raise LaunchPreflightError("managed asset transaction journal is invalid")
+    return payload
+
+
+def apply_materialization(
+    plan: list[tuple[Path, Path, str]],
+    stale_paths: list[Path],
+    manifest_path: Path,
+    manifest_content: str,
+    rig_root: Path,
+) -> None:
+    for source, destination, relative in plan:
+        atomic_copy(source, destination, rig_root, relative)
+    for stale_path in stale_paths:
+        stale_path.unlink(missing_ok=True)
+    atomic_write_text(manifest_path, manifest_content, rig_root, MANIFEST_NAME)
+
+
+def verify_materialization_postcondition(
+    plan: list[tuple[Path, Path, str]],
+    stale_paths: list[Path],
+    manifest_path: Path,
+    desired_hashes: dict[str, str],
+    expected_manifest: str,
+) -> None:
+    """Require the complete managed inventory before deleting its journal."""
+
+    expected_states = {relative: digest for relative, digest in desired_hashes.items()}
+    expected_states.update({str(path): None for path in stale_paths})
+    expected_states[MANIFEST_NAME] = expected_manifest
+    if transaction_states(plan, stale_paths, manifest_path) != expected_states:
+        raise LaunchPreflightError("completed managed asset transaction has unexpected file contents")
+
+
+def recover_interrupted_materialization(
+    pack_root: Path, rig_root: Path, plan: list[tuple[Path, Path, str]]
+) -> None:
+    """Finish only a verified interrupted materialization transaction.
+
+    The journal is written before the first target-rig mutation.  Recovery
+    accepts each path only when it has the authorized prior digest or the
+    current source digest; a third value is treated as a user modification.
+    """
+
+    transaction = load_transaction(rig_root)
+    if transaction is None:
+        return
+    desired_hashes = {relative: asset_digest(source) for source, _, relative in plan}
+    if transaction["desired_hashes"] != desired_hashes:
+        raise LaunchPreflightError("managed asset transaction does not match this Complete Delivery release")
+    manifest_path = rig_root / ".gc" / MANIFEST_NAME
+    installed = [relative for _, _, relative in plan]
+    manifest_content = serialized_manifest(installed, desired_hashes)
+    expected_new_manifest = f"sha256:{hashlib.sha256(manifest_content.encode()).hexdigest()}"
+    stale_relatives = transaction["stale_paths"]
+    if any(
+        not isinstance(relative, str)
+        or not relative
+        or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+        for relative in stale_relatives
+    ):
+        raise LaunchPreflightError("managed asset transaction journal has unsafe stale paths")
+    stale_paths = [rig_root / relative for relative in stale_relatives]
+    for _, destination, relative in plan:
+        ensure_regular_untracked_destination(rig_root, destination, relative)
+    for stale_path in stale_paths:
+        ensure_regular_untracked_destination(rig_root, stale_path, str(stale_path.relative_to(rig_root)))
+    ensure_regular_untracked_destination(rig_root, manifest_path, MANIFEST_NAME)
+    current_manifest = path_digest(manifest_path)
+
+    if current_manifest == expected_new_manifest:
+        verify_materialization_postcondition(
+            plan, stale_paths, manifest_path, desired_hashes, expected_new_manifest
+        )
+        transaction_path(rig_root).unlink()
+        return
+
+    prior = load_prior_manifest(rig_root)
+    prior_hashes = prior["asset_hashes"] if prior else {}
+    prior_assets = prior["assets"] if prior else set()
+    expected_stale_relatives = sorted(prior_assets - set(desired_hashes))
+    if stale_relatives != expected_stale_relatives:
+        raise LaunchPreflightError(
+            "managed asset transaction stale paths do not match the authenticated prior inventory"
+        )
+    authorized_prior_states = {
+        relative: prior_hashes.get(relative) if relative in prior_assets else None
+        for _, _, relative in plan
+    }
+    authorized_prior_states.update(
+        {str(path): prior_hashes.get(str(path.relative_to(rig_root))) for path in stale_paths}
+    )
+    authorized_prior_states[MANIFEST_NAME] = current_manifest
+    transaction_prior_states = transaction["prior_states"]
+    if set(transaction_prior_states) != set(authorized_prior_states):
+        raise LaunchPreflightError("managed asset transaction does not match the authenticated prior inventory")
+
+    # A stale managed asset may already have been absent when the journal was
+    # written, or may have been unlinked before an interrupted retry.  Both
+    # states are safe, but a journal may never authorize any third digest.
+    for stale_path in stale_paths:
+        key = str(stale_path)
+        if transaction_prior_states[key] not in (authorized_prior_states[key], None):
+            raise LaunchPreflightError(
+                "managed asset transaction does not match the authenticated prior inventory"
+            )
+    for _, _, relative in plan:
+        # preflight_materialization permits a manifest-owned desired asset to
+        # be absent: the transaction will reinstall it.  In that case its
+        # authenticated journal state is None rather than the manifest's old
+        # digest.  Do not broaden this exception to unowned paths.
+        prior_state_is_absent_managed_asset = (
+            relative in prior_assets and transaction_prior_states[relative] is None
+        )
+        if (
+            transaction_prior_states[relative] != authorized_prior_states[relative]
+            and not prior_state_is_absent_managed_asset
+        ):
+            raise LaunchPreflightError("managed asset transaction does not match the authenticated prior inventory")
+    if transaction_prior_states[MANIFEST_NAME] != authorized_prior_states[MANIFEST_NAME]:
+        raise LaunchPreflightError("managed asset transaction does not match the authenticated prior inventory")
+
+    current_states = transaction_states(plan, stale_paths, manifest_path)
+    for _, destination, relative in plan:
+        if current_states[relative] not in (transaction_prior_states[relative], desired_hashes[relative]):
+            raise LaunchPreflightError(f"interrupted managed asset transaction found modified asset {relative}")
+    for stale_path in stale_paths:
+        key = str(stale_path)
+        if current_states[key] not in (transaction_prior_states[key], None):
+            raise LaunchPreflightError(f"interrupted managed asset transaction found modified stale asset {key}")
+    if current_states[MANIFEST_NAME] != authorized_prior_states[MANIFEST_NAME]:
+        raise LaunchPreflightError("interrupted managed asset transaction found a modified manifest")
+    apply_materialization(plan, stale_paths, manifest_path, manifest_content, rig_root)
+    verify_materialization_postcondition(
+        plan, stale_paths, manifest_path, desired_hashes, expected_new_manifest
+    )
+    transaction_path(rig_root).unlink()
 
 
 def atomic_copy(source: Path, destination: Path, rig_root: Path, label: str) -> None:
@@ -460,21 +933,29 @@ def materialize_assets(pack_root: Path, rig_root: Path) -> list[str]:
     plan = materialization_plan(pack_root, rig_root)
     manifest_path = rig_root / ".gc" / MANIFEST_NAME
     require_contained_destination(rig_root, manifest_path, MANIFEST_NAME)
+    recover_interrupted_materialization(pack_root, rig_root, plan)
+    desired_hashes, stale_paths = preflight_materialization(pack_root, rig_root, plan)
     installed = [relative for _, _, relative in plan]
-    for source, destination, relative in plan:
-        atomic_copy(source, destination, rig_root, relative)
-    manifest = {
-        "assets": installed,
-        "inherited_from": "gascity",
+    manifest_content = serialized_manifest(installed, desired_hashes)
+    journal = {
+        "desired_hashes": desired_hashes,
         "owner": "complete-delivery",
-        "version": 1,
+        "prior_states": transaction_states(plan, stale_paths, manifest_path),
+        "stale_paths": [str(path.relative_to(rig_root)) for path in stale_paths],
+        "version": TRANSACTION_VERSION,
     }
     atomic_write_text(
-        manifest_path,
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        transaction_path(rig_root),
+        json.dumps(journal, indent=2, sort_keys=True) + "\n",
         rig_root,
-        MANIFEST_NAME,
+        TRANSACTION_NAME,
     )
+    apply_materialization(plan, stale_paths, manifest_path, manifest_content, rig_root)
+    expected_manifest = f"sha256:{hashlib.sha256(manifest_content.encode()).hexdigest()}"
+    verify_materialization_postcondition(
+        plan, stale_paths, manifest_path, desired_hashes, expected_manifest
+    )
+    transaction_path(rig_root).unlink()
     return installed
 
 
@@ -498,6 +979,10 @@ def main(argv: list[str] | None = None) -> int:
         if errors:
             joined = "\n  - ".join(errors)
             raise LaunchPreflightError(f"Complete Delivery profile is invalid:\n  - {joined}")
+
+        # This must run before Formula v2 creates a root whose future
+        # ConditionEnv deliberately cannot read the launcher's gh config.
+        verify_github_delivery_prerequisites(rig_root, profile)
 
         # Every validation above, including the collision check and the complete
         # source/destination plan, runs before the first target-rig mutation.

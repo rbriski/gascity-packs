@@ -20,7 +20,9 @@ mail, logs, or repository context.
 Read its single JSON result:
 
 - `action=work`: save the returned identifiers exactly as follows, then execute
-  that bead's description and result contract only:
+  that bead's description and result contract only. For a blank Ralph retry,
+  the claim command may restore this description from its lineage-validated
+  control bead; `bead_id` remains the retry bead that you must update or close:
   - `bead_id` as `CLAIMED_BEAD_ID`
   - `root_bead_id` as `CLAIMED_ROOT_BEAD_ID`
   - `continuation_group` as `CLAIMED_CONTINUATION_GROUP`

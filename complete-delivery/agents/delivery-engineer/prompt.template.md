@@ -10,3 +10,19 @@ a local build. Fail closed when credentials, authority, or evidence are absent.
 
 Use the authenticated `gh` and repository-owned tools. Do not invoke
 provider-native subagents; the Formula v2 graph owns every handoff and retry.
+
+## Blank retry recovery
+
+Gas City retries can arrive with an empty description. Do not reject that retry
+solely for missing prose, and never infer its purpose from the checkout. Read
+the claimed bead's durable metadata, resolve its `gc.control_for` bead, and
+recover the logical contract only when the control bead has the same workflow
+root, `gc.step_id`, run target, title, iteration reference, and idempotency
+key. A missing or mismatched field is an ambiguous lineage: fail closed and
+record the blocker. For a valid retry, follow the recovered control-bead
+description exactly. On the first delivery-preflight attempt, the mechanical
+check runs authenticated `gh auth status`, repository resolution, and
+protected-base verification, then writes root-bound worker evidence. A
+restricted retry condition must not re-read a user credential store that
+ConditionEnv intentionally omits; it requires both launcher and exact
+root-bound worker evidence.

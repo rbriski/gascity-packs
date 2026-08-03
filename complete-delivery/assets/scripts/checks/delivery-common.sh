@@ -24,6 +24,85 @@ print(result if isinstance(result, str) else "")
 ' "$2"
 }
 
+delivery_bead_value() {
+  printf '%s' "$1" | python3 -c '
+import json
+import sys
+
+field = sys.argv[1]
+try:
+    value = json.load(sys.stdin)
+except Exception:
+    print("")
+    raise SystemExit(0)
+if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+    print("")
+    raise SystemExit(0)
+result = value[0].get(field, "")
+print(result if isinstance(result, str) else "")
+' "$2"
+}
+
+delivery_retry_lineage_is_valid() {
+  python3 - "$DELIVERY_BEAD_ID" "$DELIVERY_ROOT_ID" "$DELIVERY_STEP_JSON" "$1" <<'PY'
+import json
+import re
+import sys
+
+attempt_id, root_id, attempt_json, control_json = sys.argv[1:]
+
+def bead(raw, label):
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label} is not valid JSON: {exc}") from exc
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+        raise ValueError(f"{label} must contain exactly one bead")
+    return value[0]
+
+def text(value):
+    return value if isinstance(value, str) else ""
+
+try:
+    attempt = bead(attempt_json, "retry bead")
+    control = bead(control_json, "control bead")
+    metadata = attempt.get("metadata")
+    control_metadata = control.get("metadata")
+    if not isinstance(metadata, dict) or not isinstance(control_metadata, dict):
+        raise ValueError("retry and control beads must have metadata objects")
+    control_id = text(metadata.get("gc.control_for"))
+    step_id = text(metadata.get("gc.step_id"))
+    step_ref = text(metadata.get("gc.step_ref"))
+    attempt_number = text(metadata.get("gc.attempt"))
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", control_id):
+        raise ValueError("retry gc.control_for must be one durable bead ID")
+    if not re.fullmatch(r"[1-9][0-9]*", attempt_number):
+        raise ValueError("retry gc.attempt must be a positive integer")
+    if attempt.get("id") != attempt_id or control.get("id") != control_id:
+        raise ValueError("retry gc.control_for does not resolve to its exact control bead")
+    if not text(control.get("description")).strip():
+        raise ValueError("control bead has no reusable logical contract")
+    if text(metadata.get("gc.root_bead_id")) != root_id:
+        raise ValueError("retry workflow root does not match the active workflow")
+    if text(control_metadata.get("gc.root_bead_id")) != root_id:
+        raise ValueError("control bead workflow root does not match the retry")
+    if not step_id or text(control_metadata.get("gc.step_id")) != step_id:
+        raise ValueError("control bead step does not match the retry")
+    if text(metadata.get("gc.run_target")) != text(control_metadata.get("gc.run_target")):
+        raise ValueError("control bead run target does not match the retry")
+    if text(attempt.get("title")) != text(control.get("title")):
+        raise ValueError("control bead title does not match the retry")
+    control_ref = text(control_metadata.get("gc.step_ref"))
+    if not control_ref or step_ref != f"{control_ref}.iteration.{attempt_number}":
+        raise ValueError("retry step reference is not the control bead iteration")
+    if text(metadata.get("gc.idempotency_key")) != f"{control_id}:attempt:{attempt_number}":
+        raise ValueError("retry idempotency key does not bind the control bead and attempt")
+except ValueError as exc:
+    print(f"invalid blank-retry lineage: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 delivery_json_is_valid() {
   printf '%s' "$1" | python3 -c 'import json, sys; json.load(sys.stdin)' >/dev/null 2>&1
 }
@@ -110,6 +189,21 @@ delivery_initialize_context() {
     delivery_json_is_valid "$DELIVERY_ROOT_JSON" || \
       delivery_fail "gc bd show $DELIVERY_ROOT_ID returned invalid JSON"
   fi
+  DELIVERY_LOGICAL_BEAD_ID="$DELIVERY_BEAD_ID"
+  DELIVERY_LOGICAL_DESCRIPTION="$(delivery_bead_value "$DELIVERY_STEP_JSON" description)"
+  DELIVERY_CONTROL_BEAD_ID="$(delivery_metadata_value "$DELIVERY_STEP_JSON" "gc.control_for")"
+  if ! [[ "$DELIVERY_LOGICAL_DESCRIPTION" =~ [^[:space:]] ]] && [ -n "$DELIVERY_CONTROL_BEAD_ID" ]; then
+    [[ "$DELIVERY_CONTROL_BEAD_ID" =~ ^[A-Za-z0-9._-]+$ ]] || \
+      delivery_fail "blank retry description has no valid gc.control_for bead ID"
+    DELIVERY_CONTROL_JSON="$(delivery_read_bead_json "$DELIVERY_CONTROL_BEAD_ID")" || \
+      delivery_fail "gc bd show $DELIVERY_CONTROL_BEAD_ID failed while recovering blank retry context"
+    delivery_json_is_valid "$DELIVERY_CONTROL_JSON" || \
+      delivery_fail "gc bd show $DELIVERY_CONTROL_BEAD_ID returned invalid JSON"
+    delivery_retry_lineage_is_valid "$DELIVERY_CONTROL_JSON" || \
+      delivery_fail "blank retry description has ambiguous or invalid logical lineage"
+    DELIVERY_LOGICAL_BEAD_ID="$DELIVERY_CONTROL_BEAD_ID"
+    DELIVERY_LOGICAL_DESCRIPTION="$(delivery_bead_value "$DELIVERY_CONTROL_JSON" description)"
+  fi
   DELIVERY_WORK_DIR="${GC_WORK_DIR:-}"
   if [ -z "$DELIVERY_WORK_DIR" ]; then
     DELIVERY_WORK_DIR="$(delivery_metadata_value "$DELIVERY_ROOT_JSON" "gc.work_dir")"
@@ -131,6 +225,29 @@ delivery_var() {
     value="$2"
   fi
   printf '%s' "$value"
+}
+
+delivery_worker_preflight_evidence() {
+  # The evidence is written only by the unrestricted first worker.  It binds
+  # the attestation to this particular workflow root and logical preflight
+  # control, so a value copied from another launch cannot satisfy Ralph's
+  # restricted retry condition.
+  printf 'github-worker-v1:%s:%s' "$DELIVERY_ROOT_ID" "$DELIVERY_LOGICAL_BEAD_ID"
+}
+
+delivery_worker_preflight_evidence_is_valid() {
+  python3 - "$1" "$DELIVERY_ROOT_ID" "$DELIVERY_LOGICAL_BEAD_ID" <<'PY'
+import sys
+
+evidence, root_id, control_id = sys.argv[1:]
+expected = f"github-worker-v1:{root_id}:{control_id}"
+raise SystemExit(0 if evidence == expected else 1)
+PY
+}
+
+delivery_is_preflight_control() {
+  [ "$(delivery_metadata_value "$DELIVERY_STEP_JSON" "gc.step_id")" = "delivery-preflight" ] || return 1
+  [ "$(delivery_metadata_value "$DELIVERY_ROOT_JSON" "gc.formula_name")" = "complete-delivery" ] || return 1
 }
 
 delivery_resolve_path() {

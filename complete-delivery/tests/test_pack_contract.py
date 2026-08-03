@@ -5,12 +5,14 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
 import tomllib
 import types
 import unittest
+from unittest import mock
 
 
 PACK_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -22,6 +24,11 @@ REPORT_SPEC = importlib.util.spec_from_file_location("pack_contract_delivery_rep
 assert REPORT_SPEC and REPORT_SPEC.loader
 delivery_report = importlib.util.module_from_spec(REPORT_SPEC)
 REPORT_SPEC.loader.exec_module(delivery_report)
+PREPARE_SCRIPT = PACK_ROOT / "assets" / "scripts" / "prepare_delivery_launch.py"
+PREPARE_SPEC = importlib.util.spec_from_file_location("pack_contract_prepare_delivery", PREPARE_SCRIPT)
+assert PREPARE_SPEC and PREPARE_SPEC.loader
+prepare_delivery = importlib.util.module_from_spec(PREPARE_SPEC)
+PREPARE_SPEC.loader.exec_module(prepare_delivery)
 
 
 def load_toml(path: pathlib.Path) -> dict:
@@ -96,6 +103,43 @@ class PackContractTests(unittest.TestCase):
                         [shell, "-n", str(script)], capture_output=True, text=True
                     )
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_installed_validator_uses_schemas_beside_the_managed_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            validator = root / ".gc/scripts/validate_build_artifact.py"
+            schema = root / ".gc/schemas/build/requirements.v1.yaml"
+            artifact = root / "requirements.md"
+            validator.parent.mkdir(parents=True)
+            schema.parent.mkdir(parents=True)
+            shutil.copy2(REPO_ROOT / "gascity/assets/scripts/validate_build_artifact.py", validator)
+            shutil.copy2(REPO_ROOT / "gascity/schemas/build/requirements.v1.yaml", schema)
+            artifact.write_text(
+                "---\n"
+                "schema: gc.build.requirements.v1\n"
+                "workflow:\n  id: workflow-1\n  formula: complete-delivery\n"
+                "methodology:\n  pack: complete-delivery\n  name: complete-delivery\n"
+                "producer:\n  formula: complete-delivery\n  stage: requirements\n  attempt: 1\n"
+                "status: approved\n"
+                "trace:\n  upstream: []\n  coverage: []\n"
+                "---\n\n"
+                + "\n\n".join(
+                    f"## {section}\n\ncontent"
+                    for section in (
+                        "Problem Statement", "W6H", "User Stories", "Technical Stories",
+                        "Behavior Requirements", "Example Mapping", "Acceptance Criteria",
+                        "Out Of Scope", "Open Questions",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["python3", str(validator), "--schema", "gc.build.requirements.v1", "--path", str(artifact)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_docs_define_terminal_not_pr_only_contract(self) -> None:
         readme = (PACK_ROOT / "README.md").read_text(encoding="utf-8")
@@ -296,7 +340,9 @@ class CommandContractTests(unittest.TestCase):
             root = pathlib.Path(directory)
             rig = root / "rig"
             rig.mkdir()
+            subprocess.run(["git", "init", "-q", str(rig)], check=True)
             fake_gc = pathlib.Path(directory) / "gc"
+            fake_gh = pathlib.Path(directory) / "gh"
             config = {
                 "config": {
                     "Rigs": [{"Name": "finance", "Path": str(rig), "FormulaVars": profile or {
@@ -331,6 +377,17 @@ class CommandContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_gc.chmod(0o755)
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$FAKE_GH_CALLS\"\n"
+                "[ \"${FAKE_GH_AUTHENTICATED:-true}\" = true ] || exit 1\n"
+                "if [ \"${1:-}\" = repo ] && [ \"${2:-}\" = view ]; then\n"
+                "  printf '%s\\n' '{\"nameWithOwner\":\"example/repo\"}'\n"
+                "fi\n"
+                "if [ \"${1:-}\" = api ] && [ \"${FAKE_GH_PROTECTED:-true}\" != true ]; then exit 1; fi\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
             environment = os.environ.copy()
             environment["GC_PACK_DIR"] = str(PACK_ROOT)
             environment["PATH"] = f"{directory}:{environment['PATH']}"
@@ -342,6 +399,7 @@ class CommandContractTests(unittest.TestCase):
             )
             environment["FAKE_GC_SINK"] = str(sink)
             environment["FAKE_GC_CALLS"] = str(calls)
+            environment["FAKE_GH_CALLS"] = str(root / "gh-calls")
             if environment_updates:
                 environment.update(environment_updates)
             if setup:
@@ -356,19 +414,22 @@ class CommandContractTests(unittest.TestCase):
             result.sink = sink
             result.slinged = sink.exists()
             result.calls = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+            gh_calls = root / "gh-calls"
+            result.gh_calls = gh_calls.read_text(encoding="utf-8").splitlines() if gh_calls.exists() else []
             result.materialized = {
                 "delivery_preflight": (rig / ".gc/scripts/checks/delivery-preflight.sh").is_file(),
                 "build_artifact": (rig / ".gc/scripts/checks/build-artifact-valid.sh").is_file(),
                 "validator": (rig / ".gc/scripts/validate_build_artifact.py").is_file(),
-                "schema": (rig / "schemas/build/requirements.v1.yaml").is_file(),
+                "schema": (rig / ".gc/schemas/build/requirements.v1.yaml").is_file(),
             }
             result.materialized_paths = sorted(
                 str(path.relative_to(rig))
-                for root in (rig / ".gc", rig / "schemas" / "build")
+                for root in (rig / ".gc",)
                 if root.exists()
                 for path in root.rglob("*")
                 if path.is_file()
             )
+            result.legacy_schema_exists = (rig / "schemas/build/requirements.v1.yaml").exists()
             manifest = rig / ".gc" / "complete-delivery-assets.json"
             try:
                 result.manifest = (
@@ -388,6 +449,7 @@ class CommandContractTests(unittest.TestCase):
         for value in (
             "source_bead_id=fi-123",
             "source_title=Requested delivery",
+            "launcher_github_preflight=github-v1",
             "report_title=Requested delivery",
             "interaction_mode=autonomous",
             "review_mode=agent",
@@ -404,6 +466,12 @@ class CommandContractTests(unittest.TestCase):
         })
         self.assertEqual(result.materialized_paths, [
             ".gc/complete-delivery-assets.json",
+            ".gc/schemas/build/decomposition.v1.yaml",
+            ".gc/schemas/build/final-report.v1.yaml",
+            ".gc/schemas/build/implementation-summary.v1.yaml",
+            ".gc/schemas/build/plan.v1.yaml",
+            ".gc/schemas/build/requirements.v1.yaml",
+            ".gc/schemas/build/review.v1.yaml",
             ".gc/scripts/checks/build-artifact-valid.sh",
             ".gc/scripts/checks/delivery-common.sh",
             ".gc/scripts/checks/delivery-external-review-deadline.sh",
@@ -419,17 +487,114 @@ class CommandContractTests(unittest.TestCase):
             ".gc/scripts/delivery_gate.py",
             ".gc/scripts/delivery_report.py",
             ".gc/scripts/validate_build_artifact.py",
-            "schemas/build/decomposition.v1.yaml",
-            "schemas/build/final-report.v1.yaml",
-            "schemas/build/implementation-summary.v1.yaml",
-            "schemas/build/plan.v1.yaml",
-            "schemas/build/requirements.v1.yaml",
-            "schemas/build/review.v1.yaml",
         ])
         self.assertEqual(
             sorted(result.manifest["assets"]),
             [path for path in result.materialized_paths if path != ".gc/complete-delivery-assets.json"],
         )
+        self.assertEqual(result.manifest["version"], 2)
+        self.assertEqual(set(result.manifest["asset_hashes"]), set(result.manifest["assets"]))
+        self.assertEqual(
+            result.gh_calls,
+            [
+                "auth status",
+                "repo view --json nameWithOwner",
+                "api repos/example/repo/branches/main/protection --silent",
+            ],
+        )
+
+    def test_launch_refuses_a_foreign_managed_schema_destination(self) -> None:
+        def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
+            destination = rig / ".gc/schemas/build/requirements.v1.yaml"
+            destination.parent.mkdir(parents=True)
+            destination.write_text("foreign schema\n", encoding="utf-8")
+
+        result = self.run_command("fi-123", "--rig=finance", setup=setup)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(result.slinged)
+        self.assertIn("not owned by Complete Delivery", result.stderr)
+
+    def test_launch_refuses_a_tracked_managed_destination_even_when_manifest_owned(self) -> None:
+        def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
+            destination = rig / ".gc/scripts/checks/delivery-preflight.sh"
+            destination.parent.mkdir(parents=True)
+            source = subprocess.run(
+                ["git", "show", "origin/main:complete-delivery/assets/scripts/checks/delivery-preflight.sh"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                check=True,
+            ).stdout
+            destination.write_bytes(source)
+            manifest = rig / ".gc/complete-delivery-assets.json"
+            manifest.write_text(
+                json.dumps({
+                    "assets": [".gc/scripts/checks/delivery-preflight.sh"],
+                    "inherited_from": "gascity",
+                    "owner": "complete-delivery",
+                    "version": 1,
+                }),
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", ".gc/scripts/checks/delivery-preflight.sh"],
+                cwd=rig,
+                check=True,
+            )
+
+        result = self.run_command("fi-123", "--rig=finance", setup=setup)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(result.slinged)
+        self.assertIn("is tracked by the target rig", result.stderr)
+
+    def test_safe_upgrade_migrates_only_manifest_owned_matching_legacy_schema(self) -> None:
+        def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
+            legacy = rig / "schemas/build/requirements.v1.yaml"
+            legacy.parent.mkdir(parents=True)
+            shutil.copy2(REPO_ROOT / "gascity/schemas/build/requirements.v1.yaml", legacy)
+            manifest = rig / ".gc/complete-delivery-assets.json"
+            manifest.parent.mkdir()
+            manifest.write_text(
+                json.dumps({
+                    "assets": ["schemas/build/requirements.v1.yaml"],
+                    "inherited_from": "gascity",
+                    "owner": "complete-delivery",
+                    "version": 1,
+                }),
+                encoding="utf-8",
+            )
+
+        result = self.run_command("fi-123", "--rig=finance", setup=setup)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(result.legacy_schema_exists)
+        self.assertTrue(result.materialized["schema"])
+        self.assertEqual(result.manifest["version"], 2)
+
+    def test_safe_upgrade_refuses_a_modified_legacy_schema(self) -> None:
+        def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
+            legacy = rig / "schemas/build/requirements.v1.yaml"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text("modified schema\n", encoding="utf-8")
+            manifest = rig / ".gc/complete-delivery-assets.json"
+            manifest.parent.mkdir()
+            manifest.write_text(
+                json.dumps({
+                    "assets": ["schemas/build/requirements.v1.yaml"],
+                    "inherited_from": "gascity",
+                    "owner": "complete-delivery",
+                    "version": 1,
+                }),
+                encoding="utf-8",
+            )
+
+        result = self.run_command("fi-123", "--rig=finance", setup=setup)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(result.slinged)
+        self.assertTrue(result.legacy_schema_exists)
+        self.assertIn("was modified after installation", result.stderr)
 
     def test_interactive_is_one_flag(self) -> None:
         result = self.run_command("fi-123", "--rig=finance", "--interactive")
@@ -449,6 +614,28 @@ class CommandContractTests(unittest.TestCase):
         self.assertIn("source_bead_id=fi-123", args)
         self.assertIn("source_title=Reject dirty checkout", args)
         self.assertIn("report_title=Reject dirty checkout", args)
+
+    def test_unauthenticated_launcher_fails_before_assets_or_dispatch(self) -> None:
+        result = self.run_command(
+            "fi-123",
+            "--rig=finance",
+            environment_updates={"FAKE_GH_AUTHENTICATED": "false"},
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("gh authentication check failed", result.stderr)
+        self.assertFalse(result.slinged)
+        self.assertEqual(result.materialized_paths, [])
+
+    def test_unprotected_launcher_base_branch_fails_before_dispatch(self) -> None:
+        result = self.run_command(
+            "fi-123",
+            "--rig=finance",
+            environment_updates={"FAKE_GH_PROTECTED": "false"},
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("protected base branch check for main failed", result.stderr)
+        self.assertFalse(result.slinged)
+        self.assertEqual(result.materialized_paths, [])
 
     def test_missing_or_ambiguous_source_fails_before_dispatch(self) -> None:
         for source_json in ("[]", '[{"title":"one"},{"title":"two"}]', '[{}]'):
@@ -700,6 +887,248 @@ class CommandContractTests(unittest.TestCase):
         text = wrapper.read_text(encoding="utf-8")
         self.assertIn('"$GC_PACK_DIR/assets/scripts/publish_delivery_report.py"', text)
         self.assertTrue((wrapper.parent / "help.md").is_file())
+
+
+class MaterializationRecoveryTests(unittest.TestCase):
+    def make_rig(self, root: pathlib.Path) -> pathlib.Path:
+        rig = root / "rig"
+        rig.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(rig)], check=True)
+        return rig
+
+    def install_real_v1_inventory(self, rig: pathlib.Path) -> None:
+        for relative in prepare_delivery.LEGACY_V1_ASSET_HASHES:
+            destination = rig / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if relative == ".gc/scripts/checks/build-artifact-valid.sh":
+                source = "gascity/assets/scripts/checks/build-artifact-valid.sh"
+            elif relative == ".gc/scripts/validate_build_artifact.py":
+                source = "gascity/assets/scripts/validate_build_artifact.py"
+            elif relative.startswith(".gc/scripts/checks/"):
+                source = f"complete-delivery/assets/scripts/checks/{pathlib.Path(relative).name}"
+            elif relative.startswith(".gc/scripts/"):
+                source = f"complete-delivery/assets/scripts/{pathlib.Path(relative).name}"
+            elif relative.startswith("schemas/build/"):
+                source = f"gascity/{relative}"
+            else:
+                self.fail(f"unexpected v1 asset {relative}")
+            contents = subprocess.run(
+                ["git", "show", f"origin/main:{source}"],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                check=True,
+            ).stdout
+            destination.write_bytes(contents)
+        manifest = rig / ".gc" / prepare_delivery.MANIFEST_NAME
+        manifest.write_text(
+            json.dumps(
+                {
+                    "assets": sorted(prepare_delivery.LEGACY_V1_ASSET_HASHES),
+                    "inherited_from": "gascity",
+                    "owner": "complete-delivery",
+                    "version": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_full_realistic_v1_inventory_upgrades_only_known_release_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rig = self.make_rig(pathlib.Path(directory))
+            self.install_real_v1_inventory(rig)
+
+            installed = prepare_delivery.materialize_assets(PACK_ROOT, rig)
+
+            self.assertEqual(len(installed), 21)
+            self.assertFalse((rig / "schemas/build/requirements.v1.yaml").exists())
+            manifest = json.loads(
+                (rig / ".gc" / prepare_delivery.MANIFEST_NAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["version"], prepare_delivery.MANIFEST_VERSION)
+            self.assertEqual(set(manifest["asset_hashes"]), set(manifest["assets"]))
+
+            rejected_rig = self.make_rig(pathlib.Path(directory) / "rejected")
+            self.install_real_v1_inventory(rejected_rig)
+            changed = rejected_rig / ".gc/scripts/checks/delivery-preflight.sh"
+            changed.write_text("locally modified\n", encoding="utf-8")
+            with self.assertRaisesRegex(prepare_delivery.LaunchPreflightError, "modified"):
+                prepare_delivery.materialize_assets(PACK_ROOT, rejected_rig)
+
+    def test_interrupted_copy_stale_cleanup_and_journal_cleanup_recover_on_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rig = self.make_rig(pathlib.Path(directory))
+            original_copy = prepare_delivery.atomic_copy
+            copies = 0
+
+            def fail_second_copy(*args, **kwargs):
+                nonlocal copies
+                copies += 1
+                if copies == 2:
+                    raise OSError("injected copy failure")
+                return original_copy(*args, **kwargs)
+
+            with mock.patch.object(prepare_delivery, "atomic_copy", side_effect=fail_second_copy):
+                with self.assertRaises(OSError):
+                    prepare_delivery.materialize_assets(PACK_ROOT, rig)
+            self.assertTrue((rig / ".gc" / prepare_delivery.TRANSACTION_NAME).exists())
+            prepare_delivery.materialize_assets(PACK_ROOT, rig)
+            self.assertFalse((rig / ".gc" / prepare_delivery.TRANSACTION_NAME).exists())
+
+            tampered_rig = self.make_rig(pathlib.Path(directory) / "tampered")
+            copies = 0
+            with mock.patch.object(prepare_delivery, "atomic_copy", side_effect=fail_second_copy):
+                with self.assertRaises(OSError):
+                    prepare_delivery.materialize_assets(PACK_ROOT, tampered_rig)
+            (tampered_rig / ".gc/scripts/checks/delivery-common.sh").write_text(
+                "tampered after interruption\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(prepare_delivery.LaunchPreflightError, "modified asset"):
+                prepare_delivery.materialize_assets(PACK_ROOT, tampered_rig)
+
+            stale_rig = self.make_rig(pathlib.Path(directory) / "stale")
+            self.install_real_v1_inventory(stale_rig)
+            original_write = prepare_delivery.atomic_write_text
+            writes = 0
+
+            def fail_manifest_write(*args, **kwargs):
+                nonlocal writes
+                writes += 1
+                if writes == 2:
+                    raise OSError("injected manifest replacement failure")
+                return original_write(*args, **kwargs)
+
+            with mock.patch.object(prepare_delivery, "atomic_write_text", side_effect=fail_manifest_write):
+                with self.assertRaises(OSError):
+                    prepare_delivery.materialize_assets(PACK_ROOT, stale_rig)
+            self.assertTrue((stale_rig / ".gc" / prepare_delivery.TRANSACTION_NAME).exists())
+            prepare_delivery.materialize_assets(PACK_ROOT, stale_rig)
+            self.assertFalse((stale_rig / "schemas/build/requirements.v1.yaml").exists())
+
+            unlink_rig = self.make_rig(pathlib.Path(directory) / "unlink")
+            self.install_real_v1_inventory(unlink_rig)
+            original_unlink = pathlib.Path.unlink
+
+            def fail_mid_stale_cleanup(path, *args, **kwargs):
+                if str(path).endswith("schemas/build/requirements.v1.yaml"):
+                    raise OSError("injected stale cleanup failure")
+                return original_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(pathlib.Path, "unlink", new=fail_mid_stale_cleanup):
+                with self.assertRaises(OSError):
+                    prepare_delivery.materialize_assets(PACK_ROOT, unlink_rig)
+            self.assertTrue((unlink_rig / ".gc" / prepare_delivery.TRANSACTION_NAME).exists())
+            prepare_delivery.materialize_assets(PACK_ROOT, unlink_rig)
+            self.assertFalse((unlink_rig / "schemas/build/review.v1.yaml").exists())
+
+            completed_rig = self.make_rig(pathlib.Path(directory) / "completed")
+            self.install_real_v1_inventory(completed_rig)
+            journal_removed = False
+
+            def fail_first_journal_cleanup(path, *args, **kwargs):
+                nonlocal journal_removed
+                if path.name == prepare_delivery.TRANSACTION_NAME and not journal_removed:
+                    journal_removed = True
+                    raise OSError("injected post-manifest cleanup failure")
+                return original_unlink(path, *args, **kwargs)
+
+            with mock.patch.object(pathlib.Path, "unlink", new=fail_first_journal_cleanup):
+                with self.assertRaises(OSError):
+                    prepare_delivery.materialize_assets(PACK_ROOT, completed_rig)
+            self.assertTrue((completed_rig / ".gc" / prepare_delivery.TRANSACTION_NAME).exists())
+            prepare_delivery.materialize_assets(PACK_ROOT, completed_rig)
+            self.assertFalse((completed_rig / ".gc" / prepare_delivery.TRANSACTION_NAME).exists())
+
+    def test_recovery_rejects_tampered_or_malformed_stale_path_journals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+
+            tampered_rig = self.make_rig(root / "tampered-stale-path")
+            self.install_real_v1_inventory(tampered_rig)
+
+            with mock.patch.object(
+                prepare_delivery, "atomic_copy", side_effect=OSError("injected copy failure")
+            ):
+                with self.assertRaises(OSError):
+                    prepare_delivery.materialize_assets(PACK_ROOT, tampered_rig)
+
+            journal_path = tampered_rig / ".gc" / prepare_delivery.TRANSACTION_NAME
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            desired_relative = ".gc/scripts/checks/delivery-preflight.sh"
+            desired_path = tampered_rig / desired_relative
+            before = desired_path.read_bytes()
+            journal["stale_paths"].append(desired_relative)
+            # This matches the desired path's original state, as an attacker
+            # would need to do to satisfy the old per-path state check.
+            journal["prior_states"][str(desired_path)] = journal["prior_states"][desired_relative]
+            journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+            with self.assertRaisesRegex(prepare_delivery.LaunchPreflightError, "stale paths"):
+                prepare_delivery.materialize_assets(PACK_ROOT, tampered_rig)
+            self.assertEqual(desired_path.read_bytes(), before)
+            self.assertTrue(journal_path.exists())
+
+            malformed_rig = self.make_rig(root / "malformed-stale-path")
+            self.install_real_v1_inventory(malformed_rig)
+            with mock.patch.object(
+                prepare_delivery, "atomic_copy", side_effect=OSError("injected copy failure")
+            ):
+                with self.assertRaises(OSError):
+                    prepare_delivery.materialize_assets(PACK_ROOT, malformed_rig)
+            malformed_journal_path = malformed_rig / ".gc" / prepare_delivery.TRANSACTION_NAME
+            malformed_journal = json.loads(malformed_journal_path.read_text(encoding="utf-8"))
+            malformed_journal["stale_paths"] = [42]
+            malformed_journal_path.write_text(json.dumps(malformed_journal), encoding="utf-8")
+
+            with self.assertRaisesRegex(prepare_delivery.LaunchPreflightError, "unsafe stale paths"):
+                prepare_delivery.materialize_assets(PACK_ROOT, malformed_rig)
+
+    def test_recovery_allows_initially_absent_authenticated_stale_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rig = self.make_rig(pathlib.Path(directory))
+            self.install_real_v1_inventory(rig)
+            missing_relative = "schemas/build/requirements.v1.yaml"
+            (rig / missing_relative).unlink()
+
+            with mock.patch.object(
+                prepare_delivery, "atomic_copy", side_effect=OSError("injected copy failure")
+            ):
+                with self.assertRaises(OSError):
+                    prepare_delivery.materialize_assets(PACK_ROOT, rig)
+
+            journal = json.loads(
+                (rig / ".gc" / prepare_delivery.TRANSACTION_NAME).read_text(encoding="utf-8")
+            )
+            self.assertIn(missing_relative, journal["stale_paths"])
+            prepare_delivery.materialize_assets(PACK_ROOT, rig)
+            self.assertFalse((rig / missing_relative).exists())
+
+    def test_recovery_reinstalls_initially_absent_manifest_owned_desired_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            rig = self.make_rig(pathlib.Path(directory))
+            self.install_real_v1_inventory(rig)
+            missing_relative = ".gc/scripts/checks/delivery-preflight.sh"
+            (rig / missing_relative).unlink()
+
+            original_copy = prepare_delivery.atomic_copy
+            copies = 0
+
+            def fail_later_copy(*args, **kwargs):
+                nonlocal copies
+                copies += 1
+                if copies == 2:
+                    raise OSError("injected later copy failure")
+                return original_copy(*args, **kwargs)
+
+            with mock.patch.object(prepare_delivery, "atomic_copy", side_effect=fail_later_copy):
+                with self.assertRaisesRegex(OSError, "later copy failure"):
+                    prepare_delivery.materialize_assets(PACK_ROOT, rig)
+
+            self.assertTrue((rig / ".gc" / prepare_delivery.TRANSACTION_NAME).exists())
+            plan = prepare_delivery.materialization_plan(PACK_ROOT, rig)
+            source = next(source for source, _, relative in plan if relative == missing_relative)
+            prepare_delivery.materialize_assets(PACK_ROOT, rig)
+            self.assertEqual((rig / missing_relative).read_bytes(), source.read_bytes())
+            self.assertFalse((rig / ".gc" / prepare_delivery.TRANSACTION_NAME).exists())
 
 
 class ReportSecurityContractTests(unittest.TestCase):

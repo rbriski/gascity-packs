@@ -103,9 +103,10 @@ fi
 
 claim_file="$(mktemp)"
 show_file="$(mktemp)"
+control_file="$(mktemp)"
 err_file="$(mktemp)"
 cleanup() {
-    rm -f "$claim_file" "$show_file" "$err_file"
+    rm -f "$claim_file" "$show_file" "$control_file" "$err_file"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -213,21 +214,132 @@ if [ "$verified" -ne 1 ]; then
     exit 1
 fi
 
-python3 - "$show_file" <<'PY'
+if python3 - "$show_file" <<'PY'
 import json
 import sys
 
-bead = json.load(open(sys.argv[1], encoding="utf-8"))
+try:
+    bead = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
 if isinstance(bead, list):
-    bead = bead[0] if bead else {}
-metadata = bead.get("metadata") or {}
+    bead = bead[0] if len(bead) == 1 else {}
+description = bead.get("description") if isinstance(bead, dict) else None
+raise SystemExit(0 if isinstance(description, str) and not description.strip() else 1)
+PY
+then
+    control_id="$(json_pick metadata:gc.control_for <"$show_file")"
+    case "$control_id" in
+        ''|*[!A-Za-z0-9._-]*)
+            printf 'CLAIM_REJECTED blank retry description has no valid gc.control_for bead ID\n' >&2
+            exit 1
+            ;;
+    esac
+
+    control_read=0
+    control_try=0
+    while [ "$control_try" -lt "$max_attempts" ]; do
+        control_try=$((control_try + 1))
+        if gc bd show "$control_id" --json >"$control_file" 2>"$err_file"; then
+            control_read=1
+            break
+        fi
+        if [ "$control_try" -lt "$max_attempts" ]; then
+            sleep 1
+        fi
+    done
+    if [ "$control_read" -ne 1 ]; then
+        printf 'CLAIM_REJECTED could not read gc.control_for bead %s for blank retry recovery\n' \
+            "$control_id" >&2
+        exit 1
+    fi
+fi
+
+python3 - "$show_file" "$control_file" <<'PY'
+import json
+import re
+import sys
+
+def one_bead(path, label):
+    try:
+        value = json.load(open(path, encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"{label} is not valid JSON: {exc}") from exc
+    if isinstance(value, list):
+        if len(value) != 1 or not isinstance(value[0], dict):
+            raise ValueError(f"{label} must contain exactly one bead")
+        return value[0]
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must contain one bead object")
+    return value
+
+def text(value):
+    return value if isinstance(value, str) else ""
+
+def fail(message):
+    print(f"CLAIM_REJECTED blank retry description has ambiguous or invalid logical lineage: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    bead = one_bead(sys.argv[1], "claimed bead")
+except ValueError as exc:
+    fail(str(exc))
+
+metadata = bead.get("metadata")
 if not isinstance(metadata, dict):
     metadata = {}
+description = text(bead.get("description"))
+is_blank_retry = isinstance(bead.get("description"), str) and not description.strip()
+logical_bead_id = bead["id"]
+
+if is_blank_retry:
+    try:
+        control = one_bead(sys.argv[2], "control bead")
+    except ValueError as exc:
+        fail(str(exc))
+    control_metadata = control.get("metadata")
+    if not isinstance(control_metadata, dict):
+        fail("retry and control beads must have metadata objects")
+
+    control_id = text(metadata.get("gc.control_for"))
+    attempt_number = text(metadata.get("gc.attempt"))
+    step_id = text(metadata.get("gc.step_id"))
+    step_ref = text(metadata.get("gc.step_ref"))
+    control_ref = text(control_metadata.get("gc.step_ref"))
+    root_id = text(metadata.get("gc.root_bead_id"))
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", control_id):
+        fail("retry gc.control_for must be one durable bead ID")
+    if not re.fullmatch(r"[1-9][0-9]*", attempt_number):
+        fail("retry gc.attempt must be a positive integer")
+    if text(control.get("id")) != control_id:
+        fail("retry gc.control_for does not resolve to its exact control bead")
+    if not text(control.get("description")).strip():
+        fail("control bead has no reusable logical contract")
+    if not root_id or text(control_metadata.get("gc.root_bead_id")) != root_id:
+        fail("control bead workflow root does not match the retry")
+    if not step_id or text(control_metadata.get("gc.step_id")) != step_id:
+        fail("control bead step does not match the retry")
+    if not text(metadata.get("gc.run_target")) or text(metadata.get("gc.run_target")) != text(control_metadata.get("gc.run_target")):
+        fail("control bead run target does not match the retry")
+    if text(bead.get("title")) != text(control.get("title")):
+        fail("control bead title does not match the retry")
+    if not control_ref or step_ref != f"{control_ref}.iteration.{attempt_number}":
+        fail("retry step reference is not the control bead iteration")
+    if text(metadata.get("gc.idempotency_key")) != f"{control_id}:attempt:{attempt_number}":
+        fail("retry idempotency key does not bind the control bead and attempt")
+
+    # The retry remains the only bead that workers may update or close.  Its
+    # task text is replaced only after the durable control-bead lineage above
+    # proves that the two beads represent the same logical contract.
+    bead["description"] = control["description"]
+    logical_bead_id = control_id
+
 print(json.dumps({
     "action": "work",
     "bead_id": bead["id"],
     "root_bead_id": metadata.get("gc.root_bead_id", ""),
     "continuation_group": metadata.get("gc.continuation_group", ""),
+    "logical_bead_id": logical_bead_id,
     "bead": bead,
 }, separators=(",", ":")))
 PY
