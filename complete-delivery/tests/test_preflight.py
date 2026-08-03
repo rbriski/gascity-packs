@@ -1102,6 +1102,7 @@ class PreflightTests(unittest.TestCase):
                 ({"merged": "true"}, "boolean merged field"),
                 ({"merged": 0}, "boolean merged field"),
                 ({"merged": 1}, "boolean merged field"),
+                ({"merge_commit_sha": "A" * 40}, "full lowercase merge SHA"),
                 ({"state": "open"}, "is not closed"),
                 ({"merged_at": ""}, "no merged_at timestamp"),
                 ({"html_url": "https://github.com/example/repo/pull/999"}, "does not match recorded URL"),
@@ -1116,6 +1117,17 @@ class PreflightTests(unittest.TestCase):
                     )
                     self.assertEqual(rejected.returncode, 1)
                     self.assertIn(message, rejected.stderr)
+
+            environment["FAKE_PR_JSON"] = "not-json"
+            malformed = subprocess.run(
+                ["bash", str(MERGED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(malformed.returncode, 1)
+            self.assertIn("complete-delivery-check: PR response is malformed JSON", malformed.stderr)
+            environment["FAKE_PR_JSON"] = json.dumps(valid_pr)
 
             environment["FAKE_PR_JSON"] = json.dumps(
                 {**valid_pr, "head": {"sha": "c" * 40}}
@@ -2651,6 +2663,7 @@ class PreflightTests(unittest.TestCase):
                 ({"state": "closed"}, "PR is not open"),
                 ({"draft": True}, "PR is still a draft"),
                 ({"draft": "false"}, "PR response has no boolean draft field"),
+                ({"head": {"sha": "A" * 40, "ref": "feature/delivery"}}, "full lowercase head SHA"),
                 ({"head": {"sha": "b" * 40}}, "does not match GitHub head"),
                 ({"head": {"sha": "a" * 40, "ref": "wrong-branch"}}, "does not match GitHub head branch"),
                 ({"base": {"ref": "wrong-base", "repo": {"full_name": "example/repo"}}}, "does not match configured base branch"),
@@ -2679,6 +2692,17 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1)
             self.assertIn("PR response has no boolean draft field", result.stderr)
+
+            environment["FAKE_PR_JSON"] = "not-json"
+            malformed = subprocess.run(
+                ["bash", str(PR_OPEN_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(malformed.returncode, 1)
+            self.assertIn("complete-delivery-check: PR response is malformed JSON", malformed.stderr)
+            environment["FAKE_PR_JSON"] = json.dumps(pull)
 
             environment["FAKE_GC_JSON"] = json.dumps(
                 [{"metadata": {**metadata, "gc.var.base_branch": ""}}]
@@ -3076,7 +3100,8 @@ class SourceArtifactTests(unittest.TestCase):
                 kind: str, text: str, variant: str
             ) -> tuple[pathlib.Path, str]:
                 if variant == "contained":
-                    path = work_dir / f"{kind}.md"
+                    path = work_dir / "artifacts" / "delivery" / f"{kind}.md"
+                    path.parent.mkdir(parents=True, exist_ok=True)
                     value = str(path)
                 elif variant == "parent":
                     path = root / f"outside-{kind}.md"
@@ -3095,6 +3120,13 @@ class SourceArtifactTests(unittest.TestCase):
                     link = work_dir / f"linked-{kind}"
                     link.symlink_to(outside_dir, target_is_directory=True)
                     value = f"linked-{kind}/{kind}.md"
+                elif variant == "symlink-inside":
+                    delivery = work_dir / "artifacts" / "delivery"
+                    delivery.mkdir(parents=True, exist_ok=True)
+                    path = delivery / f"trusted-{kind}.md"
+                    link = delivery / f"linked-{kind}.md"
+                    link.symlink_to(path.name)
+                    value = f"artifacts/delivery/{link.name}"
                 else:
                     raise AssertionError(f"unknown artifact path variant: {variant}")
                 path.write_text(text, encoding="utf-8")
@@ -3151,6 +3183,7 @@ class SourceArtifactTests(unittest.TestCase):
             }}]
             root_metadata = {
                 artifact_path_key: artifact_path_value,
+                "gc.var.artifact_root": "artifacts",
                 **(
                     {"gc.var.build_artifact_valid_path": generic_check_value}
                     if generic_check is not None and generic_check_value is not None
@@ -3290,19 +3323,19 @@ class SourceArtifactTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected, result.stderr)
 
-    def test_source_and_upstream_artifacts_cannot_escape_work_directory(self) -> None:
-        for variant in ("parent", "nested-parent", "absolute-outside", "symlink"):
+    def test_source_and_upstream_artifacts_must_stay_beneath_artifact_delivery_without_symlinks(self) -> None:
+        for variant in ("parent", "nested-parent", "absolute-outside", "symlink", "symlink-inside"):
             with self.subTest(source_artifact=variant):
                 result = self.run_check(
                     self.artifact(), artifact_path_variant=variant
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(
-                    "must resolve within the canonical delivery work directory",
+                    "must resolve within the canonical artifact delivery directory without symlinks",
                     result.stderr,
                 )
 
-        for variant in ("parent", "nested-parent", "absolute-outside", "symlink"):
+        for variant in ("parent", "nested-parent", "absolute-outside", "symlink", "symlink-inside"):
             with self.subTest(upstream_artifact=variant):
                 result = self.run_check(
                     self.artifact(artifact_kind="final-report"),
@@ -3311,7 +3344,7 @@ class SourceArtifactTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(
-                    "must resolve within the canonical delivery work directory",
+                    "must resolve within the canonical artifact delivery directory without symlinks",
                     result.stderr,
                 )
 

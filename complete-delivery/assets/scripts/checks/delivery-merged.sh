@@ -21,16 +21,27 @@ BASE_BRANCH="$(delivery_var base_branch '')"
   delivery_fail "workflow root metadata delivery.head_sha must be a full lowercase 40-hex SHA"
 [ -n "$RECORDED_URL" ] || delivery_fail "workflow root metadata delivery.pr_url is missing"
 [ -n "$BASE_BRANCH" ] || delivery_fail "configured base_branch is required"
+[[ "$RECORDED_SHA" =~ ^[0-9a-f]{40}$ ]] || \
+  delivery_fail "workflow root metadata delivery.merge_sha must be a full lowercase 40-hex SHA"
 
 command -v timeout >/dev/null 2>&1 || delivery_fail "timeout is required on PATH"
 PR_JSON="$(timeout --kill-after=5s 30s gh api "repos/$REPO/pulls/$PR_NUMBER")" || delivery_fail "failed to read PR $REPO#$PR_NUMBER"
-RESULT="$(printf '%s' "$PR_JSON" | python3 -c '
+if ! RESULT="$(printf '%s' "$PR_JSON" | python3 -c '
 import json
+import re
 import sys
-data = json.load(sys.stdin)
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"PR response is malformed JSON: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit("PR response must be an object")
 merged = data.get("merged")
 if not isinstance(merged, bool):
-    raise ValueError("PR response has no boolean merged field")
+    raise SystemExit("PR response has no boolean merged field")
+merge_sha = str(data.get("merge_commit_sha") or "")
+if not re.fullmatch(r"[0-9a-f]{40}", merge_sha):
+    raise SystemExit("PR response has no full lowercase merge SHA")
 print("\x1f".join([
     str(merged).lower(),
     str(data.get("state") or ""),
@@ -40,7 +51,9 @@ print("\x1f".join([
     str((data.get("base") or {}).get("ref") or ""),
     str(data.get("html_url") or ""),
 ]))
-')"
+' 2>&1)"; then
+  delivery_fail "$RESULT"
+fi
 IFS=$'\x1f' read -r MERGED STATE MERGED_AT REMOTE_SHA REMOTE_HEAD BASE_REF PR_URL <<<"$RESULT"
 [ "$MERGED" = "true" ] || delivery_fail "PR $REPO#$PR_NUMBER is not merged"
 [ "$STATE" = "closed" ] || delivery_fail "merged PR $REPO#$PR_NUMBER is not closed (state=$STATE)"

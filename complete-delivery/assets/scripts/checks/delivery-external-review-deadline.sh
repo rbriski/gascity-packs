@@ -53,9 +53,29 @@ PY
 }
 
 delivery_history_before_deadline() {
+  local remaining cap
+  remaining="$(delivery_remaining_deadline_timeout)" || return 1
+  cap="${1:-$remaining}"
+  if [ "${cap%s}" -gt "${remaining%s}" ]; then
+    cap="$remaining"
+  fi
+  timeout --signal=KILL "$cap" gc bd history "$DELIVERY_ROOT_ID" --json
+}
+
+# A holder must never retain the shared initialization lock for most of the
+# two-hour review window merely because the data plane is slow.  The immutable
+# deadline still bounds the operations, while this short cap bounds lock
+# contention and lets another lane fail closed promptly.
+DEADLINE_LOCK_IO_TIMEOUT=5s
+
+delivery_lock_held_timeout() {
   local remaining
   remaining="$(delivery_remaining_deadline_timeout)" || return 1
-  timeout --signal=KILL "$remaining" gc bd history "$DELIVERY_ROOT_ID" --json
+  if [ "${remaining%s}" -lt "${DEADLINE_LOCK_IO_TIMEOUT%s}" ]; then
+    printf '%s' "$remaining"
+  else
+    printf '%s' "$DEADLINE_LOCK_IO_TIMEOUT"
+  fi
 }
 
 # Concurrent setup lanes share a worktree.  Serialize only first-entry
@@ -128,14 +148,25 @@ PY
   readarray -t INITIAL <<<"$INITIAL_OUTPUT"
   STARTED_AT="${INITIAL[0]}"
   DEADLINE="${INITIAL[1]}"
-  gc_update_timeout="$(delivery_remaining_deadline_timeout)" || \
+  delivery_remaining_deadline_timeout >/dev/null || \
     delivery_fail "external-review deadline expired before persistence"
-  timeout --signal=KILL "$gc_update_timeout" gc bd update "$DELIVERY_ROOT_ID" \
+  # Use a short deadline-derived cap while the initialization lock is held.
+  # The deadline has just been computed, but validate again after each
+  # operation before treating persistence or history as authority.
+  lock_timeout="$(delivery_lock_held_timeout)" || \
+    delivery_fail "external-review deadline expired before persistence"
+  timeout --signal=KILL "$lock_timeout" gc bd update "$DELIVERY_ROOT_ID" \
     --set-metadata "delivery.external_review_started_at=${INITIAL[0]}" \
     --set-metadata "delivery.external_review_deadline=${INITIAL[1]}" || \
     delivery_fail "cannot persist external-review deadline on workflow root before expiration"
-  HISTORY="$(delivery_history_before_deadline)" || \
+  delivery_remaining_deadline_timeout >/dev/null || \
+    delivery_fail "external-review deadline expired after persistence"
+  lock_timeout="$(delivery_lock_held_timeout)" || \
+    delivery_fail "external-review deadline expired before history read"
+  HISTORY="$(delivery_history_before_deadline "$lock_timeout")" || \
     delivery_fail "cannot re-read persisted workflow-root deadline before expiration"
+  delivery_remaining_deadline_timeout >/dev/null || \
+    delivery_fail "external-review deadline expired after history read"
 fi
 
 # This is a fail-closed production gate. Do not accept a caller-provided

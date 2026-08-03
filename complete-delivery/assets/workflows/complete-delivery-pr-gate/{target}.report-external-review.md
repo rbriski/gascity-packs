@@ -27,6 +27,11 @@ after that second validation. If the second validation or publication fails,
 revert the just-written active-state mutation to an explicit non-pass blocker,
 invalidate `tested_commit`, `local_gates`, `published_head`, and
 `published_head_matches_tested_commit` pass evidence, and close non-pass.
+Immediately after a successful report publication (or after confirming no
+publication is configured) and before accepting that publication or closing
+this lane, run `.gc/scripts/checks/delivery-external-review-deadline.sh
+--validate` again. Expiry at this boundary is a publication blocker: revert to
+explicit non-pass state, invalidate the same authority, and close non-pass.
 Top-level `complete-delivery/report-green.md` owns every passing report
 publication and protected-merge next action. A fresh valid blocked snapshot may close with
 `gc.outcome=pass`; close with `gc.outcome=pass` only after valid evidence has

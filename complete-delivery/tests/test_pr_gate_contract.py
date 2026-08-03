@@ -306,6 +306,8 @@ class PrGateContractTests(unittest.TestCase):
                 (datetime.strptime(metadata["delivery.external_review_started_at"], "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
             self.assertIn("DEADLINE_LOCK_WAIT=30", DEADLINE_SCRIPT.read_text(encoding="utf-8"))
+            self.assertIn("delivery_lock_held_timeout", DEADLINE_SCRIPT.read_text(encoding="utf-8"))
+            self.assertIn('if [ "${cap%s}" -gt "${remaining%s}" ]; then', DEADLINE_SCRIPT.read_text(encoding="utf-8"))
 
     def test_external_review_actions_and_terminal_gate_require_deadline_validation(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
@@ -360,6 +362,28 @@ class PrGateContractTests(unittest.TestCase):
         for required_guard in required_deadline_guards:
             with self.subTest(resolver_guard=required_guard):
                 self.assert_prose_contains(resolver, required_guard)
+
+        inspect = (workflows / "{target}.inspect-current-head.md").read_text(
+            encoding="utf-8"
+        )
+        self.assert_prose_contains(
+            inspect,
+            "Immediately after a successful gate invocation and before accepting its JSON",
+        )
+        publish_fixes = (workflows / "{target}.publish-fixes.md").read_text(
+            encoding="utf-8"
+        )
+        self.assert_prose_contains(
+            publish_fixes,
+            "before accepting or persisting any refreshed identity",
+        )
+        report = (workflows / "{target}.report-external-review.md").read_text(
+            encoding="utf-8"
+        )
+        self.assert_prose_contains(
+            report,
+            "Immediately after a successful report publication (or after confirming no publication is configured)",
+        )
     @classmethod
     def setUpClass(cls) -> None:
         with FORMULA_PATH.open("rb") as formula_file:
@@ -1307,7 +1331,7 @@ class PrGateContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_terminal_gate_canonicalizes_valid_full_sha_evidence_before_comparison(self) -> None:
+    def test_terminal_gate_requires_direct_canonical_sha_evidence(self) -> None:
         commit = "aB" * 20
         result = self.run_terminal_gate(
             {
@@ -1319,7 +1343,8 @@ class PrGateContractTests(unittest.TestCase):
             },
             {"passed": True, "head_sha": commit.upper()},
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("proven passing local-gate evidence", result.stderr)
 
     def test_terminal_gate_rejects_failed_or_wrong_head_delivery_gate_report(self) -> None:
         commit = "a" * 40

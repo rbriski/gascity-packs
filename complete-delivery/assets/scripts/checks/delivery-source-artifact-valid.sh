@@ -38,6 +38,67 @@ PY
   printf '%s' "$resolved"
 }
 
+delivery_resolve_delivery_artifact_path() {
+  local value="$1"
+  local label="$2"
+  local artifact_root="$3"
+  local resolved
+
+  if ! resolved="$(python3 - "$DELIVERY_WORK_DIR" "$artifact_root" "$value" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+work_value, artifact_value, candidate_value = sys.argv[1:]
+
+def fail():
+    raise SystemExit(1)
+
+def lexical_relative(raw: Path, root: Path):
+    if raw.is_absolute():
+        try:
+            return raw.relative_to(root)
+        except ValueError:
+            fail()
+    if ".." in raw.parts:
+        fail()
+    return raw
+
+work = Path(work_value).resolve(strict=True)
+if not work.is_dir():
+    fail()
+artifact_raw = Path(artifact_value)
+candidate_raw = Path(candidate_value)
+if not artifact_value or not candidate_value:
+    fail()
+artifact_relative = lexical_relative(artifact_raw, work)
+candidate_relative = lexical_relative(candidate_raw, work)
+delivery_relative = artifact_relative / "delivery"
+if candidate_relative == delivery_relative or delivery_relative not in candidate_relative.parents:
+    fail()
+
+# Reject any symlink in the authority chain, including the artifact root,
+# delivery directory, and final document.  The later reader therefore cannot
+# be redirected outside the approved delivery authority directory.
+current = work
+for component in candidate_relative.parts:
+    current /= component
+    if current.is_symlink():
+        fail()
+try:
+    resolved = current.resolve(strict=True)
+    delivery = (work / delivery_relative).resolve(strict=True)
+    resolved.relative_to(delivery)
+except (OSError, ValueError):
+    fail()
+print(os.fspath(resolved))
+PY
+  )"; then
+    delivery_fail "$label must resolve within the canonical artifact delivery directory without symlinks"
+  fi
+  printf '%s' "$resolved"
+}
+
 # A deployed pack supplies the common checker beside this materialized script.
 # A source-tree caller may select one only from workflow-root policy, never a
 # step-controlled value. Canonicalize configured paths inside the worktree so
@@ -63,6 +124,8 @@ esac
 
 PATH_KEYS="$(delivery_metadata_value "$DELIVERY_STEP_JSON" "gc.build.artifact_path_keys")"
 [ -n "$PATH_KEYS" ] || delivery_fail "gc.build.artifact_path_keys is missing"
+ARTIFACT_ROOT="$(delivery_var artifact_root '')"
+[ -n "$ARTIFACT_ROOT" ] || delivery_fail "gc.var.artifact_root is missing"
 ARTIFACT_PATH=""
 IFS=',' read -r -a KEYS <<<"$PATH_KEYS"
 for key in "${KEYS[@]}"; do
@@ -70,7 +133,7 @@ for key in "${KEYS[@]}"; do
   [ -n "$key" ] || continue
   value="$(delivery_root_metadata "$key")"
   if [ -n "$value" ]; then
-    ARTIFACT_PATH="$(delivery_resolve_contained_path "$value" "source-bound artifact path")"
+    ARTIFACT_PATH="$(delivery_resolve_delivery_artifact_path "$value" "source-bound artifact path" "$ARTIFACT_ROOT")"
     break
   fi
 done
@@ -153,9 +216,9 @@ if [ "$SCHEMA" = "gc.build.final-report.v1" ]; then
     delivery_fail "gc.build.plan_path is required to finalize source traceability"
   [ -n "$DECOMPOSITION_PATH" ] || \
     delivery_fail "gc.build.decomposition_path is required to finalize source traceability"
-  REQUIREMENTS_PATH="$(delivery_resolve_contained_path "$REQUIREMENTS_PATH" "approved requirements artifact path")"
-  PLAN_PATH="$(delivery_resolve_contained_path "$PLAN_PATH" "approved plan artifact path")"
-  DECOMPOSITION_PATH="$(delivery_resolve_contained_path "$DECOMPOSITION_PATH" "approved decomposition artifact path")"
+  REQUIREMENTS_PATH="$(delivery_resolve_delivery_artifact_path "$REQUIREMENTS_PATH" "approved requirements artifact path" "$ARTIFACT_ROOT")"
+  PLAN_PATH="$(delivery_resolve_delivery_artifact_path "$PLAN_PATH" "approved plan artifact path" "$ARTIFACT_ROOT")"
+  DECOMPOSITION_PATH="$(delivery_resolve_delivery_artifact_path "$DECOMPOSITION_PATH" "approved decomposition artifact path" "$ARTIFACT_ROOT")"
 fi
 
 DELIVERY_SOURCE_FIELDS="$SOURCE_FIELDS" \

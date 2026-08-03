@@ -22,14 +22,17 @@ validation fails, write blocker-only state and perform no push, refresh, or
 resolution. Specifically, unavailable lock, dirty tree, or mismatch fails closed before push,
 refresh, or resolution; an expired deadline fails closed the same way. Push exactly `tested_commit` normally (never
 force-push), or make no empty commit/push when source did not change; refresh
-the PR, then immediately persist all refreshed workflow-root identity fields
-before any thread resolution: exact full-SHA `delivery.head_sha`,
+the PR, then immediately run `.gc/scripts/checks/delivery-external-review-deadline.sh
+--validate` again before accepting or persisting any refreshed identity. An
+expired post-refresh validation is a publication blocker. At that point,
+immediately persist all refreshed workflow-root identity fields before any thread resolution:
+exact full-SHA `delivery.head_sha`,
 `delivery.repo`, `delivery.branch`, `delivery.pr_number`, and `delivery.pr_url`.
 Also persist the handoff's exact full-SHA `published_head`, `tested_commit`, and
 boolean `published_head_matches_tested_commit`. Immediately re-read and exactly
 verify every just-written workflow-root and handoff identity field before any
 thread resolution; persistence that is failed, partial, malformed, or
-head-mismatched is a distinct publication blocker. On that blocker, clear all
+head-mismatched is a distinct publication blocker. On either blocker, clear all
 authority fields (`tested_commit`, `local_gates`, `published_head`, and
 `published_head_matches_tested_commit`), write blocker-only state, and keep
 every mapped thread open. A deadline validation failure

@@ -19,16 +19,27 @@ BASE_BRANCH="$(delivery_var base_branch '')"
 [ -n "$RECORDED_URL" ] || delivery_fail "workflow root metadata delivery.pr_url is missing"
 [ -n "$RECORDED_BRANCH" ] || delivery_fail "workflow root metadata delivery.branch is missing"
 [ -n "$BASE_BRANCH" ] || delivery_fail "configured base_branch is required"
+[[ "$RECORDED_SHA" =~ ^[0-9a-f]{40}$ ]] || \
+  delivery_fail "workflow root metadata delivery.head_sha must be a full lowercase 40-hex SHA"
 
 command -v timeout >/dev/null 2>&1 || delivery_fail "timeout is required on PATH"
 PR_JSON="$(timeout --kill-after=5s 30s gh api "repos/$REPO/pulls/$PR_NUMBER")" || delivery_fail "failed to read PR $REPO#$PR_NUMBER"
-RESULT="$(printf '%s' "$PR_JSON" | python3 -c '
+if ! RESULT="$(printf '%s' "$PR_JSON" | python3 -c '
 import json
+import re
 import sys
-data = json.load(sys.stdin)
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"PR response is malformed JSON: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit("PR response must be an object")
 draft = data.get("draft")
 if not isinstance(draft, bool):
-    raise ValueError("PR response has no boolean draft field")
+    raise SystemExit("PR response has no boolean draft field")
+head_sha = str((data.get("head") or {}).get("sha") or "")
+if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+    raise SystemExit("PR response has no full lowercase head SHA")
 print("\t".join([
     str(data.get("state") or ""),
     str(draft).lower(),
@@ -39,7 +50,9 @@ print("\t".join([
     str(data.get("number") or ""),
     str(data.get("html_url") or ""),
 ]))
-')"
+' 2>&1)"; then
+  delivery_fail "$RESULT"
+fi
 IFS=$'\t' read -r STATE DRAFT REMOTE_SHA REMOTE_BRANCH REMOTE_BASE REMOTE_REPO REMOTE_NUMBER PR_URL <<<"$RESULT"
 [ "$STATE" = "open" ] || delivery_fail "PR is not open (state=$STATE)"
 [ "$DRAFT" = "false" ] || delivery_fail "PR is still a draft"
