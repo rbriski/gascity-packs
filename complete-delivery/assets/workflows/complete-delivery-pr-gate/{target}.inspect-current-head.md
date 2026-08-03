@@ -6,7 +6,7 @@ Do not query or wait when it fails.
 
 Read and canonicalize workflow-root `delivery.head_sha` as a full 40-character
 SHA before invoking the gate. Remove any pre-existing `<artifact_root>/delivery/pr-gate.json` first, then run
-`{{pack_root}}/assets/scripts/delivery_gate.py` with workflow-root repo/PR,
+`.gc/scripts/delivery_gate.py` from the launcher worktree with workflow-root repo/PR,
 `required_checks`, and `coderabbit`, writing that path. Never consume a pre-existing artifact after a command failure.
 When `coderabbit` is `off`, do not make any separate CodeRabbit request, poll,
 or wait; the evaluator's typed disabled signal is the complete provider

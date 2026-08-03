@@ -14,7 +14,7 @@ final deadline validation after all prerequisite and metadata reads.
 Read `delivery.repo`, `delivery.pr_number`, `delivery.pr_url`, and
 `delivery.head_sha` from the workflow root. Prove all three prerequisites before
 recording success: authenticated `gh` access must succeed, the exact
-`{{pack_root}}/assets/scripts/delivery_gate.py` file must exist and be readable,
+`.gc/scripts/delivery_gate.py` managed file in the launcher worktree must exist and be readable,
 and `<artifact_root>/delivery/` must be created and writable. Do not treat a
 configured path, a stale directory, or an unauthenticated `gh` binary as proof.
 

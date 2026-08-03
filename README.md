@@ -197,6 +197,16 @@ your use case:
 See the [tiering design memo](./docs/design/slack-pack-tiering.md) for the
 rationale.
 
+### Delivery lifecycle packs
+
+- [complete-delivery](./complete-delivery) imports `gstack` and owns the
+  terminal path from preflighted intent through planning, implementation,
+  exact local gates, authoritative internal review, bounded current-head CI
+  reconciliation, protected merge, deployment, production revision
+  attestation, and a milestone-driven owner report. Repository-specific
+  commands live once in rig `formula_vars`; the normal launch is one command.
+  CodeRabbit is optional and off by default.
+
 ### Contributor workflow packs
 
 Discipline for sending good work *to* another repo — planning, building,
