@@ -282,6 +282,22 @@ class PrGateContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             gc.chmod(0o755)
+            timeout_log = root / "timeout.jsonl"
+            timeout = root / "timeout"
+            timeout.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "with pathlib.Path(os.environ['FAKE_TIMEOUT_LOG']).open('a', encoding='utf-8') as handle:\n"
+                " handle.write(json.dumps(args) + '\\n')\n"
+                "if args and args[0].startswith('--'): args.pop(0)\n"
+                "if not args: raise SystemExit('timeout duration is missing')\n"
+                "args.pop(0)\n"
+                "if not args: raise SystemExit('timeout command is missing')\n"
+                "os.execvp(args[0], args)\n",
+                encoding="utf-8",
+            )
+            timeout.chmod(0o755)
             environment = os.environ.copy()
             environment.update({
                 "GC_BEAD_ID": "root-1",
@@ -289,6 +305,7 @@ class PrGateContractTests(unittest.TestCase):
                 "FAKE_GC_STATE": str(state),
                 "FAKE_GC_HISTORY": str(history_path),
                 "FAKE_GC_UPDATE_DELAY": "2",
+                "FAKE_TIMEOUT_LOG": str(timeout_log),
                 "PATH": f"{root}:{environment['PATH']}",
             })
             first = subprocess.Popen(["bash", str(DEADLINE_SCRIPT), "--initialize"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
@@ -308,6 +325,16 @@ class PrGateContractTests(unittest.TestCase):
             self.assertIn("DEADLINE_LOCK_WAIT=30", DEADLINE_SCRIPT.read_text(encoding="utf-8"))
             self.assertIn("delivery_lock_held_timeout", DEADLINE_SCRIPT.read_text(encoding="utf-8"))
             self.assertIn('if [ "${cap%s}" -gt "${remaining%s}" ]; then', DEADLINE_SCRIPT.read_text(encoding="utf-8"))
+            timeout_calls = [
+                json.loads(line)
+                for line in timeout_log.read_text(encoding="utf-8").splitlines()
+            ]
+            history_timeouts = []
+            for args in timeout_calls:
+                command_index = 2 if args and args[0].startswith("--") else 1
+                if args[command_index : command_index + 3] == ["gc", "bd", "history"]:
+                    history_timeouts.append(args[command_index - 1])
+            self.assertEqual(sorted(history_timeouts), ["1s", "5s", "5s"])
 
     def test_external_review_actions_and_terminal_gate_require_deadline_validation(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"

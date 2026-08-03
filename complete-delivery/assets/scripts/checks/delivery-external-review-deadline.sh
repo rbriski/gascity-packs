@@ -81,6 +81,7 @@ delivery_lock_held_timeout() {
 # Concurrent setup lanes share a worktree.  Serialize only first-entry
 # initialization, then re-read durable metadata while holding the lock so a
 # waiter reuses the first persisted pair instead of overwriting it.
+deadline_lock_held=false
 if [ "$MODE" = "--initialize" ] && [ -z "$STARTED_AT" ] && [ -z "$DEADLINE" ]; then
   command -v flock >/dev/null 2>&1 || \
     delivery_fail "flock is required on PATH to initialize an external-review deadline"
@@ -94,14 +95,24 @@ if [ "$MODE" = "--initialize" ] && [ -z "$STARTED_AT" ] && [ -z "$DEADLINE" ]; t
   exec {deadline_lock_fd}>"$DEADLINE_LOCK_DIR/external-review-deadline-$DELIVERY_ROOT_ID.lock"
   flock -w "$DEADLINE_LOCK_WAIT" "$deadline_lock_fd" || \
     delivery_fail "cannot acquire external-review deadline initialization lock"
+  deadline_lock_held=true
   delivery_refresh_root_metadata 1s
 fi
 
 if [ -n "$DEADLINE" ]; then
-  known_timeout="$(delivery_remaining_deadline_timeout 2>&1)" || \
-    delivery_fail "$known_timeout"
-  HISTORY="$(timeout --signal=KILL "$known_timeout" gc bd history "$DELIVERY_ROOT_ID" --json)" || \
+  if [ "$deadline_lock_held" = true ]; then
+    known_timeout="$(delivery_lock_held_timeout 2>&1)" || \
+      delivery_fail "$known_timeout"
+  else
+    known_timeout="$(delivery_remaining_deadline_timeout 2>&1)" || \
+      delivery_fail "$known_timeout"
+  fi
+  HISTORY="$(delivery_history_before_deadline "$known_timeout")" || \
     delivery_fail "cannot read workflow-root metadata history before external-review deadline"
+  if [ "$deadline_lock_held" = true ]; then
+    delivery_remaining_deadline_timeout >/dev/null || \
+      delivery_fail "external-review deadline expired after lock-held history read"
+  fi
 else
   HISTORY="$(timeout --signal=KILL 1s gc bd history "$DELIVERY_ROOT_ID" --json)" || \
     delivery_fail "cannot read workflow-root metadata history during deadline discovery"
