@@ -8,9 +8,13 @@ Read the gate JSON and, before reading the diff, logs, or threads, require a
 clean worktree (`git status --porcelain` empty) and canonical full-SHA
 `HEAD == inspected_head`. If either fails, replace the handoff with blocker-only
 state and restart inspection; do not reproduce, edit, or commit. Then read
-every unresolved thread in full and reproduce each concern. Apply the smallest
-correct fix and focused regression coverage for valid findings. For invalid or
-already superseded findings, respond with concrete evidence.
+every unresolved thread in full and reproduce each concern. When `coderabbit`
+is `off`, ignore bot-only CodeRabbit threads and never ask the provider for a
+new review. Record every disposition before editing, then apply one consolidated
+repair batch containing the smallest correct fixes and focused regression
+coverage for all valid findings. For invalid or already superseded findings,
+respond with concrete evidence. Do not start a second repair batch in this
+Formula cycle.
 
 Keep every thread open while editing and committing. Write the durable handoff
 artifact `<artifact_root>/delivery/external-review-handoff.json` before closing

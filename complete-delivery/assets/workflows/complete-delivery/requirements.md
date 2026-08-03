@@ -36,9 +36,12 @@ requested description/acceptance point into the requirements. Use
 repository state only to validate or scope that intent. Do not copy raw source
 notes into an owner-facing report; summarize only non-sensitive constraints
 needed to make the plan executable.
-Preserve the terminal delivery contract established by preflight: reviewed
-code, current-head CI and CodeRabbit, protected merge, exact-SHA deployment,
-production verification, and a current living report are part of done.
+Preserve the terminal delivery contract established by preflight: internally
+reviewed code, current-head required CI, any explicitly configured optional
+external-review evidence, protected merge, exact-SHA deployment, production
+verification, and a current living report are part of done. CodeRabbit is off
+by default and must not be requested or awaited unless the workflow explicitly
+opts in.
 
 Close with `gc.outcome=pass` and the requirements artifact path. The graph's
 source-artifact check validates schema `gc.build.requirements.v1` and requires

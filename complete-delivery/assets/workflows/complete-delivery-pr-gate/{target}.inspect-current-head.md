@@ -8,6 +8,9 @@ Read and canonicalize workflow-root `delivery.head_sha` as a full 40-character
 SHA before invoking the gate. Remove any pre-existing `<artifact_root>/delivery/pr-gate.json` first, then run
 `{{pack_root}}/assets/scripts/delivery_gate.py` with workflow-root repo/PR,
 `required_checks`, and `coderabbit`, writing that path. Never consume a pre-existing artifact after a command failure.
+When `coderabbit` is `off`, do not make any separate CodeRabbit request, poll,
+or wait; the evaluator's typed disabled signal is the complete provider
+evidence for this cycle.
 Immediately after a successful gate invocation and before accepting its JSON,
 run `.gc/scripts/checks/delivery-external-review-deadline.sh --validate` again.
 If that post-gate validation fails, remove the new artifact, write blocker-only

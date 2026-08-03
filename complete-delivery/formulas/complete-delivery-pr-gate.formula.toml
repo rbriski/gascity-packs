@@ -1,10 +1,11 @@
 description = """
-Bounded external-review loop for Complete Delivery.
+Bounded current-head review loop for Complete Delivery.
 
-Each iteration snapshots the current PR head, applies valid GitHub and
-CodeRabbit findings, reruns repository gates, pushes fixes, and updates the
-living report. The mechanical terminal check passes only on the same green
-head with no unresolved threads or outstanding change requests.
+Each iteration freezes the current PR head, batches valid CI and review
+findings, applies one consolidated repair, reruns repository gates, pushes
+fixes, and updates the living report. The mechanical terminal check passes
+only on the same green head with no unresolved human threads or outstanding
+change requests. Optional provider evidence is controlled by pack variables.
 """
 formula = "complete-delivery-pr-gate"
 type = "expansion"
@@ -29,13 +30,13 @@ timeout = "1m"
 
 [[template]]
 id = "{target}.external-review-loop"
-title = "Iterate until CI and review are green"
+title = "Run one frozen-head review and repair cycle"
 needs = ["{target}.setup-external-review"]
-metadata = { "gc.run_target" = "complete-delivery.external-review-resolver" }
+metadata = { "gc.run_target" = "complete-delivery.external-review-resolver", "gc.review_policy" = "frozen-candidate-two-cycle" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.external-review-loop.md"
 
 [template.check]
-max_attempts = 12
+max_attempts = 2
 
 [template.check.check]
 mode = "exec"
@@ -50,7 +51,7 @@ description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.inspe
 
 [[template.children]]
 id = "{target}.resolve-findings"
-title = "Resolve valid external findings"
+title = "Batch and resolve valid findings"
 needs = ["{target}.inspect-current-head"]
 metadata = { "gc.run_target" = "complete-delivery.external-review-resolver", "gc.continuation_group" = "complete-delivery-pr-fixes" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.resolve-findings.md"

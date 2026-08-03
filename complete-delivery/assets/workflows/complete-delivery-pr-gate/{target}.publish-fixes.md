@@ -49,7 +49,9 @@ threads, and close with a non-pass outcome. An already-resolved thread state
 cannot authorize continuation, and this lane must not claim to reopen a thread
 without a supported reopening operation. No push may occur after that final
 head check and before all resolution calls finish. A new head invalidates old
-CI and CodeRabbit evidence for the next loop check.
+CI and any configured optional-provider evidence for the next loop check. When
+`coderabbit` is `off`, never request, poll, wait for, or resolve CodeRabbit
+threads.
 For every current-attempt mapped finding, resolve a valid thread only when its
 fix evidence passed, and resolve an invalid, superseded, or otherwise
 non-actionable thread only when its disposition evidence was published. Still

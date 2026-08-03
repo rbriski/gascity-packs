@@ -13,7 +13,7 @@ PR_NUMBER="$(delivery_root_metadata delivery.pr_number)"
 [ -n "$PR_NUMBER" ] || delivery_fail "workflow root metadata delivery.pr_number is missing"
 
 REQUIRED_CHECKS="$(delivery_var required_checks auto)"
-CODERABBIT="$(delivery_var coderabbit required)"
+CODERABBIT="$(delivery_var coderabbit off)"
 ALLOW_NO_CI="$(delivery_var allow_no_ci false)"
 ARTIFACT_ROOT="$(delivery_var artifact_root "")"
 [ -n "$ARTIFACT_ROOT" ] || delivery_fail "gc.var.artifact_root is missing"

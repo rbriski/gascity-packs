@@ -1,9 +1,9 @@
 description = """
 Complete, observable delivery from product intent through verified production.
 
-Extends gstack-build with deterministic repository gates, required GitHub and
-CodeRabbit reconciliation, merge, deployment, exact-SHA verification, and an
-HTML/CSS living report. One launch owns the entire lifecycle.
+Extends gstack-build with deterministic repository gates, internal review,
+current-head GitHub reconciliation, merge, deployment, exact-SHA verification,
+and an HTML/CSS living report. One launch owns the entire lifecycle.
 """
 formula = "complete-delivery"
 version = 1
@@ -15,7 +15,7 @@ formula_compiler = ">=2.0.0"
 
 [catalog]
 name = "complete-delivery"
-description = "Plan, build, review, reconcile CI and CodeRabbit, merge, deploy, verify, and report in one run."
+description = "Plan, build, review, reconcile current-head gates, merge, deploy, verify, and report in one run."
 
 [metadata.gc.methodology]
 allowed_drain_policies = ["separate", "same-session"]
@@ -31,6 +31,10 @@ default = "autonomous"
 [vars.review_mode]
 description = "Review authority. Agent mode applies bounded fixes without ceremonial pauses."
 default = "agent"
+
+[vars.max_iterations]
+description = "Maximum implementation/review repair attempts before architectural escalation."
+default = "2"
 
 [vars.push]
 description = "Complete Delivery requires publishing the feature branch."
@@ -65,8 +69,8 @@ description = "Comma-separated exact GitHub check names, or auto for protected-b
 default = "auto"
 
 [vars.coderabbit]
-description = "CodeRabbit posture: required, optional, or off."
-default = "required"
+description = "Optional CodeRabbit evidence posture: required, optional, or off. Internal review remains authoritative."
+default = "off"
 
 [vars.allow_no_ci]
 description = "Explicit exception for repositories with no CI checks."
@@ -319,7 +323,7 @@ description_file = "../assets/workflows/complete-delivery/report-pull-request.md
 
 [[steps]]
 id = "external-review"
-title = "Reconcile CI, CodeRabbit, and review findings"
+title = "Reconcile current-head gates and review findings"
 needs = ["report-pull-request"]
 metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
 expand = "complete-delivery-pr-gate"

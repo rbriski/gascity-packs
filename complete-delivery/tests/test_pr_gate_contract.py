@@ -561,7 +561,11 @@ class PrGateContractTests(unittest.TestCase):
     def test_formula_preserves_the_bounded_resolve_test_publish_handoff(self) -> None:
         loop = self.templates["{target}.external-review-loop"]
         self.assertEqual(loop["needs"], ["{target}.setup-external-review"])
-        self.assertEqual(loop["check"]["max_attempts"], 12)
+        self.assertEqual(loop["check"]["max_attempts"], 2)
+        self.assertEqual(
+            loop["metadata"]["gc.review_policy"],
+            "frozen-candidate-two-cycle",
+        )
         self.assertEqual(
             loop["check"]["check"]["path"],
             ".gc/scripts/checks/delivery-pr-approved.sh",
@@ -602,6 +606,35 @@ class PrGateContractTests(unittest.TestCase):
             "{target}.md",
         ):
             self.assertIn(HANDOFF_PATH, (workflows / filename).read_text(encoding="utf-8"))
+
+    def test_review_policy_defaults_provider_off_and_batches_bounded_repairs(self) -> None:
+        outer_formula = tomllib.loads(
+            (PACK_ROOT / "formulas" / "complete-delivery.formula.toml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(outer_formula["vars"]["coderabbit"]["default"], "off")
+        self.assertEqual(outer_formula["vars"]["max_iterations"]["default"], "2")
+
+        for script_name in ("delivery-preflight.sh", "delivery-pr-approved.sh"):
+            script = (
+                PACK_ROOT / "assets" / "scripts" / "checks" / script_name
+            ).read_text(encoding="utf-8")
+            self.assertIn('delivery_var coderabbit off', script)
+            self.assertNotIn('delivery_var coderabbit required', script)
+
+        external_review = (
+            PACK_ROOT / "assets" / "workflows" / "complete-delivery" / "external-review.md"
+        ).read_text(encoding="utf-8")
+        resolver = (
+            PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md"
+        ).read_text(encoding="utf-8")
+        for content in (external_review, resolver):
+            normalized = " ".join(content.split())
+            self.assertIn("internal gstack review", normalized)
+            self.assertIn("one consolidated repair batch", normalized)
+            self.assertIn("never request it, poll it, wait", normalized)
+        self.assertNotIn("12-attempt", external_review)
 
     def test_resolver_prompt_keeps_publication_and_terminal_gate_in_their_lanes(self) -> None:
         prompt = (PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md").read_text(
@@ -694,7 +727,7 @@ class PrGateContractTests(unittest.TestCase):
             self.assertTrue(all(term in normalized for term in ("shared repository-scoped", "resolveReviewThread")))
             self.assertTrue("between that final check and all" in normalized or "after that final head check and before all" in normalized)
         self.assertTrue(all(term in resolve_findings for term in ("replace the entire handoff object", "only blocker state")))
-        self.assertTrue(all(term in content for content in (prompt, rerun_local_gates) for term in ("at most three complete regression-repair-and-rerun", "fourth repair", "replace the entire handoff", "blocker-only retry-exhausted evidence", "no authority fields", "close with a non-pass outcome")))
+        self.assertTrue(all(term in " ".join(content.split()) for content in (prompt, rerun_local_gates) for term in ("at most one complete regression-repair-and-rerun", "second repair", "replace the entire handoff", "blocker-only retry-exhausted evidence", "no authority fields", "close with a non-pass outcome")))
         self.assertTrue(all(term in rerun_local_gates for term in ("candidate_commit", "tested_commit", "final committed `HEAD`", "individual thread `fix_commit`", "full local-gate sequence passes")))
         for content in (prompt, publish_fixes):
             self.assert_prose_contains(content, "no empty commit/push")

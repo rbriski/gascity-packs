@@ -21,8 +21,8 @@ state, and close with a non-pass outcome. Only after this final validation may
 this sole outer report authority atomically mark stage `external-review` as
 `passed`, writing the state document at `delivery.report_state_path` with
 `schema` set to `gc.complete-delivery.report.v1` and `sha` set to the
-workflow-root `delivery.head_sha`, naming the required checks, CodeRabbit
-signal, zero unresolved threads, and the resolved
+workflow-root `delivery.head_sha`, naming the required checks, configured
+CodeRabbit posture (including `off`), zero unresolved threads, and the resolved
 `delivery.pr_gate_path` in that stage's `evidence` list, and set `next_action`
 to exactly `Proceed to protected merge.` Do not attempt a compensating revert:
 no passing report state exists until publication and the final deadline

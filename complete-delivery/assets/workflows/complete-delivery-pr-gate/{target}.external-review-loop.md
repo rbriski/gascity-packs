@@ -1,4 +1,4 @@
-Run one bounded current-head external-review iteration.
+Run one bounded frozen-head review and repair cycle.
 
 Before admitting any child action or running the terminal check, require
 `.gc/scripts/checks/delivery-external-review-deadline.sh --validate`.
@@ -10,10 +10,13 @@ Immediately before every source-editing repair mutation and every commit, run
 Earlier iteration or evidence validation does not authorize a later edit or
 commit after the immutable deadline has elapsed.
 
-The children inspect evidence, resolve valid findings, rerun exact local gates,
-publish fixes, and update the living report. The loop check then evaluates
-required CI, CodeRabbit completion, all live unresolved review threads, human
-change requests, PR/draft state, and head stability.
+The children freeze the candidate head, gather every current finding, apply at
+most one consolidated repair batch, rerun exact local gates, publish fixes, and
+update the living report. The loop check then evaluates required CI, all live
+unresolved human review threads, human change requests, PR/draft state, and head
+stability. When `coderabbit` is `off`, do not request, poll, wait for, or block
+on CodeRabbit. Explicit `optional` or `required` configuration evaluates it as
+configured.
 
 Keep the child report pre-terminal: it must leave `external-review` `active`
 and must not publish `passed` or a protected-merge next action. This terminal

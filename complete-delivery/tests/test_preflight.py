@@ -204,6 +204,15 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("deploy=command", result.stdout)
         self.assertIn("source=fi-123", result.stdout)
 
+    def test_missing_coderabbit_configuration_defaults_off(self) -> None:
+        metadata = self.metadata()
+        metadata.pop("gc.var.coderabbit")
+
+        result = self.run_preflight(metadata)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CodeRabbit=off", result.stdout)
+
     def test_missing_source_intent_fails_before_planning(self) -> None:
         result = self.run_preflight(
             self.metadata(**{"gc.var.source_bead_id": "", "gc.var.source_title": ""})
@@ -2877,6 +2886,8 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(formula["vars"]["deploy_timeout"]["default"], "5m")
         self.assertEqual(formula["vars"]["deploy_ci_workflow"]["default"], "")
         self.assertEqual(formula["vars"]["deploy_environment"]["default"], "")
+        self.assertEqual(formula["vars"]["coderabbit"]["default"], "off")
+        self.assertEqual(formula["vars"]["max_iterations"]["default"], "2")
         self.assertEqual(steps["verify-production"]["check"]["check"]["timeout"], "125m")
 
         merge = (WORKFLOW_ROOT / "merge.md").read_text(encoding="utf-8")
