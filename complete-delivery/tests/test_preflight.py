@@ -2289,10 +2289,24 @@ class PreflightTests(unittest.TestCase):
         self.assertLess(pre_publish, report_green.index(deadline_check, pre_publish))
         self.assertLess(report_green.index(deadline_check, pre_publish), publish)
         self.assertEqual(report_green.count(deadline_check), 2)
+        second_validation = report_green.index(deadline_check, pre_publish)
+        rollback_instruction = report_green.index(
+            "explicitly remove/revert the already-written passing report state", second_validation
+        )
+        non_pass_close = report_green.index("close with a non-pass outcome", rollback_instruction)
+        self.assertLess(second_validation, rollback_instruction)
+        self.assertLess(rollback_instruction, non_pass_close)
+        self.assertLess(rollback_instruction, publish)
+        for rollback_clause in (
+            "restore `external-review` to `active` or `blocked` with an expired-deadline\nblocker",
+            "clear the protected-merge next action",
+            "`tested_commit`, `local_gates`, `published_head`, and\n`published_head_matches_tested_commit` pass evidence",
+            "Do not publish",
+        ):
+            self.assertIn(rollback_clause, report_green)
         for failure_clause in (
             "invalidate the handoff's `tested_commit`, `local_gates`,\n`published_head`, and `published_head_matches_tested_commit` pass evidence",
             "write no passing report state, do not publish, and close with a non-pass\noutcome",
-            "make no passing report\nmutation or publication, and close with a non-pass outcome",
         ):
             self.assertIn(failure_clause, report_green)
 

@@ -13,8 +13,12 @@ next action to protected merge.
 
 Immediately before running `report_publish_command`, run
 `.gc/scripts/checks/delivery-external-review-deadline.sh --validate` again.
-On failure, invalidate the same handoff pass evidence, make no passing report
-mutation or publication, and close with a non-pass outcome. Run
+On failure, explicitly remove/revert the already-written passing report state:
+restore `external-review` to `active` or `blocked` with an expired-deadline
+blocker, clear the protected-merge next action, and invalidate the handoff's
+`tested_commit`, `local_gates`, `published_head`, and
+`published_head_matches_tested_commit` pass evidence. Do not publish, and
+close with a non-pass outcome. Run
 `report_publish_command` with `DELIVERY_REPORT_DIR` only after that validation
 when configured.
 
