@@ -19,10 +19,14 @@ not configured) and immediately before the sole passing report mutation, run
 On failure, invalidate the same handoff authority, write no passing report
 state, and close with a non-pass outcome. Only after this final validation may
 this sole outer report authority atomically mark stage `external-review` as
-`passed`, naming the required checks, CodeRabbit signal, zero unresolved
-threads, and gate artifact as evidence, and set the next action to protected
-merge. Do not attempt a compensating revert: no passing report state exists
-until publication and the final deadline validation have both succeeded.
+`passed`, writing the state document at `delivery.report_state_path` with
+`schema` set to `gc.complete-delivery.report.v1` and `sha` set to the
+workflow-root `delivery.head_sha`, naming the required checks, CodeRabbit
+signal, zero unresolved threads, and the resolved
+`delivery.pr_gate_path` in that stage's `evidence` list, and set `next_action`
+to exactly `Proceed to protected merge.` Do not attempt a compensating revert:
+no passing report state exists until publication and the final deadline
+validation have both succeeded.
 
 Close with `gc.outcome=pass` only after that durable passing state is written.
 Otherwise close with a non-pass outcome. Do not invoke provider-native

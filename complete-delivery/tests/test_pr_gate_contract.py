@@ -464,6 +464,19 @@ class PrGateContractTests(unittest.TestCase):
         self.assert_prose_contains(outer_report, "report_publish_command")
         self.assert_prose_contains(outer_report, "require it to succeed")
         self.assert_prose_contains(outer_report, "leaves the report in its prior non-passing state")
+        self.assert_prose_contains(
+            outer_report, "`schema` set to `gc.complete-delivery.report.v1`"
+        )
+        self.assert_prose_contains(
+            outer_report, "`sha` set to the workflow-root `delivery.head_sha`"
+        )
+        self.assert_prose_contains(
+            outer_report,
+            "the resolved `delivery.pr_gate_path` in that stage's `evidence` list",
+        )
+        self.assert_prose_contains(
+            outer_report, "set `next_action` to exactly `Proceed to protected merge.`"
+        )
         self.assert_prose_contains(outer_report, "Do not attempt a compensating revert")
 
     def test_outer_formula_orders_external_review_before_report_green_and_merge(self) -> None:
