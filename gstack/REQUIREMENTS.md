@@ -121,6 +121,13 @@ for every derived pack.
 - Vendor provenance: `gstack/vendor/gstack/upstream.toml` records the
   upstream source repository, pinned commit, and MIT license. The `skills/`
   catalog is the pack's working copy of those vendored skills.
+- Review resource completeness: the vendor tree and installed `review` skill
+  carry the pinned checklist, Greptile triage, design checklist, and every
+  specialist reference. The installed adapter is concise and self-contained;
+  its references are package-relative and it requires no upstream helper
+  runtime. Formula staff review is one bounded lane and must not invoke the
+  standalone review procedure; the skill's named Formula-lane adapter provides
+  the same guard if automatic skill routing loads it.
 
 ## Evidence Commands
 
@@ -140,6 +147,7 @@ grep -rn 'provider-native' gstack/agents gstack/assets | wc -l  # expect >= 60
 grep -rho 'gc\.build\.[a-z_.]*' gstack/assets gstack/formulas | sort -u
 ls gascity/schemas/build
 sed -n '1,10p' gstack/vendor/gstack/upstream.toml
+python3 -m pytest tests/test_gstack_review_contract.py -q
 python3 -m pytest gascity/tests/test_formula_assets.py -q
 python3 - <<'PY'
 import pathlib

@@ -255,6 +255,16 @@ pinned commit, and the MIT license. The installed files under `skills/`
 document-release) expose the same vocabulary for agents. Runtime execution is
 owned by formulas, beads, and Gas City graph lanes.
 
+The review skill is packaged with its pinned-upstream checklist, Greptile
+triage, design checklist, and specialist references. The installed skill is a
+concise, self-contained Gas City adapter that uses paths relative to its own
+`SKILL.md`; it does not require the upstream runtime or a user's `.claude/`
+layout. Its Formula mode and the explicit staff-lane checklist prevent a
+standalone review procedure from spawning a second review tree inside Formula
+execution. `tests/test_gstack_review_contract.py` binds the resource blobs to
+the pinned upstream commit and fails if a future vendor refresh drops or
+disconnects them, adds a hidden runtime dependency, or recouples the lanes.
+
 Raw-framework subagents become Gas City fanouts. Do not preserve upstream
 subagent behavior as provider-native subagents; model that work as formulas or
 expansion children. Every lane in this pack routes through `gc.run_target` to
