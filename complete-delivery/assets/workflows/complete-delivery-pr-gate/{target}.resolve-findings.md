@@ -22,6 +22,14 @@ use the final committed `HEAD` after every valid source fix in this iteration.
 Never use an individual thread's `fix_commit` as `candidate_commit` when later
 fixes exist.
 
+Immediately before every source-editing repair mutation, run
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate`. If that
+validation fails, write only blocker-only handoff evidence and perform neither
+the source-editing mutation nor any `git commit`. Separately, immediately before
+each `git commit`, run the same validation again. If it fails, write only
+blocker-only handoff evidence and perform neither that commit nor any further
+source-editing mutation.
+
 Before every resolution attempt, replace the entire handoff object rather than
 clearing selected fields. A successful object contains only this attempt's
 `inspected_head`, fresh `candidate_commit`, and current thread IDs,

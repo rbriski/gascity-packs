@@ -190,6 +190,26 @@ class PrGateContractTests(unittest.TestCase):
         self.assertNotIn("args", setup["check"]["check"])
         loop = (workflows / "{target}.external-review-loop.md").read_text(encoding="utf-8")
         self.assertIn("Immediately before every source-editing repair mutation and every commit", loop)
+
+        required_deadline_guards = (
+            "Immediately before every source-editing repair mutation",
+            ".gc/scripts/checks/delivery-external-review-deadline.sh --validate",
+            "Separately, immediately before each `git commit`",
+            "write only blocker-only handoff evidence",
+            "perform neither the source-editing mutation nor any `git commit`",
+        )
+        resolve_findings = (workflows / "{target}.resolve-findings.md").read_text(
+            encoding="utf-8"
+        )
+        for required_guard in required_deadline_guards:
+            with self.subTest(resolve_findings_guard=required_guard):
+                self.assert_prose_contains(resolve_findings, required_guard)
+        resolver = (
+            PACK_ROOT / "agents" / "external-review-resolver" / "prompt.template.md"
+        ).read_text(encoding="utf-8")
+        for required_guard in required_deadline_guards:
+            with self.subTest(resolver_guard=required_guard):
+                self.assert_prose_contains(resolver, required_guard)
     @classmethod
     def setUpClass(cls) -> None:
         with FORMULA_PATH.open("rb") as formula_file:
