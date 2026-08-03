@@ -44,6 +44,7 @@ delivery_read_bead_json() {
   while [ "$attempt" -le "$max_attempts" ]; do
     if [ -n "${DELIVERY_GC_TIMEOUT:-}" ]; then
       command -v timeout >/dev/null 2>&1 || {
+        echo "complete-delivery-check: timeout is required for bounded gc bd show" >&2
         rm -f "$diagnostic_file"
         return 1
       }

@@ -17,6 +17,8 @@ BASE_BRANCH="$(delivery_var base_branch '')"
 [ -n "$PR_NUMBER" ] || delivery_fail "workflow root metadata delivery.pr_number is missing"
 [ -n "$RECORDED_SHA" ] || delivery_fail "workflow root metadata delivery.merge_sha is missing"
 [ -n "$RECORDED_HEAD" ] || delivery_fail "workflow root metadata delivery.head_sha is missing"
+[[ "$RECORDED_HEAD" =~ ^[0-9a-f]{40}$ ]] || \
+  delivery_fail "workflow root metadata delivery.head_sha must be a full lowercase 40-hex SHA"
 [ -n "$RECORDED_URL" ] || delivery_fail "workflow root metadata delivery.pr_url is missing"
 [ -n "$BASE_BRANCH" ] || delivery_fail "configured base_branch is required"
 

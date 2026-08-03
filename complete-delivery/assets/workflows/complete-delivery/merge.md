@@ -31,8 +31,11 @@ recorded `delivery.pr_url`, `delivery.repo`, `delivery.pr_number`,
 URL to equal the recorded identity, its base repository and `base.ref` to equal
 the configured repository and base branch. Require `merged` to be a JSON
 Boolean. If it is `true`,
-require a nonempty full merge SHA, verify that SHA is reachable from the
-configured base branch (for example with `gh api repos/<repo>/compare/<merge-sha>...<base-branch>` and only `identical` or `ahead`), then persist that exact SHA as
+require `state=closed` and a nonempty GitHub `merged_at` timestamp before
+persisting any merge SHA or pass evidence. Then require a nonempty full merge
+SHA, verify that SHA is reachable from the configured base branch (for example
+with `gh api repos/<repo>/compare/<merge-sha>...<base-branch>` and only
+`identical` or `ahead`), then persist that exact SHA as
 `delivery.merge_sha` before continuing. This recovery is idempotent: the same
 validated SHA may be recorded again, but no merge command may run. Record the
 GitHub `merged_at` value and reconciliation result in the normal merge evidence

@@ -19,12 +19,18 @@ any non-success finalization path, invalidate the handoff's `tested_commit`,
 success evidence rather than allowing a prior attempt to authorize the report,
 then close with a non-pass outcome.
 
-After that terminal check has passed, this post-check finalizer is the sole
-authority that may update the living report from its final current-head gate
-artifact: mark `external-review` as `passed`, name the required checks,
-CodeRabbit signal, zero unresolved threads, and gate path as evidence, and set
-the next action to protected merge. Run
-`report_publish_command` with `DELIVERY_REPORT_DIR` when configured.
+After that terminal check has passed, immediately re-run
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate` before
+the final report mutation. On failure, invalidate the handoff success evidence,
+write no passing report state, and close non-pass. This post-check finalizer is
+the sole authority that may then update the living report from its final
+current-head gate artifact: mark `external-review` as `passed`, name the
+required checks, CodeRabbit signal, zero unresolved threads, and gate path as
+evidence, and set the next action to protected merge. Immediately before
+running `report_publish_command`, re-run
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate`; failure
+invalidates the pass evidence and prevents publication. Run
+`report_publish_command` with `DELIVERY_REPORT_DIR` only after that validation.
 
 Close with `gc.outcome=pass` only after the successful terminal check and
 report update; otherwise close with a non-pass outcome. Do not merge or invoke

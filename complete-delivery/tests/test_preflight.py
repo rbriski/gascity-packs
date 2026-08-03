@@ -531,6 +531,10 @@ class PreflightTests(unittest.TestCase):
             leftovers = list(root.glob("delivery-read-bead.*"))
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(leftovers, [])
+        self.assertEqual(
+            result.stderr,
+            "complete-delivery-check: timeout is required for bounded gc bd show\n",
+        )
 
     def test_malformed_required_check_list_fails_early(self) -> None:
         result = self.run_preflight(
@@ -1072,6 +1076,21 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(verified.returncode, 0, verified.stderr)
             self.assertIn("-> main", verified.stdout)
+
+            for head_sha in ("b" * 39, "B" * 40, "b" * 39 + "g"):
+                with self.subTest(head_sha=head_sha):
+                    environment["FAKE_GC_JSON"] = json.dumps(
+                        [{"metadata": {**metadata, "delivery.head_sha": head_sha}}]
+                    )
+                    rejected = subprocess.run(
+                        ["bash", str(MERGED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(rejected.returncode, 1)
+                    self.assertIn("full lowercase 40-hex SHA", rejected.stderr)
+            environment["FAKE_GC_JSON"] = json.dumps([{"metadata": metadata}])
 
             for mutation, message in (
                 ({"merged": None}, "boolean merged field"),
@@ -2248,6 +2267,13 @@ class PreflightTests(unittest.TestCase):
         for term in ("delivery.local_gate_summary_path", "canonicalize", "non-symlink", "nonempty regular"):
             self.assertIn(term, local_gates)
 
+        pr_gate_finalizer = (
+            PR_GATE_WORKFLOW_ROOT / "{target}.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("before\nthe final report mutation", pr_gate_finalizer)
+        self.assertIn("Immediately before\nrunning `report_publish_command`", pr_gate_finalizer)
+        self.assertIn("prevents publication", pr_gate_finalizer)
+
         readiness = (WORKFLOW_ROOT / "release-readiness.md").read_text(encoding="utf-8")
         for term in ("deploy_mode=command", "deploy_mode=not-applicable", "deploy_not_applicable_reason", "allow_no_smoke=true", "no_smoke_reason", "verify-production"):
             self.assertIn(term, readiness)
@@ -2307,6 +2333,11 @@ class PreflightTests(unittest.TestCase):
             self.assertIn(flag, merge)
         self.assertLess(merge.index("re-read the PR's `base.ref`"), merge.index('gh pr merge "$DELIVERY_PR_URL"'))
         self.assertIn("without requiring a mutable current head", merge)
+        self.assertIn("`state=closed` and a nonempty GitHub `merged_at` timestamp", merge)
+        self.assertLess(
+            merge.index("`state=closed` and a nonempty GitHub `merged_at` timestamp"),
+            merge.index("persist that exact SHA as\n`delivery.merge_sha`"),
+        )
 
         self.assertIn("no repair-redeployment lane", deploy)
         self.assertIn("completed successful deployment for the exact merge SHA", deploy)
