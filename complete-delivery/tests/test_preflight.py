@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import pathlib
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -470,6 +472,62 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("gc bd show step-1 failed", result.stderr)
         self.assertIn("simulated gc failure: 1", result.stderr)
         self.assertNotIn("simulated gc failure: 3", result.stderr)
+
+    def test_timed_out_bead_read_preserves_timeout_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            gc = root / "gc"
+            gc.write_text(
+                "#!/bin/sh\n"
+                "echo 'bounded read diagnostic' >&2\n"
+                "sleep 2\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update({
+                "PATH": f"{root}:{environment['PATH']}",
+                "DELIVERY_GC_TIMEOUT": "1s",
+            })
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f"source {shlex.quote(str(PACK_ROOT / 'assets' / 'scripts' / 'checks' / 'delivery-common.sh'))}; delivery_read_bead_json step-1",
+                ],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bounded read diagnostic", result.stderr)
+
+    def test_missing_timeout_binary_cleans_bead_read_diagnostic_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            for command in ("mktemp", "rm"):
+                (bin_dir / command).symlink_to(pathlib.Path("/usr/bin") / command)
+            environment = os.environ.copy()
+            environment.update({
+                "PATH": str(bin_dir),
+                "TMPDIR": str(root),
+                "DELIVERY_GC_TIMEOUT": "1s",
+            })
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    f"source {shlex.quote(str(PACK_ROOT / 'assets' / 'scripts' / 'checks' / 'delivery-common.sh'))}; delivery_read_bead_json step-1",
+                ],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            leftovers = list(root.glob("delivery-read-bead.*"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(leftovers, [])
 
     def test_malformed_required_check_list_fails_early(self) -> None:
         result = self.run_preflight(
@@ -1020,7 +1078,6 @@ class PreflightTests(unittest.TestCase):
                 ({"merged": 1}, "boolean merged field"),
                 ({"state": "open"}, "is not closed"),
                 ({"merged_at": ""}, "no merged_at timestamp"),
-                ({"head": {"sha": "c" * 40}}, "does not match GitHub head"),
                 ({"html_url": "https://github.com/example/repo/pull/999"}, "does not match recorded URL"),
             ):
                 with self.subTest(mutation=mutation):
@@ -1033,6 +1090,14 @@ class PreflightTests(unittest.TestCase):
                     )
                     self.assertEqual(rejected.returncode, 1)
                     self.assertIn(message, rejected.stderr)
+
+            environment["FAKE_PR_JSON"] = json.dumps(
+                {**valid_pr, "head": {"sha": "c" * 40}}
+            )
+            recovered = subprocess.run(
+                ["bash", str(MERGED_SCRIPT)], capture_output=True, text=True, env=environment
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
 
     def test_release_verification_disambiguates_child_and_timeout_statuses(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2316,11 +2381,34 @@ class SourceArtifactTests(unittest.TestCase):
         upstream_path_variant: tuple[str, str] | None = None,
         artifact_path_keys: str | None = None,
         use_variable_artifact_path: bool = False,
+        generic_check_value: str | None = "gascity/assets/scripts/checks/build-artifact-valid.sh",
+        step_generic_check_value: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             work_dir = root / "work"
             work_dir.mkdir()
+            checker_dir = work_dir / "gascity" / "assets" / "scripts" / "checks"
+            checker_dir.mkdir(parents=True)
+            contained_checker = checker_dir / "build-artifact-valid.sh"
+            contained_checker.write_text(
+                SOURCE_ARTIFACT_GENERIC_CHECK.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            contained_checker.chmod(0o755)
+            contained_validator = checker_dir.parent / "validate_build_artifact.py"
+            contained_validator.write_text(
+                (REPOSITORY_ROOT / "gascity" / "assets" / "scripts" / "validate_build_artifact.py").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            shutil.copytree(
+                REPOSITORY_ROOT / "gascity" / "schemas",
+                work_dir / "gascity" / "schemas",
+            )
+            if generic_check_value == "__contained_absolute__":
+                generic_check_value = str(contained_checker)
+            if generic_check_value == "linked-check.sh":
+                (work_dir / "linked-check.sh").symlink_to("/bin/true")
 
             def write_artifact(
                 kind: str, text: str, variant: str
@@ -2383,14 +2471,19 @@ class SourceArtifactTests(unittest.TestCase):
                 "gc.root_bead_id": "root-1",
                 "gc.build.artifact_schema": f"gc.build.{artifact_kind}.v1",
                 "gc.build.artifact_path_keys": artifact_path_keys or artifact_path_key,
+                **(
+                    {"gc.var.build_artifact_valid_path": step_generic_check_value}
+                    if step_generic_check_value is not None
+                    else {}
+                ),
             }}]
             root_metadata = {
                 artifact_path_key: artifact_path_value,
                 "gc.var.source_bead_id": "fi-123",
                 "gc.var.source_title": source_title,
                 **(
-                    {"gc.var.build_artifact_valid_path": str(generic_check)}
-                    if generic_check is not None
+                    {"gc.var.build_artifact_valid_path": generic_check_value}
+                    if generic_check is not None and generic_check_value is not None
                     else {}
                 ),
             }
@@ -2533,6 +2626,28 @@ class SourceArtifactTests(unittest.TestCase):
         result = self.run_check(self.artifact(), generic_check=None)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("build-artifact-valid.sh is unavailable", result.stderr)
+
+    def test_source_artifact_checker_is_root_authorized_and_contained(self) -> None:
+        allowed = self.run_check(
+            self.artifact(), generic_check_value="__contained_absolute__"
+        )
+        self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+
+        for value in ("../outside-check.sh", "/bin/true", "linked-check.sh"):
+            with self.subTest(value=value):
+                result = self.run_check(self.artifact(), generic_check_value=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "must resolve within the canonical delivery work directory",
+                    result.stderr,
+                )
+
+        overridden = self.run_check(
+            self.artifact(),
+            step_generic_check_value="checks/build-artifact-valid.sh",
+        )
+        self.assertNotEqual(overridden.returncode, 0)
+        self.assertIn("must be configured on the workflow root", overridden.stderr)
 
     def test_source_intent_heading_inside_fence_is_rejected(self) -> None:
         source_id = "fi-123"

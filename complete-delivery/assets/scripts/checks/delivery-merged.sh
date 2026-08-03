@@ -45,8 +45,10 @@ IFS=$'\x1f' read -r MERGED STATE MERGED_AT REMOTE_SHA REMOTE_HEAD BASE_REF PR_UR
 [ -n "$MERGED_AT" ] || delivery_fail "merged PR $REPO#$PR_NUMBER has no merged_at timestamp"
 [ "$REMOTE_SHA" = "$RECORDED_SHA" ] || \
   delivery_fail "recorded merge SHA $RECORDED_SHA does not match GitHub $REMOTE_SHA"
-[ "$REMOTE_HEAD" = "$RECORDED_HEAD" ] || \
-  delivery_fail "recorded head $RECORDED_HEAD does not match GitHub head $REMOTE_HEAD"
+# A merged PR's remote head is mutable after merge (for example, a branch can
+# be deleted and recreated). The durable merge identity, base, merge SHA, URL,
+# and base reachability above are the recovery contract; only an open PR gate
+# must require equality with its current mutable head.
 [ "$BASE_REF" = "$BASE_BRANCH" ] || \
   delivery_fail "GitHub PR base $BASE_REF does not match configured base_branch $BASE_BRANCH"
 [ "$PR_URL" = "$RECORDED_URL" ] || \

@@ -239,13 +239,14 @@ class PrGateContractTests(unittest.TestCase):
             gc = root / "gc"
             gc.write_text(
                 "#!/usr/bin/env python3\n"
-                "import json, os, pathlib, sys\n"
+                "import json, os, pathlib, sys, time\n"
                 "state_path = pathlib.Path(os.environ['FAKE_GC_STATE'])\n"
                 "history_path = pathlib.Path(os.environ['FAKE_GC_HISTORY'])\n"
                 "args = sys.argv[1:]\n"
                 "if args[1] == 'show': print(state_path.read_text())\n"
                 "elif args[1] == 'history': print(history_path.read_text())\n"
                 "elif args[1] == 'update':\n"
+                " if os.environ.get('FAKE_GC_UPDATE_DELAY'): time.sleep(float(os.environ['FAKE_GC_UPDATE_DELAY']))\n"
                 " data = json.loads(state_path.read_text()); metadata = data[0]['metadata']\n"
                 " for i, value in enumerate(args):\n"
                 "  if value == '--set-metadata': key, value = args[i + 1].split('=', 1); metadata[key] = value\n"
@@ -261,6 +262,7 @@ class PrGateContractTests(unittest.TestCase):
                 "GC_WORK_DIR": str(root),
                 "FAKE_GC_STATE": str(state),
                 "FAKE_GC_HISTORY": str(history_path),
+                "FAKE_GC_UPDATE_DELAY": "2",
                 "PATH": f"{root}:{environment['PATH']}",
             })
             first = subprocess.Popen(["bash", str(DEADLINE_SCRIPT), "--initialize"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
@@ -277,6 +279,7 @@ class PrGateContractTests(unittest.TestCase):
                 metadata["delivery.external_review_deadline"],
                 (datetime.strptime(metadata["delivery.external_review_started_at"], "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
+            self.assertIn("DEADLINE_LOCK_WAIT=30", DEADLINE_SCRIPT.read_text(encoding="utf-8"))
 
     def test_external_review_actions_and_terminal_gate_require_deadline_validation(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
@@ -990,6 +993,24 @@ class PrGateContractTests(unittest.TestCase):
             self.assert_prose_contains(publish_fixes, requirement)
         self.assert_prose_contains(merge, "Do not invoke `delivery-pr-open.sh` for this already-merged recovery")
         self.assert_prose_contains(merge, "only after that fresh reconciliation proves `merged=false` and `state=open`")
+        self.assert_prose_contains(publish_fixes, "immediately persist all refreshed workflow-root identity fields before any thread resolution")
+        for field in (
+            "delivery.head_sha",
+            "delivery.repo",
+            "delivery.branch",
+            "delivery.pr_number",
+            "delivery.pr_url",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, publish_fixes)
+        self.assert_prose_contains(publish_fixes, "deadline validation failure is a deadline blocker, a refresh failure is a publication blocker, and a thread-resolution failure is a resolution blocker")
+
+    def test_local_gate_success_is_invalidated_if_the_deadline_expires(self) -> None:
+        workflow = (
+            PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate" / "{target}.rerun-local-gates.md"
+        ).read_text(encoding="utf-8")
+        self.assert_prose_contains(workflow, "Immediately after all local gates pass and before recording any success evidence")
+        self.assert_prose_contains(workflow, "erase `tested_commit`, `local_gates`, `published_head`, and `published_head_matches_tested_commit`")
 
     def test_local_gates_execute_an_allowed_local_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -39,14 +39,17 @@ PY
 }
 
 # A deployed pack supplies the common checker beside this materialized script.
-# Source-tree and other non-materialized callers must configure it explicitly;
-# never walk repository-relative paths that can silently select a different
-# pack revision.
-GENERIC_CHECK="$(delivery_var build_artifact_valid_path '')"
-if [ -z "$GENERIC_CHECK" ]; then
+# A source-tree caller may select one only from workflow-root policy, never a
+# step-controlled value. Canonicalize configured paths inside the worktree so
+# an absolute path, parent traversal, or symlink cannot execute another pack.
+ROOT_GENERIC_CHECK="$(delivery_root_metadata gc.var.build_artifact_valid_path)"
+STEP_GENERIC_CHECK="$(delivery_metadata_value "$DELIVERY_STEP_JSON" gc.var.build_artifact_valid_path)"
+[ -z "$STEP_GENERIC_CHECK" ] || \
+  delivery_fail "build-artifact-valid.sh path must be configured on the workflow root"
+if [ -z "$ROOT_GENERIC_CHECK" ]; then
   GENERIC_CHECK="$SCRIPT_DIR/build-artifact-valid.sh"
 else
-  GENERIC_CHECK="$(delivery_resolve_path "$GENERIC_CHECK")"
+  GENERIC_CHECK="$(delivery_resolve_contained_path "$ROOT_GENERIC_CHECK" "build-artifact-valid.sh path")"
 fi
 [ -f "$GENERIC_CHECK" ] || delivery_fail "build-artifact-valid.sh is unavailable"
 

@@ -63,10 +63,15 @@ delivery_history_before_deadline() {
 # initialization, then re-read durable metadata while holding the lock so a
 # waiter reuses the first persisted pair instead of overwriting it.
 if [ "$MODE" = "--initialize" ] && [ -z "$STARTED_AT" ] && [ -z "$DEADLINE" ]; then
+  # The lock holder performs two bounded metadata reads plus one durable
+  # update. Thirty seconds covers loaded concurrent initialization without
+  # turning a wedged data plane into an unbounded wait; lock exhaustion fails
+  # closed below.
+  DEADLINE_LOCK_WAIT=30
   DEADLINE_LOCK_DIR="$DELIVERY_WORK_DIR/.gc"
   mkdir -p "$DEADLINE_LOCK_DIR" || delivery_fail "cannot create external-review deadline lock directory"
   exec {deadline_lock_fd}>"$DEADLINE_LOCK_DIR/external-review-deadline-$DELIVERY_ROOT_ID.lock"
-  flock -w 1 "$deadline_lock_fd" || \
+  flock -w "$DEADLINE_LOCK_WAIT" "$deadline_lock_fd" || \
     delivery_fail "cannot acquire external-review deadline initialization lock"
   delivery_refresh_root_metadata 1s
 fi

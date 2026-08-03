@@ -43,7 +43,10 @@ delivery_read_bead_json() {
   # unsuccessful read-only attempts.
   while [ "$attempt" -le "$max_attempts" ]; do
     if [ -n "${DELIVERY_GC_TIMEOUT:-}" ]; then
-      command -v timeout >/dev/null 2>&1 || return 1
+      command -v timeout >/dev/null 2>&1 || {
+        rm -f "$diagnostic_file"
+        return 1
+      }
       if output="$(timeout --signal=KILL "$DELIVERY_GC_TIMEOUT" gc bd show "$bead_id" --json 2>"$diagnostic_file")"; then
         status=0
       else
@@ -65,6 +68,9 @@ delivery_read_bead_json() {
     # A timeout is a fail-closed condition, not a transient Dolt failure to
     # retry: another attempt would extend the caller's declared time budget.
     if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+      # The timeout's stderr is the only useful diagnostic for a bounded read;
+      # retain it while removing the temporary file before returning failure.
+      [ -s "$diagnostic_file" ] && cat "$diagnostic_file" >&2
       rm -f "$diagnostic_file"
       return 1
     fi

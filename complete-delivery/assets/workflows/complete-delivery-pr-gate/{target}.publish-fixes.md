@@ -22,12 +22,17 @@ validation fails, write blocker-only state and perform no push, refresh, or
 resolution. Specifically, unavailable lock, dirty tree, or mismatch fails closed before push,
 refresh, or resolution; an expired deadline fails closed the same way. Push exactly `tested_commit` normally (never
 force-push), or make no empty commit/push when source did not change; refresh
-the PR, persist its full-SHA `published_head`, `tested_commit`, and boolean
-`published_head_matches_tested_commit`, then perform all permitted thread
-resolutions before releasing the lock. No push may occur after that final head
-check and before all resolution calls finish. Record the current head on the
-workflow root as `delivery.head_sha`; a new head invalidates old CI and
-CodeRabbit evidence for the next loop check.
+the PR, then immediately persist all refreshed workflow-root identity fields
+before any thread resolution: exact full-SHA `delivery.head_sha`,
+`delivery.repo`, `delivery.branch`, `delivery.pr_number`, and `delivery.pr_url`.
+Also persist the handoff's exact full-SHA `published_head`, `tested_commit`, and
+boolean `published_head_matches_tested_commit`. A deadline validation failure
+is a deadline blocker, a refresh failure is a publication blocker, and a
+thread-resolution failure is a resolution blocker; record those three failures
+distinctly and never reuse one as success evidence for another. Only then
+perform all permitted thread resolutions before releasing the lock. No push may
+occur after that final head check and before all resolution calls finish. A new
+head invalidates old CI and CodeRabbit evidence for the next loop check.
 For every current-attempt mapped finding, resolve a valid thread only when its
 fix evidence passed, and resolve an invalid, superseded, or otherwise
 non-actionable thread only when its disposition evidence was published. Still
