@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=delivery-common.sh
 source "$SCRIPT_DIR/delivery-common.sh"
 command -v timeout >/dev/null 2>&1 || delivery_fail "timeout is required on PATH"
+command -v flock >/dev/null 2>&1 || delivery_fail "flock is required on PATH"
 # Context has to be read before this gate can discover a durable deadline.
 # Bound those bootstrap reads tightly; once a deadline is known, all later gc
 # calls use its remaining time instead.
@@ -18,12 +19,21 @@ case "$MODE" in
   *) delivery_fail "usage: delivery-external-review-deadline.sh [--initialize|--validate]" ;;
 esac
 
-# This is a fail-closed production gate.  Do not accept a caller-provided
-# clock: a stale/expired deadline must not become valid merely because a
-# caller freezes time in its environment.
-NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_AT="$(delivery_root_metadata delivery.external_review_started_at)"
 DEADLINE="$(delivery_root_metadata delivery.external_review_deadline)"
+
+delivery_refresh_root_metadata() {
+  local timeout_value="$1"
+
+  DELIVERY_GC_TIMEOUT="$timeout_value"
+  DELIVERY_ROOT_JSON="$(delivery_read_bead_json "$DELIVERY_ROOT_ID")" || \
+    delivery_fail "gc bd show $DELIVERY_ROOT_ID failed while refreshing external-review deadline"
+  unset DELIVERY_GC_TIMEOUT
+  delivery_json_is_valid "$DELIVERY_ROOT_JSON" || \
+    delivery_fail "gc bd show $DELIVERY_ROOT_ID returned invalid JSON while refreshing external-review deadline"
+  STARTED_AT="$(delivery_root_metadata delivery.external_review_started_at)"
+  DEADLINE="$(delivery_root_metadata delivery.external_review_deadline)"
+}
 
 delivery_remaining_deadline_timeout() {
   python3 - "$DEADLINE" <<'PY'
@@ -49,6 +59,18 @@ delivery_history_before_deadline() {
   timeout --signal=KILL "$remaining" gc bd history "$DELIVERY_ROOT_ID" --json
 }
 
+# Concurrent setup lanes share a worktree.  Serialize only first-entry
+# initialization, then re-read durable metadata while holding the lock so a
+# waiter reuses the first persisted pair instead of overwriting it.
+if [ "$MODE" = "--initialize" ] && [ -z "$STARTED_AT" ] && [ -z "$DEADLINE" ]; then
+  DEADLINE_LOCK_DIR="$DELIVERY_WORK_DIR/.gc"
+  mkdir -p "$DEADLINE_LOCK_DIR" || delivery_fail "cannot create external-review deadline lock directory"
+  exec {deadline_lock_fd}>"$DEADLINE_LOCK_DIR/external-review-deadline-$DELIVERY_ROOT_ID.lock"
+  flock -w 1 "$deadline_lock_fd" || \
+    delivery_fail "cannot acquire external-review deadline initialization lock"
+  delivery_refresh_root_metadata 1s
+fi
+
 if [ -n "$DEADLINE" ]; then
   known_timeout="$(delivery_remaining_deadline_timeout 2>&1)" || \
     delivery_fail "$known_timeout"
@@ -60,6 +82,9 @@ else
 fi
 
 if [ "$MODE" = "--initialize" ] && [ -z "$STARTED_AT" ] && [ -z "$DEADLINE" ]; then
+  # Read the real UTC clock only after the pre-persistence history read.  The
+  # resulting pair is therefore not stale before it is made immutable.
+  NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   INITIAL_OUTPUT="$(python3 - "$NOW" "$HISTORY" <<'PY'
 import datetime as dt
 import json
@@ -107,6 +132,11 @@ PY
     delivery_fail "cannot re-read persisted workflow-root deadline before expiration"
 fi
 
+# This is a fail-closed production gate. Do not accept a caller-provided
+# clock: a stale/expired deadline must not become valid merely because a
+# caller freezes time in its environment. Recompute it after every internal
+# read so validation cannot authorize work that crossed the deadline in-flight.
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 python3 - "$NOW" "$STARTED_AT" "$DEADLINE" "$HISTORY" <<'PY' || \
   delivery_fail "external-review deadline is missing, malformed, moved, or expired"
 import datetime as dt

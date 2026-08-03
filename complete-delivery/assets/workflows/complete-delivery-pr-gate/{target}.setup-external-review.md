@@ -5,6 +5,11 @@ Before any prerequisite probe or provider action, run
 It is the only first-entry write: it creates `delivery.external_review_started_at`
 and `delivery.external_review_deadline` on the workflow root once, and otherwise
 fails closed if either value was reset, moved, malformed, or expired.
+Concurrent setup callers must serialize that first entry and, after acquiring
+the initialization lock, reread the workflow-root metadata. The lock holder
+persists one immutable pair; a waiter must reuse that durable pair rather than
+computing or overwriting another one. Recompute real UTC immediately before the
+final deadline validation after all prerequisite and metadata reads.
 
 Read `delivery.repo`, `delivery.pr_number`, `delivery.pr_url`, and
 `delivery.head_sha` from the workflow root. Prove all three prerequisites before

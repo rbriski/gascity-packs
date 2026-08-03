@@ -14,9 +14,13 @@ source fix returns to `rerun-local-gates` for a fresh committed candidate and
 complete retest. Acquire one shared repository-scoped publication lock before
 any push, no-push refresh, final head check, or `resolveReviewThread` call;
 every path that can push this PR must acquire that same lock. After acquiring
-it, recheck the clean tree and canonical `HEAD == tested_commit` while holding
-it; unavailable lock, dirty tree, or mismatch fails closed before push,
-refresh, or resolution. Push exactly `tested_commit` normally (never
+it, immediately run `.gc/scripts/checks/delivery-external-review-deadline.sh
+--validate` before final checks or any mutation. After acquiring it, recheck
+the clean tree and canonical `HEAD == tested_commit` while holding it. Bound lock acquisition
+by the deadline's remaining time; if the lock wait expires or the post-lock
+validation fails, write blocker-only state and perform no push, refresh, or
+resolution. Specifically, unavailable lock, dirty tree, or mismatch fails closed before push,
+refresh, or resolution; an expired deadline fails closed the same way. Push exactly `tested_commit` normally (never
 force-push), or make no empty commit/push when source did not change; refresh
 the PR, persist its full-SHA `published_head`, `tested_commit`, and boolean
 `published_head_matches_tested_commit`, then perform all permitted thread
@@ -39,5 +43,8 @@ different full-SHA may that `published_head` be next-iteration state, not a
 publication failure; it keeps every mapped thread open and cannot authorize
 resolution.
 
-Close with `gc.outcome=pass`. Do not merge or invoke provider-native
-subagents.
+Close with `gc.outcome=pass` only after successful publication, or after a
+recoverable publication failure that has another bounded iteration remaining.
+An exhausted deadline, attempt budget, or recovery budget is a non-pass
+outcome: write blocker-only evidence and do not publish `gc.outcome=pass`.
+Do not merge or invoke provider-native subagents.

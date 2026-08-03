@@ -169,6 +169,115 @@ class PrGateContractTests(unittest.TestCase):
         self.assertIn("during deadline discovery", timed_out.stderr)
         self.assertIn('timeout --signal=KILL 1s gc bd history', DEADLINE_SCRIPT.read_text(encoding="utf-8"))
 
+    def test_deadline_recomputes_real_clock_after_internal_reads(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state = root / "state.json"
+            history_path = root / "history.json"
+            state.write_text(json.dumps([{"metadata": {}}]), encoding="utf-8")
+            history_path.write_text("[]", encoding="utf-8")
+            gc = root / "gc"
+            gc.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                "state_path = pathlib.Path(os.environ['FAKE_GC_STATE'])\n"
+                "history_path = pathlib.Path(os.environ['FAKE_GC_HISTORY'])\n"
+                "if sys.argv[2] == 'show': print(state_path.read_text())\n"
+                "elif sys.argv[2] == 'history': print(history_path.read_text())\n"
+                "elif sys.argv[2] == 'update':\n"
+                " data = json.loads(state_path.read_text()); metadata = data[0]['metadata']\n"
+                " for i, value in enumerate(sys.argv):\n"
+                "  if value == '--set-metadata': key, value = sys.argv[i + 1].split('=', 1); metadata[key] = value\n"
+                " state_path.write_text(json.dumps(data))\n"
+                " history = json.loads(history_path.read_text()); history.insert(0, {'Issue': data[0]}); history_path.write_text(json.dumps(history))\n"
+                "else: raise SystemExit('unexpected gc invocation: ' + repr(sys.argv))\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            date = root / "date"
+            date.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, pathlib\n"
+                "counter = pathlib.Path(os.environ['FAKE_DATE_COUNTER'])\n"
+                "index = int(counter.read_text() if counter.exists() else '0')\n"
+                "values = os.environ['FAKE_DATE_VALUES'].split(',')\n"
+                "counter.write_text(str(index + 1))\n"
+                "print(values[min(index, len(values) - 1)])\n",
+                encoding="utf-8",
+            )
+            date.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update({
+                "GC_BEAD_ID": "root-1",
+                "GC_WORK_DIR": str(root),
+                "FAKE_GC_STATE": str(state),
+                "FAKE_GC_HISTORY": str(history_path),
+                "FAKE_DATE_COUNTER": str(root / "date-count"),
+                "FAKE_DATE_VALUES": ",".join((
+                    now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    (now + timedelta(hours=2, seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )),
+                "PATH": f"{root}:{environment['PATH']}",
+            })
+            result = subprocess.run(
+                ["bash", str(DEADLINE_SCRIPT), "--initialize"],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expired", result.stderr)
+
+    def test_deadline_initialization_uses_one_pair_for_concurrent_callers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            state = root / "state.json"
+            history_path = root / "history.json"
+            state.write_text(json.dumps([{"metadata": {}}]), encoding="utf-8")
+            history_path.write_text("[]", encoding="utf-8")
+            gc = root / "gc"
+            gc.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                "state_path = pathlib.Path(os.environ['FAKE_GC_STATE'])\n"
+                "history_path = pathlib.Path(os.environ['FAKE_GC_HISTORY'])\n"
+                "args = sys.argv[1:]\n"
+                "if args[1] == 'show': print(state_path.read_text())\n"
+                "elif args[1] == 'history': print(history_path.read_text())\n"
+                "elif args[1] == 'update':\n"
+                " data = json.loads(state_path.read_text()); metadata = data[0]['metadata']\n"
+                " for i, value in enumerate(args):\n"
+                "  if value == '--set-metadata': key, value = args[i + 1].split('=', 1); metadata[key] = value\n"
+                " state_path.write_text(json.dumps(data))\n"
+                " history = json.loads(history_path.read_text()); history.insert(0, {'Issue': data[0]}); history_path.write_text(json.dumps(history))\n"
+                "else: raise SystemExit('unexpected gc invocation: ' + repr(args))\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update({
+                "GC_BEAD_ID": "root-1",
+                "GC_WORK_DIR": str(root),
+                "FAKE_GC_STATE": str(state),
+                "FAKE_GC_HISTORY": str(history_path),
+                "PATH": f"{root}:{environment['PATH']}",
+            })
+            first = subprocess.Popen(["bash", str(DEADLINE_SCRIPT), "--initialize"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+            second = subprocess.Popen(["bash", str(DEADLINE_SCRIPT), "--initialize"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+            first_stdout, first_stderr = first.communicate(timeout=10)
+            second_stdout, second_stderr = second.communicate(timeout=10)
+            self.assertEqual(first.returncode, 0, first_stderr)
+            self.assertEqual(second.returncode, 0, second_stderr)
+            self.assertIn("deadline valid", first_stdout)
+            self.assertIn("deadline valid", second_stdout)
+            metadata = json.loads(state.read_text(encoding="utf-8"))[0]["metadata"]
+            self.assertEqual(len(json.loads(history_path.read_text(encoding="utf-8"))), 1)
+            self.assertEqual(
+                metadata["delivery.external_review_deadline"],
+                (datetime.strptime(metadata["delivery.external_review_started_at"], "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+
     def test_external_review_actions_and_terminal_gate_require_deadline_validation(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
         for filename in (
@@ -866,6 +975,21 @@ class PrGateContractTests(unittest.TestCase):
         self.assert_prose_contains(
             workflow, "that invalidates the whole handoff, clear `tested_commit` and `local_gates`"
         )
+
+    def test_terminal_publication_and_merge_recovery_are_deadline_and_state_bound(self) -> None:
+        workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
+        publish_fixes = (workflows / "{target}.publish-fixes.md").read_text(encoding="utf-8")
+        merge = (PACK_ROOT / "assets" / "workflows" / "complete-delivery" / "merge.md").read_text(encoding="utf-8")
+
+        for requirement in (
+            "Bound lock acquisition by the deadline's remaining time",
+            "immediately run `.gc/scripts/checks/delivery-external-review-deadline.sh --validate`",
+            "perform no push, refresh, or resolution",
+            "exhausted deadline, attempt budget, or recovery budget is a non-pass outcome",
+        ):
+            self.assert_prose_contains(publish_fixes, requirement)
+        self.assert_prose_contains(merge, "Do not invoke `delivery-pr-open.sh` for this already-merged recovery")
+        self.assert_prose_contains(merge, "only after that fresh reconciliation proves `merged=false` and `state=open`")
 
     def test_local_gates_execute_an_allowed_local_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

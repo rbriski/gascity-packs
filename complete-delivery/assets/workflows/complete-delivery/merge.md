@@ -24,7 +24,7 @@ re-read the PR's `base.ref` from GitHub. Require configured
 equal it exactly. On a missing value or mismatch, fail closed and return to the
 prior gate; do not rely on the earlier base or invoke `gh pr merge`.
 
-Before rerunning the open-PR gate after any interrupted attempt, reconcile the
+Before rerunning `delivery-pr-open.sh` after any interrupted attempt, reconcile the
 recorded `delivery.pr_url`, `delivery.repo`, `delivery.pr_number`,
 `delivery.head_sha`, and configured `gc.var.base_branch` against a fresh
 `gh api repos/<repo>/pulls/<number>` response. Require the response number and
@@ -37,6 +37,12 @@ configured base branch (for example with `gh api repos/<repo>/compare/<merge-sha
 validated SHA may be recorded again, but no merge command may run. Record the
 GitHub `merged_at` value and reconciliation result in the normal merge evidence
 under `<artifact_root>/delivery/`, then close with `gc.outcome=pass`.
+Do not invoke `delivery-pr-open.sh` for this already-merged recovery.
+
+Invoke `delivery-pr-open.sh` only after that fresh reconciliation proves
+`merged=false` and `state=open`; it is an open-PR gate, never a merged-recovery
+gate. Any missing, non-Boolean, or otherwise unrecognized `merged` value is a
+non-pass reconciliation outcome.
 
 Only invoke `gh pr merge` when that fresh response has `state=open`,
 `merged=false`, and the exact recorded head SHA. For that open, unmerged state,
