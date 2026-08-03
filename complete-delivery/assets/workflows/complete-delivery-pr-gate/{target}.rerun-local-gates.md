@@ -41,8 +41,13 @@ from being interpreted as shell source. After every configured command passes, r
 remain clean and `HEAD` to still equal `candidate_commit`; otherwise do not
 record passing evidence. Immediately after all local gates pass and before
 recording any success evidence, run
-`.gc/scripts/checks/delivery-external-review-deadline.sh --validate` again. If
-the immutable deadline expired during local gates, erase `tested_commit`,
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate` again.
+Immediately after that final deadline validation and before atomically writing
+any passing authority, repeat the clean-tree check and verify `HEAD` still
+exactly equals `candidate_commit`. If either check fails, erase `tested_commit`,
+`local_gates`, `published_head`, and `published_head_matches_tested_commit`,
+write blocker-only evidence, and do not return a local-gates pass. If the
+immutable deadline expired during local gates, erase `tested_commit`,
 `local_gates`, `published_head`, and `published_head_matches_tested_commit`,
 write blocker-only expiry evidence, and do not return a local-gates pass. Then
 record `candidate_commit` as a full-SHA

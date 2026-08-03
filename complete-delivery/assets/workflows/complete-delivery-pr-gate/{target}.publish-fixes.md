@@ -36,9 +36,17 @@ every mapped thread open. A deadline validation failure
 is a deadline blocker, a refresh failure is a publication blocker, and a
 thread-resolution failure is a resolution blocker; record those three failures
 distinctly and never reuse one as success evidence for another. Only then
-perform all permitted thread resolutions before releasing the lock. No push may
-occur after that final head check and before all resolution calls finish. A new
-head invalidates old CI and CodeRabbit evidence for the next loop check.
+perform all permitted thread resolutions before releasing the lock. Immediately
+after the final permitted resolution and before recording any pass outcome, run
+`.gc/scripts/checks/delivery-external-review-deadline.sh --validate` again. If
+that final validation fails, clear all authority fields (`tested_commit`,
+`local_gates`, `published_head`, and `published_head_matches_tested_commit`),
+write blocker-only expiry evidence, preserve the truth of any already-resolved
+threads, and close with a non-pass outcome. An already-resolved thread state
+cannot authorize continuation, and this lane must not claim to reopen a thread
+without a supported reopening operation. No push may occur after that final
+head check and before all resolution calls finish. A new head invalidates old
+CI and CodeRabbit evidence for the next loop check.
 For every current-attempt mapped finding, resolve a valid thread only when its
 fix evidence passed, and resolve an invalid, superseded, or otherwise
 non-actionable thread only when its disposition evidence was published. Still

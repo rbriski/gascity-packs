@@ -655,13 +655,16 @@ PY
     delivery_fail "GitHub CI deployment run is failed, stale, or does not bind the merge SHA and environment"
   fi
 
-  deployment_id="$(python3 - "$api_dir/selection.json" <<'PY'
+  if ! deployment_id="$(python3 - "$api_dir/selection.json" <<'PY'
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     print(json.load(handle)["deployment"]["id"])
 PY
-)"
+  )"; then
+    rm -rf -- "$api_dir"
+    delivery_fail "failed to extract GitHub deployment ID from selected deployment evidence"
+  fi
   if ! timeout --kill-after=5s 30s gh api --paginate --slurp "repos/$ci_repo/deployments/$deployment_id/statuses?per_page=100" \
     >"$api_dir/statuses.json"; then
     rm -rf -- "$api_dir"

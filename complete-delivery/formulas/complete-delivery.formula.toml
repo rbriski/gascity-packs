@@ -332,6 +332,14 @@ needs = ["external-review"]
 metadata = { "gc.run_target" = "complete-delivery.report-editor" }
 description_file = "../assets/workflows/complete-delivery/report-green.md"
 
+[steps.check]
+max_attempts = 1
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/delivery-report-green.sh"
+timeout = "1m"
+
 [[steps]]
 id = "merge"
 title = "Merge without bypassing protection"

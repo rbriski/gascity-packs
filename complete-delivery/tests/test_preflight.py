@@ -12,6 +12,7 @@ import tempfile
 import time
 import tomllib
 import unittest
+from datetime import datetime, timedelta, timezone
 
 
 PACK_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -19,6 +20,9 @@ REPOSITORY_ROOT = PACK_ROOT.parent
 SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-preflight.sh"
 RELEASE_VERIFIED_SCRIPT = (
     PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-release-verified.sh"
+)
+REPORT_GREEN_SCRIPT = (
+    PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-report-green.sh"
 )
 PR_OPEN_SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-pr-open.sh"
 MERGED_SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-merged.sh"
@@ -2079,6 +2083,30 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
 
+            python = bin_dir / "python3"
+            python.write_text(
+                "#!/bin/sh\n"
+                "case \"${2:-}\" in */selection.json) exit 17 ;; esac\n"
+                "exec /usr/bin/python3 \"$@\"\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            environment["TMPDIR"] = str(root)
+            failed_extraction = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(failed_extraction.returncode, 1)
+            self.assertIn(
+                "failed to extract GitHub deployment ID from selected deployment evidence",
+                failed_extraction.stderr,
+            )
+            self.assertFalse(list(root.glob("delivery-ci-api.*")))
+            python.unlink()
+            environment.pop("TMPDIR")
+
             verify_log = repository / "artifacts" / "delivery" / "verify.log"
             verify_log.write_text("verification evidence\n", encoding="utf-8")
             verified_metadata = {
@@ -2213,6 +2241,81 @@ class PreflightTests(unittest.TestCase):
             )
             self.assertEqual(missing_environment.returncode, 1)
             self.assertIn("deploy_environment", missing_environment.stderr)
+
+    def test_report_green_check_requires_durable_pass_and_protected_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            state_path = root / "report-state.json"
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            metadata = {
+                "delivery.report_state_path": str(state_path),
+                "delivery.external_review_started_at": (
+                    now - timedelta(minutes=1)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "delivery.external_review_deadline": (
+                    now + timedelta(hours=1)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            gc = bin_dir / "gc"
+            gc.write_text(
+                "#!/bin/sh\n"
+                "case \"${2:-}\" in\n"
+                "  show)\n"
+                "    if [ \"${3:-}\" = step-1 ]; then printf '%s\\n' \"$FAKE_STEP_JSON\"; "
+                "else printf '%s\\n' \"$FAKE_ROOT_JSON\"; fi ;;\n"
+                "  history) printf '%s\\n' \"$FAKE_HISTORY_JSON\" ;;\n"
+                "  *) printf 'unexpected gc invocation: %s\\n' \"$*\" >&2; exit 1 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GC_BEAD_ID": "step-1",
+                    "GC_WORK_DIR": str(root),
+                    "FAKE_STEP_JSON": json.dumps(
+                        [{"metadata": {"gc.root_bead_id": "root-1"}}]
+                    ),
+                    "FAKE_ROOT_JSON": json.dumps([{"metadata": metadata}]),
+                    "FAKE_HISTORY_JSON": json.dumps(
+                        [{"Issue": {"metadata": metadata}}]
+                    ),
+                    "PATH": f"{bin_dir}:{environment['PATH']}",
+                }
+            )
+            passed_state = {
+                "schema": "gc.complete-delivery.report.v1",
+                "next_action": "Proceed to protected merge.",
+                "stages": {
+                    "external-review": {
+                        "status": "passed",
+                        "summary": "External review passed.",
+                        "evidence": ["artifacts/delivery/pr-gate.json"],
+                    }
+                },
+            }
+            state_path.write_text(json.dumps(passed_state), encoding="utf-8")
+            passed = subprocess.run(
+                ["bash", str(REPORT_GREEN_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+
+            passed_state["next_action"] = "Wait for a human decision."
+            state_path.write_text(json.dumps(passed_state), encoding="utf-8")
+            blocked = subprocess.run(
+                ["bash", str(REPORT_GREEN_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(blocked.returncode, 1)
+            self.assertIn("report next action does not require protected merge", blocked.stderr)
 
     def test_pr_open_validates_full_recorded_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2360,37 +2463,36 @@ class PreflightTests(unittest.TestCase):
         deadline_check = (
             "`.gc/scripts/checks/delivery-external-review-deadline.sh --validate`"
         )
-        passing_mutation = "stage `external-review` as `passed`"
-        pre_mutation = report_green.index("Immediately before the passing report mutation")
-        mutation = report_green.index(passing_mutation)
-        pre_publish = report_green.index("Immediately before running `report_publish_command`")
+        passing_mutation = "stage `external-review` as\n`passed`"
+        pre_mutation = report_green.index("Immediately before running\n`report_publish_command`")
         publish = report_green.index("`report_publish_command` with `DELIVERY_REPORT_DIR` only after")
-        self.assertLess(pre_mutation, report_green.index(deadline_check, pre_mutation))
-        self.assertLess(report_green.index(deadline_check, pre_mutation), mutation)
-        self.assertLess(mutation, pre_publish)
-        self.assertLess(pre_publish, report_green.index(deadline_check, pre_publish))
-        self.assertLess(report_green.index(deadline_check, pre_publish), publish)
-        self.assertEqual(report_green.count(deadline_check), 2)
-        second_validation = report_green.index(deadline_check, pre_publish)
-        rollback_instruction = report_green.index(
-            "explicitly remove/revert the already-written passing report state", second_validation
+        final_validation = report_green.index(
+            "Immediately after successful publication", publish
         )
-        non_pass_close = report_green.index("close with a non-pass outcome", rollback_instruction)
-        self.assertLess(second_validation, rollback_instruction)
-        self.assertLess(rollback_instruction, non_pass_close)
-        self.assertLess(rollback_instruction, publish)
-        for rollback_clause in (
-            "restore `external-review` to `active` or `blocked` with an expired-deadline\nblocker",
-            "clear the protected-merge next action",
-            "`tested_commit`, `local_gates`, `published_head`, and\n`published_head_matches_tested_commit` pass evidence",
-            "Do not publish",
-        ):
-            self.assertIn(rollback_clause, report_green)
+        mutation = report_green.index(passing_mutation)
+        self.assertLess(pre_mutation, report_green.index(deadline_check, pre_mutation))
+        self.assertLess(report_green.index(deadline_check, pre_mutation), publish)
+        self.assertLess(publish, final_validation)
+        self.assertLess(final_validation, report_green.index(deadline_check, final_validation))
+        self.assertLess(report_green.index(deadline_check, final_validation), mutation)
+        self.assertEqual(report_green.count(deadline_check), 2)
+        self.assertIn("no passing report state exists", report_green)
+        self.assertIn("Do not attempt a compensating revert", report_green)
         for failure_clause in (
             "invalidate the handoff's `tested_commit`, `local_gates`,\n`published_head`, and `published_head_matches_tested_commit` pass evidence",
             "write no passing report state, do not publish, and close with a non-pass\noutcome",
         ):
             self.assertIn(failure_clause, report_green)
+
+        with FORMULA_PATH.open("rb") as formula_file:
+            formula = tomllib.load(formula_file)
+        report_green_step = next(step for step in formula["steps"] if step["id"] == "report-green")
+        self.assertEqual(
+            report_green_step["check"]["check"]["path"],
+            ".gc/scripts/checks/delivery-report-green.sh",
+        )
+        self.assertEqual(report_green_step["check"]["check"]["timeout"], "1m")
+        self.assertTrue(REPORT_GREEN_SCRIPT.stat().st_mode & 0o111)
 
         readiness = (WORKFLOW_ROOT / "release-readiness.md").read_text(encoding="utf-8")
         for term in ("deploy_mode=command", "deploy_mode=not-applicable", "deploy_not_applicable_reason", "allow_no_smoke=true", "no_smoke_reason", "verify-production"):

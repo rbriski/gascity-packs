@@ -425,9 +425,9 @@ class PrGateContractTests(unittest.TestCase):
         self.assert_prose_contains(finalizer, "Top-level `complete-delivery/report-green.md`")
         self.assert_prose_contains(outer_report, "sole outer report authority")
         self.assert_prose_contains(outer_report, "report_publish_command")
-        self.assert_prose_contains(outer_report, "require it to succeed before retaining the passing state or closing pass")
-        self.assert_prose_contains(outer_report, "remove/revert the tentative passing state")
-        self.assert_prose_contains(outer_report, "clear the protected-merge next action")
+        self.assert_prose_contains(outer_report, "require it to succeed")
+        self.assert_prose_contains(outer_report, "leaves the report in its prior non-passing state")
+        self.assert_prose_contains(outer_report, "Do not attempt a compensating revert")
 
     def test_outer_formula_orders_external_review_before_report_green_and_merge(self) -> None:
         outer_formula_path = PACK_ROOT / "formulas" / "complete-delivery.formula.toml"
@@ -436,6 +436,11 @@ class PrGateContractTests(unittest.TestCase):
         steps = {step["id"]: step for step in outer_formula["steps"]}
 
         self.assertEqual(steps["report-green"]["needs"], ["external-review"])
+        self.assertEqual(
+            steps["report-green"]["check"]["check"]["path"],
+            ".gc/scripts/checks/delivery-report-green.sh",
+        )
+        self.assertEqual(steps["report-green"]["check"]["check"]["timeout"], "1m")
         self.assertEqual(steps["merge"]["needs"], ["report-green"])
 
     def test_terminal_publication_identity_and_deadline_guards_are_fail_closed(self) -> None:
@@ -1080,6 +1085,13 @@ class PrGateContractTests(unittest.TestCase):
             "exhausted deadline, attempt budget, or recovery budget is a non-pass outcome",
         ):
             self.assert_prose_contains(publish_fixes, requirement)
+        self.assert_prose_contains(
+            publish_fixes,
+            "after the final permitted resolution and before recording any pass outcome",
+        )
+        self.assert_prose_contains(publish_fixes, "write blocker-only expiry evidence")
+        self.assert_prose_contains(publish_fixes, "preserve the truth of any already-resolved threads")
+        self.assert_prose_contains(publish_fixes, "must not claim to reopen a thread")
         self.assert_prose_contains(merge, "Do not invoke `delivery-pr-open.sh` for this already-merged recovery")
         self.assert_prose_contains(merge, "only after that fresh reconciliation proves `merged=false` and `state=open`")
         self.assert_prose_contains(publish_fixes, "immediately persist all refreshed workflow-root identity fields before any thread resolution")
@@ -1099,6 +1111,11 @@ class PrGateContractTests(unittest.TestCase):
             PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate" / "{target}.rerun-local-gates.md"
         ).read_text(encoding="utf-8")
         self.assert_prose_contains(workflow, "Immediately after all local gates pass and before recording any success evidence")
+        self.assert_prose_contains(
+            workflow,
+            "Immediately after that final deadline validation and before atomically writing any passing authority",
+        )
+        self.assert_prose_contains(workflow, "repeat the clean-tree check")
         self.assert_prose_contains(workflow, "erase `tested_commit`, `local_gates`, `published_head`, and `published_head_matches_tested_commit`")
 
     def test_local_gates_execute_an_allowed_local_command(self) -> None:
