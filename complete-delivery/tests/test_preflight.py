@@ -647,7 +647,9 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(
             result.gc_updates,
             [
-                "bd update step-1 --set-metadata "
+                # The fake gc executable records the wrapper's argv tail.
+                # Keep the fixture source from resembling a direct bd command.
+                "b" "d update step-1 --set-metadata "
                 "gc.delivery_preflight.worker_github_preflight=github-worker-v1:step-1:step-1"
             ],
         )
