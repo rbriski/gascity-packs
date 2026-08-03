@@ -9,6 +9,7 @@ atomically installs the declared runtime assets inside the registered rig root.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
@@ -53,6 +54,7 @@ GASCITY_SCHEMAS = (
     "review.v1.yaml",
 )
 MANIFEST_NAME = "complete-delivery-assets.json"
+MANIFEST_VERSION = 2
 GC_CONFIG_TIMEOUT_SECONDS = 15
 MAX_DURATION_SECONDS = Decimal(3600)
 DURATION = re.compile(r"([0-9]+(?:\.[0-9]+)?|\.[0-9]+)([smhd]?)")
@@ -498,8 +500,162 @@ def materialization_plan(pack_root: Path, rig_root: Path) -> list[tuple[Path, Pa
     for name in GASCITY_SCRIPTS:
         add(gascity_root / "assets" / "scripts" / name, f".gc/scripts/{name}")
     for name in GASCITY_SCHEMAS:
-        add(gascity_root / "schemas" / "build" / name, f"schemas/build/{name}")
+        # Schemas are runtime assets, not source files owned by the target rig.
+        # Keep them under the rig's ignored .gc directory beside the installed
+        # validator so a delivery launch never writes to schemas/build.
+        add(gascity_root / "schemas" / "build" / name, f".gc/schemas/build/{name}")
     return plan
+
+
+def asset_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def manifest_relative_path(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        raise LaunchPreflightError("managed asset manifest has an invalid asset path")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or path.parts in ((), (".",)):
+        raise LaunchPreflightError("managed asset manifest has an unsafe asset path")
+    return value
+
+
+def load_prior_manifest(rig_root: Path) -> dict[str, Any] | None:
+    """Return the prior Complete Delivery inventory, or fail closed.
+
+    The manifest is the ownership boundary: an existing file is mutable only
+    when a previous launcher recorded it and its recorded bytes are intact.
+    """
+
+    manifest_path = rig_root / ".gc" / MANIFEST_NAME
+    require_contained_destination(rig_root, manifest_path, MANIFEST_NAME)
+    if not (manifest_path.exists() or manifest_path.is_symlink()):
+        return None
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise LaunchPreflightError("managed asset manifest is not a regular file")
+    if git_tracked(rig_root, manifest_path):
+        raise LaunchPreflightError("managed asset manifest is tracked by the target rig")
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LaunchPreflightError("managed asset manifest is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("owner") != "complete-delivery"
+        or payload.get("version") not in (1, MANIFEST_VERSION)
+        or not isinstance(payload.get("assets"), list)
+    ):
+        raise LaunchPreflightError("managed asset manifest is not a valid Complete Delivery inventory")
+    assets = [manifest_relative_path(value) for value in payload["assets"]]
+    if len(assets) != len(set(assets)):
+        raise LaunchPreflightError("managed asset manifest contains duplicate asset paths")
+    hashes = payload.get("asset_hashes", {})
+    hashes_are_valid = (
+        isinstance(hashes, dict)
+        and set(hashes) == set(assets)
+        and all(
+            isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+            for value in hashes.values()
+        )
+    )
+    if (payload["version"] == MANIFEST_VERSION and not hashes_are_valid) or (
+        payload["version"] == 1 and hashes and not hashes_are_valid
+    ):
+        raise LaunchPreflightError("managed asset manifest has invalid asset hashes")
+    return {"assets": set(assets), "asset_hashes": hashes}
+
+
+def git_tracked(rig_root: Path, destination: Path) -> bool:
+    relative = destination.relative_to(rig_root)
+    result = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", str(relative)],
+        cwd=rig_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise LaunchPreflightError(f"could not determine whether {relative} is tracked by the target rig")
+
+
+def ensure_regular_untracked_destination(rig_root: Path, destination: Path, label: str) -> None:
+    require_contained_destination(rig_root, destination, label)
+    relative = destination.relative_to(rig_root)
+    parent = rig_root
+    for component in relative.parts[:-1]:
+        parent /= component
+        if parent.exists() or parent.is_symlink():
+            if parent.is_symlink() or not parent.is_dir():
+                raise LaunchPreflightError(f"{label} has a non-directory ancestor")
+    if not (destination.exists() or destination.is_symlink()):
+        return
+    if destination.is_symlink() or not destination.is_file():
+        raise LaunchPreflightError(f"{label} is not a regular file")
+    if git_tracked(rig_root, destination):
+        raise LaunchPreflightError(f"{label} is tracked by the target rig")
+
+
+def source_for_prior_asset(
+    relative: str, planned_sources: dict[str, Path], gascity_root: Path
+) -> Path | None:
+    """Resolve legacy v1 root schemas only when their source is unambiguous."""
+
+    if relative in planned_sources:
+        return planned_sources[relative]
+    prefix = "schemas/build/"
+    if relative.startswith(prefix):
+        candidate = gascity_root / "schemas" / "build" / relative.removeprefix(prefix)
+        return candidate if candidate.is_file() else None
+    return None
+
+
+def preflight_materialization(
+    pack_root: Path, rig_root: Path, plan: list[tuple[Path, Path, str]]
+) -> tuple[dict[str, str], list[Path]]:
+    """Validate every write and cleanup before changing the target rig."""
+
+    prior = load_prior_manifest(rig_root)
+    prior_assets = prior["assets"] if prior else set()
+    prior_hashes = prior["asset_hashes"] if prior else {}
+    planned_sources = {relative: source for source, _, relative in plan}
+    gascity_root = inherited_gascity_root(pack_root)
+    desired_hashes = {relative: asset_digest(source) for source, _, relative in plan}
+
+    for source, destination, relative in plan:
+        ensure_regular_untracked_destination(rig_root, destination, relative)
+        if not destination.exists():
+            continue
+        if relative not in prior_assets:
+            raise LaunchPreflightError(f"{relative} already exists but is not owned by Complete Delivery")
+        expected = prior_hashes.get(relative, desired_hashes[relative])
+        if asset_digest(destination) != expected:
+            raise LaunchPreflightError(f"{relative} was modified after Complete Delivery installed it")
+
+    stale_paths: list[Path] = []
+    for relative in sorted(prior_assets - set(planned_sources)):
+        destination = rig_root / relative
+        ensure_regular_untracked_destination(rig_root, destination, relative)
+        if not destination.exists():
+            continue
+        expected = prior_hashes.get(relative)
+        if expected is None:
+            source = source_for_prior_asset(relative, planned_sources, gascity_root)
+            if source is None:
+                raise LaunchPreflightError(
+                    f"cannot safely clean stale managed asset {relative} without a recorded digest"
+                )
+            expected = asset_digest(source)
+        if asset_digest(destination) != expected:
+            raise LaunchPreflightError(f"stale managed asset {relative} was modified after installation")
+        stale_paths.append(destination)
+    return desired_hashes, stale_paths
 
 
 def atomic_copy(source: Path, destination: Path, rig_root: Path, label: str) -> None:
@@ -541,14 +697,18 @@ def materialize_assets(pack_root: Path, rig_root: Path) -> list[str]:
     plan = materialization_plan(pack_root, rig_root)
     manifest_path = rig_root / ".gc" / MANIFEST_NAME
     require_contained_destination(rig_root, manifest_path, MANIFEST_NAME)
+    desired_hashes, stale_paths = preflight_materialization(pack_root, rig_root, plan)
     installed = [relative for _, _, relative in plan]
     for source, destination, relative in plan:
         atomic_copy(source, destination, rig_root, relative)
+    for stale_path in stale_paths:
+        stale_path.unlink()
     manifest = {
+        "asset_hashes": desired_hashes,
         "assets": installed,
         "inherited_from": "gascity",
         "owner": "complete-delivery",
-        "version": 1,
+        "version": MANIFEST_VERSION,
     }
     atomic_write_text(
         manifest_path,

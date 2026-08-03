@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -96,6 +97,43 @@ class PackContractTests(unittest.TestCase):
                         [shell, "-n", str(script)], capture_output=True, text=True
                     )
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_installed_validator_uses_schemas_beside_the_managed_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            validator = root / ".gc/scripts/validate_build_artifact.py"
+            schema = root / ".gc/schemas/build/requirements.v1.yaml"
+            artifact = root / "requirements.md"
+            validator.parent.mkdir(parents=True)
+            schema.parent.mkdir(parents=True)
+            shutil.copy2(REPO_ROOT / "gascity/assets/scripts/validate_build_artifact.py", validator)
+            shutil.copy2(REPO_ROOT / "gascity/schemas/build/requirements.v1.yaml", schema)
+            artifact.write_text(
+                "---\n"
+                "schema: gc.build.requirements.v1\n"
+                "workflow:\n  id: workflow-1\n  formula: complete-delivery\n"
+                "methodology:\n  pack: complete-delivery\n  name: complete-delivery\n"
+                "producer:\n  formula: complete-delivery\n  stage: requirements\n  attempt: 1\n"
+                "status: approved\n"
+                "trace:\n  upstream: []\n  coverage: []\n"
+                "---\n\n"
+                + "\n\n".join(
+                    f"## {section}\n\ncontent"
+                    for section in (
+                        "Problem Statement", "W6H", "User Stories", "Technical Stories",
+                        "Behavior Requirements", "Example Mapping", "Acceptance Criteria",
+                        "Out Of Scope", "Open Questions",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["python3", str(validator), "--schema", "gc.build.requirements.v1", "--path", str(artifact)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_docs_define_terminal_not_pr_only_contract(self) -> None:
         readme = (PACK_ROOT / "README.md").read_text(encoding="utf-8")
@@ -376,15 +414,16 @@ class CommandContractTests(unittest.TestCase):
                 "delivery_preflight": (rig / ".gc/scripts/checks/delivery-preflight.sh").is_file(),
                 "build_artifact": (rig / ".gc/scripts/checks/build-artifact-valid.sh").is_file(),
                 "validator": (rig / ".gc/scripts/validate_build_artifact.py").is_file(),
-                "schema": (rig / "schemas/build/requirements.v1.yaml").is_file(),
+                "schema": (rig / ".gc/schemas/build/requirements.v1.yaml").is_file(),
             }
             result.materialized_paths = sorted(
                 str(path.relative_to(rig))
-                for root in (rig / ".gc", rig / "schemas" / "build")
+                for root in (rig / ".gc",)
                 if root.exists()
                 for path in root.rglob("*")
                 if path.is_file()
             )
+            result.legacy_schema_exists = (rig / "schemas/build/requirements.v1.yaml").exists()
             manifest = rig / ".gc" / "complete-delivery-assets.json"
             try:
                 result.manifest = (
@@ -421,6 +460,12 @@ class CommandContractTests(unittest.TestCase):
         })
         self.assertEqual(result.materialized_paths, [
             ".gc/complete-delivery-assets.json",
+            ".gc/schemas/build/decomposition.v1.yaml",
+            ".gc/schemas/build/final-report.v1.yaml",
+            ".gc/schemas/build/implementation-summary.v1.yaml",
+            ".gc/schemas/build/plan.v1.yaml",
+            ".gc/schemas/build/requirements.v1.yaml",
+            ".gc/schemas/build/review.v1.yaml",
             ".gc/scripts/checks/build-artifact-valid.sh",
             ".gc/scripts/checks/delivery-common.sh",
             ".gc/scripts/checks/delivery-external-review-deadline.sh",
@@ -436,17 +481,13 @@ class CommandContractTests(unittest.TestCase):
             ".gc/scripts/delivery_gate.py",
             ".gc/scripts/delivery_report.py",
             ".gc/scripts/validate_build_artifact.py",
-            "schemas/build/decomposition.v1.yaml",
-            "schemas/build/final-report.v1.yaml",
-            "schemas/build/implementation-summary.v1.yaml",
-            "schemas/build/plan.v1.yaml",
-            "schemas/build/requirements.v1.yaml",
-            "schemas/build/review.v1.yaml",
         ])
         self.assertEqual(
             sorted(result.manifest["assets"]),
             [path for path in result.materialized_paths if path != ".gc/complete-delivery-assets.json"],
         )
+        self.assertEqual(result.manifest["version"], 2)
+        self.assertEqual(set(result.manifest["asset_hashes"]), set(result.manifest["assets"]))
         self.assertEqual(
             result.gh_calls,
             [
@@ -455,6 +496,93 @@ class CommandContractTests(unittest.TestCase):
                 "api repos/example/repo/branches/main/protection --silent",
             ],
         )
+
+    def test_launch_refuses_a_foreign_managed_schema_destination(self) -> None:
+        def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
+            destination = rig / ".gc/schemas/build/requirements.v1.yaml"
+            destination.parent.mkdir(parents=True)
+            destination.write_text("foreign schema\n", encoding="utf-8")
+
+        result = self.run_command("fi-123", "--rig=finance", setup=setup)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(result.slinged)
+        self.assertIn("not owned by Complete Delivery", result.stderr)
+
+    def test_launch_refuses_a_tracked_managed_destination_even_when_manifest_owned(self) -> None:
+        def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
+            destination = rig / ".gc/schemas/build/requirements.v1.yaml"
+            destination.parent.mkdir(parents=True)
+            shutil.copy2(REPO_ROOT / "gascity/schemas/build/requirements.v1.yaml", destination)
+            manifest = rig / ".gc/complete-delivery-assets.json"
+            manifest.write_text(
+                json.dumps({
+                    "assets": [".gc/schemas/build/requirements.v1.yaml"],
+                    "inherited_from": "gascity",
+                    "owner": "complete-delivery",
+                    "version": 1,
+                }),
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", ".gc/schemas/build/requirements.v1.yaml"],
+                cwd=rig,
+                check=True,
+            )
+
+        result = self.run_command("fi-123", "--rig=finance", setup=setup)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(result.slinged)
+        self.assertIn("is tracked by the target rig", result.stderr)
+
+    def test_safe_upgrade_migrates_only_manifest_owned_matching_legacy_schema(self) -> None:
+        def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
+            legacy = rig / "schemas/build/requirements.v1.yaml"
+            legacy.parent.mkdir(parents=True)
+            shutil.copy2(REPO_ROOT / "gascity/schemas/build/requirements.v1.yaml", legacy)
+            manifest = rig / ".gc/complete-delivery-assets.json"
+            manifest.parent.mkdir()
+            manifest.write_text(
+                json.dumps({
+                    "assets": ["schemas/build/requirements.v1.yaml"],
+                    "inherited_from": "gascity",
+                    "owner": "complete-delivery",
+                    "version": 1,
+                }),
+                encoding="utf-8",
+            )
+
+        result = self.run_command("fi-123", "--rig=finance", setup=setup)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(result.legacy_schema_exists)
+        self.assertTrue(result.materialized["schema"])
+        self.assertEqual(result.manifest["version"], 2)
+
+    def test_safe_upgrade_refuses_a_modified_legacy_schema(self) -> None:
+        def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
+            legacy = rig / "schemas/build/requirements.v1.yaml"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text("modified schema\n", encoding="utf-8")
+            manifest = rig / ".gc/complete-delivery-assets.json"
+            manifest.parent.mkdir()
+            manifest.write_text(
+                json.dumps({
+                    "assets": ["schemas/build/requirements.v1.yaml"],
+                    "inherited_from": "gascity",
+                    "owner": "complete-delivery",
+                    "version": 1,
+                }),
+                encoding="utf-8",
+            )
+
+        result = self.run_command("fi-123", "--rig=finance", setup=setup)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(result.slinged)
+        self.assertTrue(result.legacy_schema_exists)
+        self.assertIn("was modified after installation", result.stderr)
 
     def test_interactive_is_one_flag(self) -> None:
         result = self.run_command("fi-123", "--rig=finance", "--interactive")

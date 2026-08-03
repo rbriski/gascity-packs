@@ -16,7 +16,14 @@ except ImportError:  # pragma: no cover
 
 
 FRONT_MATTER_RE = re.compile(r"\A---\n(?P<front>.*?)\n---(?:\n|\Z)(?P<body>.*)\Z", re.DOTALL)
-SCHEMA_ROOT = Path(__file__).resolve().parents[2] / "schemas" / "build"
+def schema_roots() -> tuple[Path, ...]:
+    """Prefer schemas installed beside the runtime validator, then source-tree schemas."""
+
+    script = Path(__file__).resolve()
+    return (
+        script.parents[1] / "schemas" / "build",
+        script.parents[2] / "schemas" / "build",
+    )
 FORBIDDEN_REQUIRED_FIELD_NAMES = {"owner", "stage-owner", "stage_owner", "persona", "role"}
 
 
@@ -76,11 +83,12 @@ def parse_front_matter(text: str) -> tuple[str, dict[str, Any], str]:
 def load_schema(schema_id: str) -> dict[str, Any]:
     if yaml is None:
         raise ValidationError("PyYAML is required to parse build schemas")
-    for path in sorted(SCHEMA_ROOT.glob("*.yaml")):
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        if isinstance(raw, dict) and raw.get("schema_id") == schema_id:
-            validate_schema_definition(raw)
-            return raw
+    for root in schema_roots():
+        for path in sorted(root.glob("*.yaml")):
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            if isinstance(raw, dict) and raw.get("schema_id") == schema_id:
+                validate_schema_definition(raw)
+                return raw
     raise ValidationError(f"unknown build artifact schema {schema_id!r}")
 
 
