@@ -10,6 +10,7 @@ Launch inputs:
 - requirements_path: {{requirements_path}}
 - plan_path: {{plan_path}}
 - decomposition_path: {{decomposition_path}}
+- final_report_path: {{final_report_path}}
 - drain_policy: {{drain_policy}}
 - interaction_mode: {{interaction_mode}}
 - review_mode: {{review_mode}}
@@ -51,6 +52,13 @@ concrete build formulas may instead override stage steps while preserving the
 same artifact names and close semantics.
 
 Persist the normalized values on the workflow root bead using `gc.var.<name>` for each launch input and `gc.build.<artifact>_path` for resolved artifact paths. If an optional path input is blank, derive it under the resolved artifact root and record the derived absolute path.
+
+When `requirements_path`, `plan_path`, `decomposition_path`, or
+`final_report_path` is nonblank, normalize that supplied value and persist the
+same exact resolved authority in both its `gc.var.<name>` and matching
+`gc.build.<artifact>_path` key. Never replace a nonblank launch path with a
+default filename. This equality is part of the handoff contract for downstream
+workers and validators.
 
 Build artifacts are Markdown files with YAML front matter, not JSON. When a
 path input is blank, derive these canonical filenames under the artifact root:

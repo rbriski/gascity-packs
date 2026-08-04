@@ -11,6 +11,7 @@ Launch inputs:
 - requirements_path: {{requirements_path}}
 - plan_path: {{plan_path}}
 - decomposition_path: {{decomposition_path}}
+- final_report_path: {{final_report_path}}
 - drain_policy: {{drain_policy}}
 - interaction_mode: {{interaction_mode}}
 - review_mode: {{review_mode}}
@@ -56,6 +57,10 @@ default = ""
 
 [vars.decomposition_path]
 description = "Task decomposition artifact path to create or reuse."
+default = ""
+
+[vars.final_report_path]
+description = "Final build report artifact path to create or reuse."
 default = ""
 
 [vars.drain_policy]

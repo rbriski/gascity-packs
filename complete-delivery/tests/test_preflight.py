@@ -3498,7 +3498,8 @@ class PreflightTests(unittest.TestCase):
                 self.assertIn(
                     f"delivery-source-artifact-valid.sh --context {stage}", prompt
                 )
-                self.assertIn("gc.attempt_log", prompt)
+                self.assertIn("attempt_log", prompt)
+                self.assertIn("prior_failure_reason", prompt)
 
         plan = (WORKFLOW_ROOT / "plan.md").read_text(encoding="utf-8")
         self.assertIn("Write the plan to `{{plan_path}}`", plan)
@@ -3741,6 +3742,7 @@ class SourceArtifactTests(unittest.TestCase):
         command_args: tuple[str, ...] = (),
         step_metadata: dict[str, str] | None = None,
         control_json: object | None = None,
+        root_metadata_updates: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -3908,6 +3910,7 @@ class SourceArtifactTests(unittest.TestCase):
                     root_metadata[f"gc.build.{upstream_kind}_path"] = (
                         upstream_path_value
                     )
+            root_metadata.update(root_metadata_updates or {})
             workflow_root = [{"id": "root-1", "metadata": root_metadata}]
             source = (
                 source_json
@@ -3960,28 +3963,132 @@ class SourceArtifactTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
 
+    @staticmethod
+    def source_artifact_context_root_metadata() -> dict[str, str]:
+        return {
+            "gc.build.requirements_path": "artifacts/delivery/requirements.md",
+            "gc.build.plan_path": "artifacts/delivery/implementation-plan.md",
+            "gc.build.decomposition_path": "artifacts/delivery/decomposition.md",
+            "gc.build.final_report_path": "artifacts/delivery/final-report.md",
+        }
+
     def test_source_artifact_context_binds_every_delivery_path_before_work(self) -> None:
+        cases = (
+            ("requirements", "requirements", [], "requirements_path"),
+            ("plan", "plan", ["requirements_path"], "plan_path"),
+            (
+                "decompose",
+                "decomposition",
+                ["requirements_path", "plan_path"],
+                "decomposition_path",
+            ),
+            (
+                "finalize",
+                "final-report",
+                ["requirements_path", "plan_path", "decomposition_path"],
+                "final_report_path",
+            ),
+        )
+        for stage, artifact_kind, input_keys, output_key in cases:
+            with self.subTest(stage=stage):
+                result = self.run_check(
+                    self.artifact(artifact_kind=artifact_kind),
+                    artifact_kind=artifact_kind,
+                    command_args=("--context", stage),
+                    step_metadata={
+                        "gc.attempt": "1",
+                        "gc.step_id": stage,
+                        "gc.step_ref": f"complete-delivery.{stage}.iteration.1",
+                    },
+                    root_metadata_updates=self.source_artifact_context_root_metadata(),
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                manifest = json.loads(result.stdout)
+                self.assertEqual(manifest["attempt"], 1)
+                self.assertEqual(manifest["logical_control_id"], "")
+                self.assertEqual(manifest["attempt_log"], [])
+                self.assertEqual(manifest["attempt_log_raw"], "")
+                self.assertEqual(manifest["prior_failure_reason"], "")
+                self.assertEqual(
+                    manifest["permitted_input_paths"],
+                    [manifest["canonical_paths"][key] for key in input_keys],
+                )
+                self.assertEqual(
+                    manifest["permitted_output_paths"],
+                    [manifest["canonical_paths"][output_key]],
+                )
+                self.assertTrue(
+                    all(
+                        "/artifacts/delivery/" in path
+                        for path in manifest["canonical_paths"].values()
+                    )
+                )
+
+    def test_source_artifact_context_recovers_exact_retry_failure_from_control(self) -> None:
+        retry_metadata = {
+            "gc.attempt": "2",
+            "gc.control_for": "control-1",
+            "gc.step_id": "plan",
+            "gc.step_ref": "plan.iteration.2",
+            "gc.run_target": "gstack.founder-reviewer",
+            "gc.idempotency_key": "control-1:attempt:2",
+        }
+        failure_reason = (
+            "complete-delivery-check: source-bound artifact path must resolve "
+            "within the canonical artifact delivery directory without symlinks\n"
+        )
+        attempt_log = [
+            {
+                "action": "fail",
+                "attempt": "1",
+                "outcome": "fail",
+                "reason": failure_reason,
+            }
+        ]
+        control = [{
+            "id": "control-1",
+            "title": "source artifact",
+            "description": "Write the source-grounded delivery plan.",
+            "metadata": {
+                "gc.root_bead_id": "root-1",
+                "gc.step_id": "plan",
+                "gc.step_ref": "plan",
+                "gc.run_target": "gstack.founder-reviewer",
+                "gc.attempt_log": json.dumps(attempt_log, separators=(",", ":")),
+            },
+        }]
         result = self.run_check(
-            self.artifact(), command_args=("--context", "plan")
+            self.artifact(artifact_kind="plan"),
+            artifact_kind="plan",
+            command_args=("--context", "plan"),
+            step_metadata=retry_metadata,
+            control_json=control,
+            root_metadata_updates=self.source_artifact_context_root_metadata(),
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         manifest = json.loads(result.stdout)
-        self.assertEqual(manifest["attempt"], 1)
-        self.assertEqual(manifest["logical_control_id"], "")
-        self.assertEqual(manifest["attempt_log"], "")
+        self.assertEqual(manifest["attempt"], 2)
+        self.assertEqual(manifest["logical_control_id"], "control-1")
+        self.assertEqual(manifest["attempt_log"], attempt_log)
+        self.assertEqual(manifest["prior_failure_reason"], failure_reason)
         self.assertEqual(
-            manifest["permitted_input_paths"],
-            [str(pathlib.Path(manifest["canonical_paths"]["requirements_path"]))],
-        )
-        self.assertEqual(
-            manifest["permitted_output_paths"],
-            [str(pathlib.Path(manifest["canonical_paths"]["plan_path"]))],
-        )
-        self.assertTrue(
-            all("/artifacts/delivery/" in path for path in manifest["canonical_paths"].values())
+            json.loads(manifest["attempt_log_raw"]),
+            attempt_log,
         )
 
-    def test_source_artifact_context_recovers_exact_retry_failure_from_control(self) -> None:
+        control[0]["metadata"].pop("gc.attempt_log")
+        missing_log = self.run_check(
+            self.artifact(artifact_kind="plan"),
+            artifact_kind="plan",
+            command_args=("--context", "plan"),
+            step_metadata=retry_metadata,
+            control_json=control,
+            root_metadata_updates=self.source_artifact_context_root_metadata(),
+        )
+        self.assertNotEqual(missing_log.returncode, 0)
+        self.assertIn("has no gc.attempt_log", missing_log.stderr)
+
+    def test_source_artifact_context_rejects_malformed_retry_history_and_authority_drift(self) -> None:
         retry_metadata = {
             "gc.attempt": "2",
             "gc.control_for": "control-1",
@@ -3999,30 +4106,57 @@ class SourceArtifactTests(unittest.TestCase):
                 "gc.step_id": "plan",
                 "gc.step_ref": "plan",
                 "gc.run_target": "gstack.founder-reviewer",
-                "gc.attempt_log": "source-bound artifact path is missing",
+                "gc.attempt_log": "not-json-at-all",
             },
         }]
-        result = self.run_check(
-            self.artifact(),
+        malformed = self.run_check(
+            self.artifact(artifact_kind="plan"),
+            artifact_kind="plan",
             command_args=("--context", "plan"),
             step_metadata=retry_metadata,
             control_json=control,
+            root_metadata_updates=self.source_artifact_context_root_metadata(),
         )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        manifest = json.loads(result.stdout)
-        self.assertEqual(manifest["attempt"], 2)
-        self.assertEqual(manifest["logical_control_id"], "control-1")
-        self.assertEqual(manifest["attempt_log"], "source-bound artifact path is missing")
+        self.assertNotEqual(malformed.returncode, 0)
+        self.assertIn("gc.attempt_log is not valid JSON", malformed.stderr)
 
-        control[0]["metadata"].pop("gc.attempt_log")
-        missing_log = self.run_check(
-            self.artifact(),
+        control[0]["metadata"]["gc.attempt_log"] = json.dumps([
+            {
+                "action": "close",
+                "attempt": "1",
+                "outcome": "pass",
+            }
+        ])
+        non_failure = self.run_check(
+            self.artifact(artifact_kind="plan"),
+            artifact_kind="plan",
             command_args=("--context", "plan"),
             step_metadata=retry_metadata,
             control_json=control,
+            root_metadata_updates=self.source_artifact_context_root_metadata(),
         )
-        self.assertNotEqual(missing_log.returncode, 0)
-        self.assertIn("has no gc.attempt_log", missing_log.stderr)
+        self.assertNotEqual(non_failure.returncode, 0)
+        self.assertIn("non-failure retry predecessor", non_failure.stderr)
+
+        wrong_stage = self.run_check(
+            self.artifact(),
+            command_args=("--context", "plan"),
+            step_metadata={"gc.attempt": "1", "gc.step_id": "requirements"},
+            root_metadata_updates=self.source_artifact_context_root_metadata(),
+        )
+        self.assertNotEqual(wrong_stage.returncode, 0)
+        self.assertIn("does not match claimed step requirements", wrong_stage.stderr)
+
+        drifted_paths = self.source_artifact_context_root_metadata()
+        drifted_paths["gc.build.final_report_path"] = "artifacts/factory-run.md"
+        drifted = self.run_check(
+            self.artifact(),
+            command_args=("--context", "requirements"),
+            step_metadata={"gc.attempt": "1", "gc.step_id": "requirements"},
+            root_metadata_updates=drifted_paths,
+        )
+        self.assertNotEqual(drifted.returncode, 0)
+        self.assertIn("gc.build.final_report_path must equal", drifted.stderr)
 
     def test_source_artifact_normalizes_durable_title_like_preflight(self) -> None:
         result = self.run_check(

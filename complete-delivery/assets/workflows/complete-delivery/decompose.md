@@ -4,9 +4,10 @@ source-grounded plan.
 Before reading source intent or writing, run
 `.gc/scripts/checks/delivery-source-artifact-valid.sh --context decompose`.
 It prints the exact canonical input/output paths and, on a Ralph retry, the
-validated logical control and its exact `gc.attempt_log` failure reason. Use
-only those paths and repair in place. A missing or mismatched control, attempt
-log, artifact root, or path authority is a fail-closed blocker.
+validated logical control, structured `attempt_log`, and exact
+`prior_failure_reason`. Use only those paths and repair that exact failure in
+place. A missing or mismatched control, attempt log, artifact root, stage, or
+path authority is a fail-closed blocker.
 
 Read `gc.var.source_bead_id`, its durable intent, and the approved plan before
 creating any implementation work. Each implementation bead must state how it

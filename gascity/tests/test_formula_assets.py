@@ -1530,6 +1530,7 @@ class FormulaAssetTests(unittest.TestCase):
         self.assertEqual([step["id"] for step in data["steps"]], BUILD_BASE_STEPS)
         self.assertNotIn("compound", BUILD_BASE_STEPS)
         self.assertEqual(data["vars"]["implementation_target"]["default"], "gc.implementation-worker")
+        self.assertEqual(data["vars"]["final_report_path"]["default"], "")
         for var_name, default in METHODOLOGY_FORMULA_VARS.items():
             self.assertEqual(data["vars"][var_name]["default"], default)
 
@@ -1570,6 +1571,7 @@ class FormulaAssetTests(unittest.TestCase):
             "requirements_path: {{requirements_path}}",
             "plan_path: {{plan_path}}",
             "decomposition_path: {{decomposition_path}}",
+            "final_report_path: {{final_report_path}}",
             "drain_policy: {{drain_policy}}",
             "interaction_mode: {{interaction_mode}}",
             "review_mode: {{review_mode}}",
@@ -1588,6 +1590,7 @@ class FormulaAssetTests(unittest.TestCase):
             "--set-metadata 'key=value'",
             "Do not write",
             'values like `"false"` or `"10"`',
+            "Never replace a nonblank launch path",
         ):
             with self.subTest(step="prepare", fragment=fragment):
                 self.assertIn(fragment, prepare_description)

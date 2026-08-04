@@ -109,6 +109,18 @@ if [ "${1:-}" = "--context" ]; then
     requirements|plan|decompose|finalize) ;;
     *) delivery_fail "--context requires requirements, plan, decompose, or finalize" ;;
   esac
+  STEP_ID="$(delivery_metadata_value "$DELIVERY_STEP_JSON" gc.step_id)"
+  [ "$STEP_ID" = "$STAGE" ] || \
+    delivery_fail "--context $STAGE does not match claimed step ${STEP_ID:-<missing>}"
+  STEP_SCHEMA="$(delivery_metadata_value "$DELIVERY_STEP_JSON" gc.build.artifact_schema)"
+  case "$STAGE" in
+    requirements) EXPECTED_SCHEMA="gc.build.requirements.v1" ;;
+    plan) EXPECTED_SCHEMA="gc.build.plan.v1" ;;
+    decompose) EXPECTED_SCHEMA="gc.build.decomposition.v1" ;;
+    finalize) EXPECTED_SCHEMA="gc.build.final-report.v1" ;;
+  esac
+  [ "$STEP_SCHEMA" = "$EXPECTED_SCHEMA" ] || \
+    delivery_fail "--context $STAGE does not match claimed schema ${STEP_SCHEMA:-<missing>}"
 
   ARTIFACT_ROOT="$(delivery_var artifact_root '')"
   [ -n "$ARTIFACT_ROOT" ] || delivery_fail "gc.var.artifact_root is missing"
@@ -125,6 +137,18 @@ if [ "${1:-}" = "--context" ]; then
     "decomposition_path:$DECOMPOSITION_PATH" \
     "final_report_path:$FINAL_REPORT_PATH"; do
     case "$binding" in *:) delivery_fail "gc.var.${binding%%:*} is missing" ;; esac
+  done
+
+  BUILD_REQUIREMENTS_PATH="$(delivery_root_metadata gc.build.requirements_path)"
+  BUILD_PLAN_PATH="$(delivery_root_metadata gc.build.plan_path)"
+  BUILD_DECOMPOSITION_PATH="$(delivery_root_metadata gc.build.decomposition_path)"
+  BUILD_FINAL_REPORT_PATH="$(delivery_root_metadata gc.build.final_report_path)"
+  for binding in \
+    "requirements_path:$BUILD_REQUIREMENTS_PATH" \
+    "plan_path:$BUILD_PLAN_PATH" \
+    "decomposition_path:$BUILD_DECOMPOSITION_PATH" \
+    "final_report_path:$BUILD_FINAL_REPORT_PATH"; do
+    case "$binding" in *:) delivery_fail "gc.build.${binding%%:*} is missing" ;; esac
   done
 
   ATTEMPT="$(delivery_metadata_value "$DELIVERY_STEP_JSON" gc.attempt)"
@@ -150,6 +174,7 @@ if [ "${1:-}" = "--context" ]; then
   fi
 
   DELIVERY_CONTEXT_STAGE="$STAGE" \
+  DELIVERY_CONTEXT_STEP_ID="$STEP_ID" \
   DELIVERY_CONTEXT_WORK_DIR="$DELIVERY_WORK_DIR" \
   DELIVERY_CONTEXT_ARTIFACT_ROOT="$ARTIFACT_ROOT" \
   DELIVERY_CONTEXT_SOURCE_ID="$SOURCE_ID" \
@@ -160,12 +185,22 @@ if [ "${1:-}" = "--context" ]; then
   DELIVERY_CONTEXT_PLAN_PATH="$PLAN_PATH" \
   DELIVERY_CONTEXT_DECOMPOSITION_PATH="$DECOMPOSITION_PATH" \
   DELIVERY_CONTEXT_FINAL_REPORT_PATH="$FINAL_REPORT_PATH" \
+  DELIVERY_CONTEXT_BUILD_REQUIREMENTS_PATH="$BUILD_REQUIREMENTS_PATH" \
+  DELIVERY_CONTEXT_BUILD_PLAN_PATH="$BUILD_PLAN_PATH" \
+  DELIVERY_CONTEXT_BUILD_DECOMPOSITION_PATH="$BUILD_DECOMPOSITION_PATH" \
+  DELIVERY_CONTEXT_BUILD_FINAL_REPORT_PATH="$BUILD_FINAL_REPORT_PATH" \
   python3 - <<'PY'
 import json
 import os
+import re
 from pathlib import Path
 
 stage = os.environ["DELIVERY_CONTEXT_STAGE"]
+step_id = os.environ["DELIVERY_CONTEXT_STEP_ID"]
+if stage != step_id:
+    raise SystemExit(
+        f"complete-delivery-check: context stage {stage!r} does not match claimed step {step_id!r}"
+    )
 work = Path(os.environ["DELIVERY_CONTEXT_WORK_DIR"]).resolve(strict=True)
 artifact_raw = Path(os.environ["DELIVERY_CONTEXT_ARTIFACT_ROOT"])
 if not os.environ["DELIVERY_CONTEXT_ARTIFACT_ROOT"] or ".." in artifact_raw.parts:
@@ -186,24 +221,87 @@ names = {
 }
 paths = {}
 for key, filename in names.items():
-    value = os.environ[f"DELIVERY_CONTEXT_{key.upper()}"]
-    raw = Path(value)
-    if not value or ".." in raw.parts:
-        raise SystemExit(f"complete-delivery-check: gc.var.{key} is not a safe path")
-    candidate = raw if raw.is_absolute() else work / raw
-    try:
-        relative = candidate.relative_to(work)
-    except ValueError:
-        raise SystemExit(f"complete-delivery-check: gc.var.{key} must resolve beneath the delivery work directory")
     expected = artifact_relative / "delivery" / filename
-    if relative != expected:
-        raise SystemExit(f"complete-delivery-check: gc.var.{key} must equal {expected}")
-    current = work
-    for part in relative.parts:
-        current /= part
-        if current.is_symlink():
-            raise SystemExit(f"complete-delivery-check: gc.var.{key} has a symlink authority escape")
-    paths[key] = str((work / relative).resolve(strict=False))
+    resolved_authorities = []
+    for namespace, value in (
+        ("gc.var", os.environ[f"DELIVERY_CONTEXT_{key.upper()}"]),
+        ("gc.build", os.environ[f"DELIVERY_CONTEXT_BUILD_{key.upper()}"]),
+    ):
+        raw = Path(value)
+        if not value or ".." in raw.parts:
+            raise SystemExit(f"complete-delivery-check: {namespace}.{key} is not a safe path")
+        candidate = raw if raw.is_absolute() else work / raw
+        try:
+            relative = candidate.relative_to(work)
+        except ValueError:
+            raise SystemExit(
+                f"complete-delivery-check: {namespace}.{key} must resolve beneath the delivery work directory"
+            )
+        if relative != expected:
+            raise SystemExit(
+                f"complete-delivery-check: {namespace}.{key} must equal {expected}"
+            )
+        current = work
+        for part in relative.parts:
+            current /= part
+            if current.is_symlink():
+                raise SystemExit(
+                    f"complete-delivery-check: {namespace}.{key} has a symlink authority escape"
+                )
+        resolved_authorities.append(str((work / relative).resolve(strict=False)))
+    if resolved_authorities[0] != resolved_authorities[1]:
+        raise SystemExit(
+            f"complete-delivery-check: gc.var.{key} and gc.build.{key} do not share one authority"
+        )
+    paths[key] = resolved_authorities[0]
+
+attempt = int(os.environ["DELIVERY_CONTEXT_ATTEMPT"])
+control_id = os.environ["DELIVERY_CONTEXT_CONTROL_ID"]
+attempt_log_raw = os.environ["DELIVERY_CONTEXT_ATTEMPT_LOG"]
+attempt_log = []
+prior_failure_reason = ""
+if attempt == 1:
+    if control_id or attempt_log_raw:
+        raise SystemExit(
+            "complete-delivery-check: first attempt must not carry retry control history"
+        )
+else:
+    try:
+        attempt_log = json.loads(attempt_log_raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"complete-delivery-check: logical control gc.attempt_log is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(attempt_log, list) or len(attempt_log) != attempt - 1:
+        raise SystemExit(
+            "complete-delivery-check: logical control gc.attempt_log does not contain exactly the prior attempts"
+        )
+    for expected_attempt, entry in enumerate(attempt_log, start=1):
+        if not isinstance(entry, dict):
+            raise SystemExit(
+                "complete-delivery-check: logical control gc.attempt_log entries must be objects"
+            )
+        entry_attempt = entry.get("attempt")
+        if type(entry_attempt) is int:
+            entry_attempt = str(entry_attempt) if entry_attempt > 0 else ""
+        if not isinstance(entry_attempt, str) or not re.fullmatch(r"[1-9][0-9]*", entry_attempt):
+            raise SystemExit(
+                "complete-delivery-check: logical control gc.attempt_log has a noncanonical attempt"
+            )
+        if int(entry_attempt) != expected_attempt:
+            raise SystemExit(
+                "complete-delivery-check: logical control gc.attempt_log is stale, duplicated, or out of order"
+            )
+        if entry.get("action") != "fail" or entry.get("outcome") != "fail":
+            raise SystemExit(
+                "complete-delivery-check: logical control gc.attempt_log contains a non-failure retry predecessor"
+            )
+        reason = entry.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise SystemExit(
+                "complete-delivery-check: logical control gc.attempt_log failure reason is missing"
+            )
+    prior_failure_reason = attempt_log[-1]["reason"]
 
 inputs = {
     "requirements": [],
@@ -215,9 +313,11 @@ output_key = {"requirements": "requirements_path", "plan": "plan_path", "decompo
 print(json.dumps({
     "stage": stage,
     "source_bead_id": os.environ["DELIVERY_CONTEXT_SOURCE_ID"],
-    "attempt": int(os.environ["DELIVERY_CONTEXT_ATTEMPT"]),
-    "logical_control_id": os.environ["DELIVERY_CONTEXT_CONTROL_ID"],
-    "attempt_log": os.environ["DELIVERY_CONTEXT_ATTEMPT_LOG"],
+    "attempt": attempt,
+    "logical_control_id": control_id,
+    "attempt_log": attempt_log,
+    "attempt_log_raw": attempt_log_raw,
+    "prior_failure_reason": prior_failure_reason,
     "canonical_paths": paths,
     "permitted_input_paths": inputs,
     "permitted_output_paths": [paths[output_key]],
