@@ -1,5 +1,11 @@
 # Complete Delivery Gas City Pack
 
+> **ARCHIVED / DEPRECATED — NOT A PRODUCTION DEFAULT.** The production-shaped
+> canary failed in the control plane and the city import was removed on August
+> 4, 2026. Releases and source remain for audit and regression evidence. Use the
+> `gstack-lite` skill and direct repository-native delivery path for current
+> work. Do not reinstall this pack for a generic “finish” or “deploy” request.
+
 Complete Delivery turns “complete this work” into one observable operation:
 
 ```sh

@@ -1,5 +1,11 @@
 # gstack Gas City Pack
 
+> **Recommended city posture: Gstack Lite.** Import this pack for its focused
+> skills, then use them selectively around a small direct implementation path:
+> deterministic checks, one independent `review`, conditional `qa`/`cso`, and
+> repository-native shipping. The `gstack-build` graph remains available for
+> explicit, high-complexity work; it is not the default delivery path.
+
 This pack adapts the [garrytan/gstack](https://github.com/garrytan/gstack)
 methodology — a founder-style sprint that runs YC-office-hours intake,
 multi-perspective plan review, staff code review, QA, security review, and
@@ -15,7 +21,7 @@ subagents. In this pack those roles are providerless Gas City agents, and their
 multi-agent handoffs are Gas City fanouts: persistent, observable, and
 retryable through the workflow graph.
 
-## When to choose gstack
+## When to choose the full gstack graph
 
 - You want the strictest pre-ship gating of the methodology packs: gstack adds
   dedicated `qa` and `release-readiness` stages between code review and
@@ -29,12 +35,11 @@ retryable through the workflow graph.
   and the other methodology packs, gstack defaults both `interaction_mode` and
   `review_mode` to `interactive`, because raw gstack is intentionally
   conversation-heavy. You can override both for automation.
-- If you want a leaner run, pick `build-basic` (single-lane review, no extra
-  gates) or another methodology pack (Compound Engineering, Superpowers, BMAD);
-  they share the same `build-base` contract, so switching later is a one-line
-  formula change.
+- For normal work, use the `gstack-lite` skill instead of another workflow
+  formula. It keeps one owner, one review, bounded repair, and the repository's
+  existing CI/CD controls without constructing a large control graph.
 
-## Quick start
+## Quick start for the explicit full graph
 
 These steps go from a fresh machine to a completed gstack sprint.
 
@@ -251,9 +256,11 @@ gc sling gc.run-operator <bead-id> --on gstack-build \
 The vendored upstream files under `vendor/gstack` are reference material;
 `vendor/gstack/upstream.toml` records the upstream source repository, the
 pinned commit, and the MIT license. The installed files under `skills/`
-(office-hours, autoplan, plan-eng-review, review, investigate,
-document-release) expose the same vocabulary for agents. Runtime execution is
-owned by formulas, beads, and Gas City graph lanes.
+(including `gstack-lite`, office-hours, autoplan, plan-eng-review, review,
+investigate, and document-release) expose the same vocabulary for agents.
+Gstack Lite is the small direct-delivery policy; runtime execution for the
+optional full methodology remains owned by formulas, beads, and Gas City graph
+lanes.
 
 The review skill is packaged with its pinned-upstream checklist, Greptile
 triage, design checklist, and specialist references. The installed skill is a

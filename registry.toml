@@ -264,7 +264,7 @@ schema = 1
 
 [[pack]]
   name = "complete-delivery"
-  description = "End-to-end protected software delivery with durable Formula v2 gates, deployment verification, and living reports."
+  description = "DEPRECATED historical pack retained for audit and regression evidence; current delivery guidance is the in-repository gstack/skills/gstack-lite policy and direct repository-native path."
   source = "https://github.com/rbriski/gascity-packs/tree/main/complete-delivery"
   source_kind = "git"
 

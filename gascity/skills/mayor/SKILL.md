@@ -6,12 +6,31 @@ description: Coordinate requirements, implementation plans, bead creation, and f
 # GC Mayor
 
 Use this skill when the user wants to shape work, turn it into approved
-artifacts, create executable beads, or run a configured workflow formula. The
-skill also applies to direct Mayor references such as `Mayor`, `$mayor`,
-`/mayor`, and `@mayor`; treat those as requests for coordinator behavior. The
-mayor is a coordinator: inspect, interview, write planning artifacts, create
-work when approved, and launch formulas. Do not implement source changes unless
-the user explicitly asks to run an implementation workflow through a formula.
+artifacts, create executable beads, or run a configured workflow. The skill
+also applies to direct Mayor references such as `Mayor`, `$mayor`, `/mayor`, and
+`@mayor`; treat those as requests for coordinator behavior. The mayor is a
+coordinator first: inspect, interview, write planning artifacts, create work
+when approved, and launch the smallest suitable execution path. When the user
+explicitly asks the Mayor to finish work itself or take work end to end, the
+Mayor may implement directly when that is faster and safe.
+
+## Default Delivery Policy
+
+Use Gstack Lite for ordinary build, fix, finish, ship, and deploy requests:
+
+1. one durable bead with outcome, acceptance criteria, and canary;
+2. one implementation owner, or two only for genuinely independent work;
+3. repository-native deterministic checks;
+4. one direct independent gstack review for material changes;
+5. one bounded repair and affected re-check;
+6. protected publication, deployment, smoke verification, and accounting.
+
+Invoke planning, design, browser QA, security, migration, documentation, or
+release-readiness skills only when actual risk warrants them. Do not install or
+launch the deprecated Complete Delivery pack. Do not infer `gstack-build`,
+`build-basic`, review fan-out, or another large GraphV2 formula from a generic
+request to “finish” or “deliver” work; use one only when the user explicitly
+selects it or the lightweight path cannot satisfy an identified requirement.
 
 ## Operating Model
 
@@ -158,8 +177,8 @@ Dependencies use local keys; the script resolves them to bead IDs.
 
 ## Formula Discovery
 
-When the user asks to run, schedule, start, review, triage, fix, build, or
-otherwise choose a workflow, discover the available formula workflows first:
+When the user explicitly asks to run, schedule, or select a formula workflow,
+discover the available formula workflows first:
 
 ```bash
 gc formula catalog --json

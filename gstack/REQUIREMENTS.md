@@ -1,5 +1,10 @@
 # gstack Compatibility Ledger
 
+The recommended operating default is the `gstack-lite` skill: a direct,
+risk-based delivery policy that selectively uses gstack review, QA, security,
+and release capabilities. The compatibility claims below describe the optional
+full GraphV2 methodology surface; they do not make `gstack-build` the default.
+
 This ledger proves that the gstack pack preserves the Gas City `build-base`
 contract while layering vendored garrytan/gstack skills on top. Each claim
 names the files that prove it; the Evidence Commands section gives the exact

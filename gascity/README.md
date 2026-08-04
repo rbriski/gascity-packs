@@ -1,5 +1,12 @@
 # Gas City Build Pack (`gc`)
 
+> **Current default: Gstack Lite.** For ordinary delivery, use one durable
+> bead, one implementation owner, repository-native checks, one direct
+> independent gstack review for material changes, one bounded repair, then the
+> repository's protected publish/deploy/smoke path. The large formulas below
+> remain explicit tools for genuinely complex work; they are not the default
+> response to “finish this” or “ship it.” Complete Delivery is deprecated.
+
 This is the base pack for running full software-delivery workflows in Gas
 City: gather requirements, write and review a plan, decompose into tasks,
 implement in parallel agent sessions, review the result, and optionally
@@ -15,7 +22,7 @@ publish. It ships three things:
   methodology packs in this repository (bmad, compound-engineering,
   superpowers, gstack) extend and override.
 
-## Quick Start: your first build
+## Quick Start: an explicit full build graph
 
 Prerequisites: Gas City installed and a city running (`gc init`, `gc start`),
 and your project added as a rig (`gc rig add .` inside the repo). See the
@@ -44,8 +51,8 @@ and your project added as a rig (`gc rig add .` inside the repo). See the
 
    (Contributors hacking on packs can point this source at a local clone.)
 
-2. Create a bead describing what you want built, and sling the starter
-   factory at it:
+2. For work that genuinely needs a full requirements/plan/decomposition graph,
+   create a bead and sling the starter factory at it:
 
    ```sh
    gc bd create "Add a --json flag to the export command"
@@ -71,6 +78,11 @@ Use skill gc.mayor
 ```
 
 ## Choosing an entrypoint
+
+For the normal Gstack Lite path, route the bead directly to one implementation
+owner, run repository-native checks, invoke the `gstack-lite` skill for the
+review/release policy, and avoid a wrapper formula. Choose an entrypoint below
+only when its additional graph state is useful.
 
 | You have | Launch | Notes |
 | -------- | ------ | ----- |

@@ -1,15 +1,23 @@
 ---
 name: complete-delivery
-description: Carry authorized software work from product intent through implementation, repository-native tests, authoritative internal review, GitHub checks, bounded fixes, protected merge, deployment, production verification, and a living HTML report. Use when the user says “complete this work,” “take this all the way,” “ship it,” “deploy it,” or otherwise defines done as more than producing code or a pull request.
+description: Historical guidance for the deprecated Complete Delivery pack. Use only when the user explicitly asks to audit, reproduce, quarantine, or remove Complete Delivery itself; never use for ordinary build, fix, finish, ship, deploy, or end-to-end software work, which must use Gstack Lite.
 ---
 
 # Complete Delivery
 
-Treat the requested production outcome—not code generation—as the terminal
-condition. Use the pack's Formula v2 lifecycle so every gate is durable,
-observable, retryable, and recoverable.
+> **Deprecated and not for production routing.** The production-shaped canary
+> failed in the control plane and the city import was removed on August 4,
+> 2026. Preserve this pack for historical audit and regression work only. For
+> ordinary delivery, use the `gstack-lite` skill.
+
+Do not install, import, or launch this pack unless the user explicitly requests
+work on Complete Delivery itself. A generic request to finish, ship, deploy, or
+take work end to end is not authorization to reactivate it.
 
 ## Launch
+
+The launch instructions below are historical. Do not execute them for normal
+work.
 
 1. Resolve the rig that owns the code and the durable work bead. Create a bead
    in that rig only when none exists.
