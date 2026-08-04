@@ -623,6 +623,7 @@ class CommandContractTests(unittest.TestCase):
         setup=None,
         environment_updates: dict[str, str] | None = None,
         config_payload: dict | None = None,
+        controller_pack_root: pathlib.Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -660,11 +661,36 @@ class CommandContractTests(unittest.TestCase):
             }
             if config_payload is not None:
                 config = config_payload
+            controller_pack_root = controller_pack_root or PACK_ROOT
+            controller_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=controller_pack_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            controller_import_status = {
+                "imports": [
+                    {
+                        "name": "pack:complete-delivery",
+                        "pin": {
+                            "commit": controller_commit,
+                            "version": f"sha:{controller_commit}",
+                        },
+                    }
+                ]
+            }
+            controller_formula = {
+                "search_paths": [str(controller_pack_root / "formulas")],
+            }
             sink = root / "gc-args"
             calls = root / "gc-calls"
             fake_gc.write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' \"$*\" >> \"$FAKE_GC_CALLS\"\n"
+                "case \"${1:-}:${2:-}\" in import:*|formula:show)\n"
+                "  printf 'HOME=%s|GC_HOME=%s|GC_PACK_DIR=%s\\n' \"${HOME:-}\" \"${GC_HOME:-}\" \"${GC_PACK_DIR:-}\" >> \"$FAKE_CONTROLLER_ENVS\" ;;\n"
+                "esac\n"
                 "if [ \"${1:-}\" = config ] && [ \"${2:-}\" = show ]; then\n"
                 "  [ \"${FAKE_GC_SLEEP_STAGE:-}\" != config ] || exec sleep 5\n"
                 "  [ \"${FAKE_GC_FAIL_STAGE:-}\" != config ] || { printf 'config failed\\n' >&2; exit 23; }\n"
@@ -675,6 +701,23 @@ class CommandContractTests(unittest.TestCase):
                 "  [ \"${FAKE_GC_SLEEP_STAGE:-}\" != source ] || exec sleep 5\n"
                 "  [ \"${FAKE_GC_FAIL_STAGE:-}\" != source ] || { printf 'source failed\\n' >&2; exit 24; }\n"
                 "  printf '%s\\n' \"$FAKE_SOURCE_JSON\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"${1:-}\" = import ] && [ \"${2:-}\" = install ]; then\n"
+                "  [ \"${FAKE_GC_SLEEP_STAGE:-}\" != import-install ] || exec sleep 5\n"
+                "  [ \"${FAKE_GC_FAIL_STAGE:-}\" != import-install ] || exit 26\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"${1:-}\" = import ] && [ \"${2:-}\" = status ]; then\n"
+                "  [ \"${FAKE_GC_SLEEP_STAGE:-}\" != import-status ] || exec sleep 5\n"
+                "  [ \"${FAKE_GC_FAIL_STAGE:-}\" != import-status ] || exit 27\n"
+                "  printf '%s\\n' \"$FAKE_CONTROLLER_IMPORT_STATUS\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"${1:-}\" = formula ] && [ \"${2:-}\" = show ]; then\n"
+                "  [ \"${FAKE_GC_SLEEP_STAGE:-}\" != formula-show ] || exec sleep 5\n"
+                "  [ \"${FAKE_GC_FAIL_STAGE:-}\" != formula-show ] || exit 28\n"
+                "  printf '%s\\n' \"$FAKE_CONTROLLER_FORMULA\"\n"
                 "  exit 0\n"
                 "fi\n"
                 "[ \"${FAKE_GC_SLEEP_STAGE:-}\" != sling ] || exec sleep 5\n"
@@ -703,6 +746,8 @@ class CommandContractTests(unittest.TestCase):
             environment["GC_PACK_DIR"] = str(PACK_ROOT)
             environment["PATH"] = f"{directory}:{environment['PATH']}"
             environment["FAKE_GC_CONFIG"] = json.dumps(config)
+            environment["FAKE_CONTROLLER_IMPORT_STATUS"] = json.dumps(controller_import_status)
+            environment["FAKE_CONTROLLER_FORMULA"] = json.dumps(controller_formula)
             environment["FAKE_SOURCE_JSON"] = (
                 source_json
                 if source_json is not None
@@ -710,6 +755,7 @@ class CommandContractTests(unittest.TestCase):
             )
             environment["FAKE_GC_SINK"] = str(sink)
             environment["FAKE_GC_CALLS"] = str(calls)
+            environment["FAKE_CONTROLLER_ENVS"] = str(root / "controller-envs")
             environment["FAKE_GH_CALLS"] = str(root / "gh-calls")
             environment["FAKE_GH_ENVS"] = str(root / "gh-envs")
             environment["GH_CONFIG_DIR"] = str(credential_config)
@@ -727,6 +773,12 @@ class CommandContractTests(unittest.TestCase):
             result.sink = sink
             result.slinged = sink.exists()
             result.calls = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+            controller_envs = root / "controller-envs"
+            result.controller_envs = (
+                controller_envs.read_text(encoding="utf-8").splitlines()
+                if controller_envs.exists()
+                else []
+            )
             gh_calls = root / "gh-calls"
             result.gh_calls = gh_calls.read_text(encoding="utf-8").splitlines() if gh_calls.exists() else []
             gh_envs = root / "gh-envs"
@@ -749,6 +801,10 @@ class CommandContractTests(unittest.TestCase):
                 "validator": (rig / ".gc/scripts/validate_build_artifact.py").is_file(),
                 "schema": (rig / ".gc/schemas/build/requirements.v1.yaml").is_file(),
             }
+            preflight_check = rig / ".gc/scripts/checks/delivery-preflight.sh"
+            result.materialized_preflight_contents = (
+                preflight_check.read_text(encoding="utf-8") if preflight_check.is_file() else ""
+            )
             result.materialized_review_checks = {}
             for name in ("design-review-approved.sh", "implementation-review-approved.sh"):
                 path = rig / ".gc/scripts/checks" / name
@@ -855,6 +911,72 @@ class CommandContractTests(unittest.TestCase):
             source = REPO_ROOT / "gascity/assets/scripts/checks" / name
             self.assertEqual(materialized["bytes"], source.read_bytes())
             self.assertTrue(materialized["executable"])
+
+    def test_controller_local_exact_pack_is_installed_and_resolved_before_dispatch(self) -> None:
+        result = self.run_command("fi-123", "--rig", "finance")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        install = result.calls.index("import install")
+        status = result.calls.index("import status --json")
+        formula = result.calls.index("formula show complete-delivery --rig finance --json")
+        sling = next(index for index, call in enumerate(result.calls) if call.startswith("sling "))
+        self.assertLess(install, status)
+        self.assertLess(status, formula)
+        self.assertLess(formula, sling)
+        self.assertEqual(len(result.controller_envs), 3)
+        self.assertTrue(all(f"HOME={result.city}" in value for value in result.controller_envs))
+        self.assertTrue(all("GC_HOME=|" in value for value in result.controller_envs))
+        self.assertTrue(all(value.endswith("GC_PACK_DIR=") for value in result.controller_envs))
+
+    def test_stale_or_foreign_controller_pack_fails_before_assets_or_dispatch(self) -> None:
+        foreign_commit = "b" * 40
+        status = json.dumps(
+            {
+                "imports": [
+                    {
+                        "name": "pack:complete-delivery",
+                        "pin": {"commit": foreign_commit, "version": f"sha:{foreign_commit}"},
+                    }
+                ]
+            }
+        )
+        result = self.run_command(
+            "fi-123",
+            "--rig",
+            "finance",
+            environment_updates={"FAKE_CONTROLLER_IMPORT_STATUS": status},
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("exact locked revision", result.stderr)
+        self.assertFalse(result.slinged)
+        self.assertEqual(result.materialized_paths, [])
+
+    def test_generated_checks_are_materialized_from_the_controller_resolved_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller_repo = pathlib.Path(directory) / "controller-packs"
+            shutil.copytree(REPO_ROOT / "complete-delivery", controller_repo / "complete-delivery")
+            shutil.copytree(REPO_ROOT / "gascity", controller_repo / "gascity")
+            check = controller_repo / "complete-delivery/assets/scripts/checks/delivery-preflight.sh"
+            check.write_text(
+                check.read_text(encoding="utf-8") + "\n# controller-local marker\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q", str(controller_repo)], check=True)
+            subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=controller_repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Complete Delivery tests"], cwd=controller_repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=controller_repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "controller cache fixture"], cwd=controller_repo, check=True)
+
+            result = self.run_command(
+                "fi-123",
+                "--rig",
+                "finance",
+                controller_pack_root=controller_repo / "complete-delivery",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("controller-local marker", result.materialized_preflight_contents)
 
     def test_existing_exact_city_github_capability_is_revalidated_idempotently(self) -> None:
         def setup(root: pathlib.Path, _rig: pathlib.Path) -> None:
@@ -1347,6 +1469,8 @@ class GithubCapabilityUnitTests(unittest.TestCase):
             os.environ,
             {
                 "HOME": "/user/home",
+                "GC_HOME": "/caller/cache",
+                "GC_PACK_DIR": "/caller/complete-delivery",
                 "PATH": "/usr/bin:/bin",
                 "GH_CONFIG_DIR": "/credential/config",
                 "GH_TOKEN": "secret",
@@ -1365,6 +1489,8 @@ class GithubCapabilityUnitTests(unittest.TestCase):
         self.assertFalse(
             any(name.startswith(("GH_", "GITHUB_", "XDG_")) for name in environment)
         )
+        self.assertNotIn("GC_HOME", environment)
+        self.assertNotIn("GC_PACK_DIR", environment)
 
 
 class MaterializationRecoveryTests(unittest.TestCase):
