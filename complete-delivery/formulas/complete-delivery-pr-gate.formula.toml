@@ -10,14 +10,26 @@ change requests. Optional provider evidence is controlled by pack variables.
 formula = "complete-delivery-pr-gate"
 type = "expansion"
 version = 1
+contract = "graph.v2"
 
 [requires]
 formula_compiler = ">=2.0.0"
 
+# The expansion target is the scope body. Its outcome is therefore the exact
+# value consumed by Complete Delivery's outer `external-review` release member:
+# a failed setup, loop, or final report cannot look merely "closed" to
+# `report-green`, merge, or deploy.
+[[template]]
+id = "{target}"
+title = "External review safety scope"
+needs = ["{target}.setup-external-review", "{target}.external-review-loop", "{target}.finalize-external-review"]
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "complete-delivery-external-review", "gc.scope_role" = "body" }
+description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.external-review-body.md"
+
 [[template]]
 id = "{target}.setup-external-review"
 title = "Prepare external review reconciliation"
-metadata = { "gc.run_target" = "complete-delivery.external-review-resolver" }
+metadata = { "gc.run_target" = "complete-delivery.external-review-resolver", "gc.scope_ref" = "{target}", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.setup-external-review.md"
 
 [template.check]
@@ -32,7 +44,7 @@ timeout = "1m"
 id = "{target}.external-review-loop"
 title = "Run one frozen-head review and repair cycle"
 needs = ["{target}.setup-external-review"]
-metadata = { "gc.run_target" = "complete-delivery.external-review-resolver", "gc.review_policy" = "frozen-candidate-two-cycle" }
+metadata = { "gc.run_target" = "complete-delivery.external-review-resolver", "gc.review_policy" = "frozen-candidate-two-cycle", "gc.scope_ref" = "{target}", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.external-review-loop.md"
 
 [template.check]
@@ -78,8 +90,8 @@ metadata = { "gc.run_target" = "complete-delivery.report-editor" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.report-external-review.md"
 
 [[template]]
-id = "{target}"
+id = "{target}.finalize-external-review"
 title = "Finalize external review gate"
 needs = ["{target}.external-review-loop"]
-metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+metadata = { "gc.run_target" = "complete-delivery.report-editor", "gc.scope_ref" = "{target}", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery-pr-gate/{target}.md"

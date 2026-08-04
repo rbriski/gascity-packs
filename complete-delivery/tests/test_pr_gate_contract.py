@@ -428,6 +428,7 @@ class PrGateContractTests(unittest.TestCase):
         run_targets = {
             template["metadata"]["gc.run_target"]
             for template in self.formula["template"]
+            if "gc.run_target" in template["metadata"]
         }
         loop = self.templates["{target}.external-review-loop"]
         run_targets.update(
@@ -444,7 +445,9 @@ class PrGateContractTests(unittest.TestCase):
         self.assertTrue(run_targets <= declared_targets)
 
     def test_formula_routes_terminal_report_update_to_report_editor(self) -> None:
-        terminal = self.templates["{target}"]
+        # The expansion target is now the scope body; its final report member
+        # remains the only terminal report-editor lane.
+        terminal = self.templates["{target}.finalize-external-review"]
 
         self.assertEqual(
             terminal["metadata"]["gc.run_target"],
@@ -512,7 +515,7 @@ class PrGateContractTests(unittest.TestCase):
             outer_formula = tomllib.load(formula_file)
         steps = {step["id"]: step for step in outer_formula["steps"]}
 
-        self.assertEqual(steps["report-green"]["needs"], ["external-review"])
+        self.assertEqual(steps["report-green"]["needs"], ["external-review-result"])
         self.assertEqual(
             steps["report-green"]["check"]["check"]["path"],
             ".gc/scripts/checks/delivery-report-green.sh",

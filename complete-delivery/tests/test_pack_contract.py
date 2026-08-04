@@ -43,6 +43,55 @@ def formula_nodes(formula: dict):
         yield from node.get("children", [])
 
 
+def execute_release_failure_path(delivery: dict, gate: dict, failed_control: str) -> dict:
+    """Execute the fail-stop contract encoded by the release Formula.
+
+    This deliberately models graph.v2 terminal state, rather than treating a
+    closed dependency as a pass.  It uses the Formula's actual scopes and
+    member metadata so a topology change that detaches the external-review
+    target from its body fails these regression tests.
+    """
+    steps = {step["id"]: step for step in delivery["steps"]}
+    templates = {template["id"]: template for template in gate["template"]}
+    release_scope = steps["release-body"]
+    release_members = release_scope["needs"]
+    external_scope = templates["{target}"]
+    external_members = [member.replace("{target}", "external-review") for member in external_scope["needs"]]
+    state = {member: {"status": "pending"} for member in release_members}
+    state.update({member: {"status": "pending"} for member in external_members})
+    state["release-body"] = {"status": "pending"}
+    audit = []
+
+    def abort(scope: str, members: list[str], failed_member: str) -> None:
+        state[failed_member] = {"status": "closed", "gc.outcome": "fail"}
+        audit.append({"scope": scope, "member": failed_member, "gc.outcome": "fail"})
+        state[scope] = {"status": "closed", "gc.outcome": "fail"}
+        for member in members:
+            if state[member]["status"] == "pending":
+                state[member] = {"status": "skipped"}
+
+    if failed_control.startswith("external-review."):
+        template_id = "{target}." + failed_control.removeprefix("external-review.")
+        control = templates[template_id]
+        assert control["metadata"]["gc.scope_ref"] == "{target}"
+        assert control["metadata"]["gc.on_fail"] == "abort_scope"
+        abort("external-review", external_members, failed_control)
+        # Expansion replaces the source step metadata, so this separate,
+        # compiler-visible outer member is the semantic bridge. Its check
+        # rejects the failed nested scope before report-green can be released.
+        bridge = steps["external-review-result"]
+        assert bridge["needs"] == ["external-review"]
+        assert bridge["metadata"]["gc.scope_ref"] == "release-body"
+        assert bridge["metadata"]["gc.on_fail"] == "abort_scope"
+        abort("release-body", release_members, "external-review-result")
+    else:
+        control = steps[failed_control]
+        assert control["metadata"]["gc.scope_ref"] == "release-body"
+        assert control["metadata"]["gc.on_fail"] == "abort_scope"
+        abort("release-body", release_members, failed_control)
+    return {"state": state, "audit": audit}
+
+
 class PackContractTests(unittest.TestCase):
     def test_pack_imports_and_formula_identity(self) -> None:
         pack = load_toml(PACK_ROOT / "pack.toml")
@@ -154,7 +203,7 @@ class PackContractTests(unittest.TestCase):
             self.assertIn(f"CD-{requirement:03d}", ledger)
 
 
-class FormulaContractTests(unittest.TestCase):
+class FormulaContractBaseTests:
     @classmethod
     def setUpClass(cls) -> None:
         cls.delivery = load_toml(FORMULA_DIR / "complete-delivery.formula.toml")
@@ -165,7 +214,8 @@ class FormulaContractTests(unittest.TestCase):
         for formula in (self.delivery, self.gate):
             with self.subTest(formula=formula["formula"]):
                 self.assertEqual(formula["requires"]["formula_compiler"], ">=2.0.0")
-                self.assertNotIn("contract", formula)
+        self.assertEqual(self.delivery["contract"], "graph.v2")
+        self.assertEqual(self.gate["contract"], "graph.v2")
 
     def test_preflight_blocks_requirements_and_reporting(self) -> None:
         self.assertEqual(self.steps["delivery-preflight"]["needs"], ["prepare"])
@@ -181,7 +231,8 @@ class FormulaContractTests(unittest.TestCase):
             "publish": ["finalize"],
             "report-pull-request": ["publish"],
             "external-review": ["report-pull-request"],
-            "report-green": ["external-review"],
+            "external-review-result": ["external-review"],
+            "report-green": ["external-review-result"],
             "merge": ["report-green"],
             "report-merged": ["merge"],
             "deploy": ["report-merged"],
@@ -191,6 +242,243 @@ class FormulaContractTests(unittest.TestCase):
         for step, needs in expected_needs.items():
             with self.subTest(step=step):
                 self.assertEqual(self.steps[step]["needs"], needs)
+
+
+class FormulaContractTests(FormulaContractBaseTests, unittest.TestCase):
+    SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-external-review-passed.sh"
+
+    def run_check(self, outcome: str = "pass", *, mode: str = "normal") -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            fake_gc = root / "gc"
+            fake_gc.write_text(
+                """#!/bin/sh
+if [ "$1" = "bd" ] && [ "$2" = "show" ]; then
+  if [ "$3" = "gate" ]; then printf '%s\\n' "$FAKE_STEP_JSON"; else printf '%s\\n' "$FAKE_ROOT_JSON"; fi
+elif [ "$1" = "bd" ] && [ "$2" = "list" ]; then
+  printf '%s\\n' "$@" > "$FAKE_GC_ARGS"
+  if [ "$FAKE_LIST_MODE" = "oversized" ]; then
+    python3 - <<'PY'
+import json
+print(json.dumps([{
+    "id": "external-scope",
+    "status": "closed",
+    "description": "x" * (3 * 1024 * 1024),
+    "metadata": {
+        "gc.root_bead_id": "root",
+        "gc.step_id": "external-review",
+        "gc.kind": "scope",
+        "gc.outcome": "pass",
+    },
+}]))
+PY
+  else
+    printf '%s\\n' "$FAKE_LIST_JSON"
+  fi
+else
+  exit 64
+fi
+""",
+                encoding="utf-8",
+            )
+            fake_gc.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update({
+                "GC_BEAD_ID": "gate",
+                "FAKE_STEP_JSON": json.dumps([{
+                    "id": "gate",
+                    "metadata": {"gc.root_bead_id": "root"},
+                }]),
+                "FAKE_ROOT_JSON": json.dumps([{"id": "root", "metadata": {}}]),
+                "FAKE_LIST_MODE": mode,
+                "FAKE_GC_ARGS": str(root / "gc-args"),
+                "PATH": f"{root}:{environment['PATH']}",
+            })
+            candidate = {
+                "id": "external-scope",
+                "status": "closed",
+                "metadata": {
+                    "gc.root_bead_id": "root",
+                    "gc.step_id": "external-review",
+                    "gc.kind": "scope",
+                    "gc.outcome": outcome,
+                },
+            }
+            if mode == "missing":
+                candidates = []
+            elif mode == "duplicate":
+                candidates = [candidate, {**candidate, "id": "external-scope-2"}]
+            else:
+                if mode == "nonterminal":
+                    candidate["status"] = "in_progress"
+                elif mode == "wrong-kind":
+                    candidate["metadata"]["gc.kind"] = "workflow"
+                elif mode == "wrong-step":
+                    candidate["metadata"]["gc.step_id"] = "report-green"
+                elif mode == "wrong-root":
+                    candidate["metadata"]["gc.root_bead_id"] = "other-root"
+                candidates = [candidate]
+            environment["FAKE_LIST_JSON"] = json.dumps(candidates)
+            result = subprocess.run(
+                ["bash", str(self.SCRIPT)], capture_output=True, text=True, env=environment
+            )
+            result.gc_args = (root / "gc-args").read_text(encoding="utf-8")
+            return result
+
+    def test_requires_the_nested_scope_to_explicitly_pass(self) -> None:
+        self.assertEqual(self.run_check("pass").returncode, 0)
+        failed = self.run_check("fail")
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("external-review scope did not pass", failed.stderr)
+
+    def test_external_review_scope_query_is_exact_and_argv_safe(self) -> None:
+        passed = self.run_check("pass")
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertIn("gc.root_bead_id=root", passed.gc_args)
+        self.assertIn("gc.step_id=external-review", passed.gc_args)
+        self.assertIn("gc.kind=scope", passed.gc_args)
+
+        # This payload is larger than a typical ARG_MAX. It must be accepted
+        # through stdin rather than forwarded as one Python argv element.
+        oversized = self.run_check(mode="oversized")
+        self.assertEqual(oversized.returncode, 0, oversized.stderr)
+
+    def test_requires_one_terminal_matching_external_review_scope(self) -> None:
+        for mode in ("missing", "duplicate", "nonterminal", "wrong-kind", "wrong-step", "wrong-root"):
+            with self.subTest(mode=mode):
+                result = self.run_check(mode=mode)
+                self.assertEqual(result.returncode, 1)
+
+    def test_release_controls_abort_the_semantic_release_scope(self) -> None:
+        """A failed closed control must quarantine, never unlock, release work."""
+        self.assertEqual(self.delivery["contract"], "graph.v2")
+
+        release_steps = [
+            "finalize",
+            "publish",
+            "report-pull-request",
+            "external-review-result",
+            "report-green",
+            "merge",
+            "report-merged",
+            "deploy",
+            "verify-production",
+            "report-complete",
+        ]
+        scope = self.steps["release-body"]
+        self.assertEqual(scope["needs"], release_steps)
+        self.assertEqual(scope["metadata"], {
+            "gc.kind": "scope",
+            "gc.scope_name": "complete-delivery-release",
+            "gc.scope_role": "body",
+        })
+
+        # These cover the real failure modes that formerly advanced on
+        # status=closed alone: finalizer, publish Ralph, external-review setup
+        # or loop (reported through its expansion parent), and report-green.
+        # Graph v2's abort_scope turns each non-pass into an auditable failed
+        # scope and skips every later release action, including merge/deploy.
+        failure_paths = {
+            "finalize": ["publish", "merge", "deploy"],
+            "publish": ["report-pull-request", "merge", "deploy"],
+            "external-review-result": ["report-green", "merge", "deploy"],
+            "report-green": ["merge", "deploy"],
+        }
+        for failed_step, prohibited_after_failure in failure_paths.items():
+            with self.subTest(failed_step=failed_step):
+                metadata = self.steps[failed_step]["metadata"]
+                self.assertEqual(metadata["gc.scope_ref"], "release-body")
+                self.assertEqual(metadata["gc.scope_role"], "member")
+                self.assertEqual(metadata["gc.on_fail"], "abort_scope")
+                failed_index = release_steps.index(failed_step)
+                for prohibited_step in prohibited_after_failure:
+                    self.assertGreater(release_steps.index(prohibited_step), failed_index)
+
+        templates = {node["id"]: node for node in self.gate["template"]}
+        # The expansion target itself must be the semantic scope that the
+        # outer external-review member consumes; a sibling latch is bypassable.
+        external_scope = templates["{target}"]
+        self.assertEqual(external_scope["needs"], [
+            "{target}.setup-external-review",
+            "{target}.external-review-loop",
+            "{target}.finalize-external-review",
+        ])
+        self.assertEqual(external_scope["metadata"], {
+            "gc.kind": "scope",
+            "gc.scope_name": "complete-delivery-external-review",
+            "gc.scope_role": "body",
+        })
+        for external_control in (
+            "{target}.setup-external-review",
+            "{target}.external-review-loop",
+            "{target}.finalize-external-review",
+        ):
+            metadata = templates[external_control]["metadata"]
+            self.assertEqual(metadata["gc.scope_ref"], "{target}")
+            self.assertEqual(metadata["gc.scope_role"], "member")
+            self.assertEqual(metadata["gc.on_fail"], "abort_scope")
+        self.assertEqual(
+            templates["{target}.setup-external-review"]["check"]["max_attempts"],
+            1,
+        )
+        self.assertEqual(
+            templates["{target}.external-review-loop"]["check"]["max_attempts"],
+            2,
+        )
+        # Expansion targets replace the parent metadata when compiled. The
+        # outer bridge is therefore a normal release-scope member, with a
+        # mechanical check that reads the target scope's explicit outcome.
+        bridge = self.steps["external-review-result"]
+        self.assertEqual(bridge["needs"], ["external-review"])
+        self.assertEqual(bridge["metadata"], {
+            "gc.run_target": "complete-delivery.external-review-resolver",
+            "gc.scope_ref": "release-body",
+            "gc.scope_role": "member",
+            "gc.on_fail": "abort_scope",
+        })
+        self.assertEqual(bridge["check"]["max_attempts"], 1)
+        self.assertEqual(
+            bridge["check"]["check"]["path"],
+            ".gc/scripts/checks/delivery-external-review-passed.sh",
+        )
+        self.assertEqual(self.steps["report-green"]["needs"], ["external-review-result"])
+
+    def test_release_failure_paths_execute_as_audited_quarantines(self) -> None:
+        """Every terminal failure skips merge/deploy without rewriting evidence."""
+        cases = (
+            "finalize",
+            "publish",
+            "external-review.setup-external-review",
+            "external-review.external-review-loop",
+            "external-review.finalize-external-review",
+            "report-green",
+        )
+        for failed_control in cases:
+            with self.subTest(failed_control=failed_control):
+                result = execute_release_failure_path(self.delivery, self.gate, failed_control)
+                state = result["state"]
+                audit = result["audit"]
+                self.assertEqual(state["release-body"], {"status": "closed", "gc.outcome": "fail"})
+                self.assertEqual(state["merge"], {"status": "skipped"})
+                self.assertEqual(state["deploy"], {"status": "skipped"})
+                self.assertNotIn({"scope": "release-body", "member": "merge", "gc.outcome": "fail"}, audit)
+                self.assertTrue(any(item["gc.outcome"] == "fail" for item in audit))
+
+                if failed_control.startswith("external-review."):
+                    self.assertEqual(state["external-review"], {"status": "closed", "gc.outcome": "fail"})
+                    self.assertEqual(
+                        state["external-review-result"],
+                        {"status": "closed", "gc.outcome": "fail"},
+                    )
+                    self.assertIn(
+                        {"scope": "external-review", "member": failed_control, "gc.outcome": "fail"},
+                        audit,
+                    )
+                else:
+                    self.assertEqual(
+                        state[failed_control],
+                        {"status": "closed", "gc.outcome": "fail"},
+                    )
 
     def test_external_review_loop_is_bounded_and_ordered(self) -> None:
         self.assertEqual(self.steps["external-review"]["expand"], "complete-delivery-pr-gate")
@@ -475,6 +763,7 @@ class CommandContractTests(unittest.TestCase):
             ".gc/scripts/checks/build-artifact-valid.sh",
             ".gc/scripts/checks/delivery-common.sh",
             ".gc/scripts/checks/delivery-external-review-deadline.sh",
+            ".gc/scripts/checks/delivery-external-review-passed.sh",
             ".gc/scripts/checks/delivery-local-gates.sh",
             ".gc/scripts/checks/delivery-merged.sh",
             ".gc/scripts/checks/delivery-pr-approved.sh",
@@ -890,6 +1179,11 @@ class CommandContractTests(unittest.TestCase):
 
 
 class MaterializationRecoveryTests(unittest.TestCase):
+    # LEGACY_V1_ASSET_HASHES attests the 0.1.0 release, not the mutable main
+    # branch. Keep this fixture pinned to those release bytes so it exercises
+    # the supported legacy upgrade rather than manufacturing a false tamper.
+    LEGACY_V1_RELEASE = "d8fc7e834f2c66101d1141c80db58e7fa82594bf"
+
     def make_rig(self, root: pathlib.Path) -> pathlib.Path:
         rig = root / "rig"
         rig.mkdir(parents=True)
@@ -913,7 +1207,7 @@ class MaterializationRecoveryTests(unittest.TestCase):
             else:
                 self.fail(f"unexpected v1 asset {relative}")
             contents = subprocess.run(
-                ["git", "show", f"origin/main:{source}"],
+                ["git", "show", f"{self.LEGACY_V1_RELEASE}:{source}"],
                 cwd=REPO_ROOT,
                 capture_output=True,
                 check=True,
@@ -939,7 +1233,7 @@ class MaterializationRecoveryTests(unittest.TestCase):
 
             installed = prepare_delivery.materialize_assets(PACK_ROOT, rig)
 
-            self.assertEqual(len(installed), 21)
+            self.assertEqual(len(installed), 22)
             self.assertFalse((rig / "schemas/build/requirements.v1.yaml").exists())
             manifest = json.loads(
                 (rig / ".gc" / prepare_delivery.MANIFEST_NAME).read_text(encoding="utf-8")
