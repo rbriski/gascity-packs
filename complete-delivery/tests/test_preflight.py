@@ -3600,6 +3600,28 @@ class PreflightTests(unittest.TestCase):
             self.assertIn(f"schema: {schema}", prompt_text)
             self.assertIn("status: approved", prompt_text)
 
+        requirements = (WORKFLOW_ROOT / "requirements.md").read_text(encoding="utf-8")
+        for required in (
+            "CLAIMED_ROOT_BEAD_ID",
+            "metadata.gc.attempt",
+            "workflow:",
+            "formula: complete-delivery",
+            "methodology:",
+            "pack: complete-delivery",
+            "producer:",
+            "stage: requirements",
+            "attempt: <positive integer from metadata.gc.attempt>",
+            "trace:",
+            "source-intent",
+            "Markdown coverage table",
+            "## Result contract",
+            "immutable across all three attempts",
+            "gc.build.requirements_path",
+            "prior_failure_reason",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, requirements)
+
 
 class SourceArtifactTests(unittest.TestCase):
     @classmethod
@@ -4023,6 +4045,29 @@ class SourceArtifactTests(unittest.TestCase):
                         for path in manifest["canonical_paths"].values()
                     )
                 )
+
+    def test_requirements_first_attempt_fixture_passes_complete_schema_contract(self) -> None:
+        result = self.run_check(
+            self.artifact(artifact_kind="requirements"),
+            artifact_kind="requirements",
+            command_args=("--context", "requirements"),
+            step_metadata={
+                "gc.attempt": "1",
+                "gc.step_id": "requirements",
+                "gc.step_ref": "complete-delivery.requirements.iteration.1",
+            },
+            root_metadata_updates=self.source_artifact_context_root_metadata(),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = json.loads(result.stdout)
+        self.assertEqual(manifest["attempt"], 1)
+        self.assertEqual(manifest["logical_control_id"], "")
+        self.assertEqual(manifest["attempt_log"], [])
+        self.assertEqual(
+            manifest["permitted_output_paths"],
+            [manifest["canonical_paths"]["requirements_path"]],
+        )
 
     def test_source_artifact_context_recovers_exact_retry_failure_from_control(self) -> None:
         retry_metadata = {
