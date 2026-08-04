@@ -76,10 +76,14 @@ def execute_release_failure_path(delivery: dict, gate: dict, failed_control: str
         assert control["metadata"]["gc.scope_ref"] == "{target}"
         assert control["metadata"]["gc.on_fail"] == "abort_scope"
         abort("external-review", external_members, failed_control)
-        # The expansion target is the inner scope body.  Its failed outcome is
-        # exactly the outer external-review member outcome, never a closed
-        # dependency that could unlock report-green.
-        abort("release-body", release_members, "external-review")
+        # Expansion replaces the source step metadata, so this separate,
+        # compiler-visible outer member is the semantic bridge. Its check
+        # rejects the failed nested scope before report-green can be released.
+        bridge = steps["external-review-result"]
+        assert bridge["needs"] == ["external-review"]
+        assert bridge["metadata"]["gc.scope_ref"] == "release-body"
+        assert bridge["metadata"]["gc.on_fail"] == "abort_scope"
+        abort("release-body", release_members, "external-review-result")
     else:
         control = steps[failed_control]
         assert control["metadata"]["gc.scope_ref"] == "release-body"
@@ -199,7 +203,7 @@ class PackContractTests(unittest.TestCase):
             self.assertIn(f"CD-{requirement:03d}", ledger)
 
 
-class FormulaContractTests(unittest.TestCase):
+class FormulaContractBaseTests:
     @classmethod
     def setUpClass(cls) -> None:
         cls.delivery = load_toml(FORMULA_DIR / "complete-delivery.formula.toml")
@@ -227,7 +231,8 @@ class FormulaContractTests(unittest.TestCase):
             "publish": ["finalize"],
             "report-pull-request": ["publish"],
             "external-review": ["report-pull-request"],
-            "report-green": ["external-review"],
+            "external-review-result": ["external-review"],
+            "report-green": ["external-review-result"],
             "merge": ["report-green"],
             "report-merged": ["merge"],
             "deploy": ["report-merged"],
@@ -238,6 +243,57 @@ class FormulaContractTests(unittest.TestCase):
             with self.subTest(step=step):
                 self.assertEqual(self.steps[step]["needs"], needs)
 
+
+class FormulaContractTests(FormulaContractBaseTests, unittest.TestCase):
+    SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-external-review-passed.sh"
+
+    def run_check(self, outcome: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            fake_gc = root / "gc"
+            fake_gc.write_text(
+                """#!/bin/sh
+if [ "$1" = "bd" ] && [ "$2" = "show" ]; then
+  if [ "$3" = "gate" ]; then printf '%s\\n' "$FAKE_STEP_JSON"; else printf '%s\\n' "$FAKE_ROOT_JSON"; fi
+elif [ "$1" = "bd" ] && [ "$2" = "list" ]; then
+  printf '%s\\n' "$FAKE_LIST_JSON"
+else
+  exit 64
+fi
+""",
+                encoding="utf-8",
+            )
+            fake_gc.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update({
+                "GC_BEAD_ID": "gate",
+                "FAKE_STEP_JSON": json.dumps([{
+                    "id": "gate",
+                    "metadata": {"gc.root_bead_id": "root"},
+                }]),
+                "FAKE_ROOT_JSON": json.dumps([{"id": "root", "metadata": {}}]),
+                "FAKE_LIST_JSON": json.dumps([{
+                    "id": "external-scope",
+                    "status": "closed",
+                    "metadata": {
+                        "gc.root_bead_id": "root",
+                        "gc.step_id": "external-review",
+                        "gc.kind": "scope",
+                        "gc.outcome": outcome,
+                    },
+                }]),
+                "PATH": f"{root}:{environment['PATH']}",
+            })
+            return subprocess.run(
+                ["bash", str(self.SCRIPT)], capture_output=True, text=True, env=environment
+            )
+
+    def test_requires_the_nested_scope_to_explicitly_pass(self) -> None:
+        self.assertEqual(self.run_check("pass").returncode, 0)
+        failed = self.run_check("fail")
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("external-review scope did not pass", failed.stderr)
+
     def test_release_controls_abort_the_semantic_release_scope(self) -> None:
         """A failed closed control must quarantine, never unlock, release work."""
         self.assertEqual(self.delivery["contract"], "graph.v2")
@@ -246,7 +302,7 @@ class FormulaContractTests(unittest.TestCase):
             "finalize",
             "publish",
             "report-pull-request",
-            "external-review",
+            "external-review-result",
             "report-green",
             "merge",
             "report-merged",
@@ -270,7 +326,7 @@ class FormulaContractTests(unittest.TestCase):
         failure_paths = {
             "finalize": ["publish", "merge", "deploy"],
             "publish": ["report-pull-request", "merge", "deploy"],
-            "external-review": ["report-green", "merge", "deploy"],
+            "external-review-result": ["report-green", "merge", "deploy"],
             "report-green": ["merge", "deploy"],
         }
         for failed_step, prohibited_after_failure in failure_paths.items():
@@ -314,6 +370,23 @@ class FormulaContractTests(unittest.TestCase):
             templates["{target}.external-review-loop"]["check"]["max_attempts"],
             2,
         )
+        # Expansion targets replace the parent metadata when compiled. The
+        # outer bridge is therefore a normal release-scope member, with a
+        # mechanical check that reads the target scope's explicit outcome.
+        bridge = self.steps["external-review-result"]
+        self.assertEqual(bridge["needs"], ["external-review"])
+        self.assertEqual(bridge["metadata"], {
+            "gc.run_target": "complete-delivery.external-review-resolver",
+            "gc.scope_ref": "release-body",
+            "gc.scope_role": "member",
+            "gc.on_fail": "abort_scope",
+        })
+        self.assertEqual(bridge["check"]["max_attempts"], 1)
+        self.assertEqual(
+            bridge["check"]["check"]["path"],
+            ".gc/scripts/checks/delivery-external-review-passed.sh",
+        )
+        self.assertEqual(self.steps["report-green"]["needs"], ["external-review-result"])
 
     def test_release_failure_paths_execute_as_audited_quarantines(self) -> None:
         """Every terminal failure skips merge/deploy without rewriting evidence."""
@@ -337,8 +410,9 @@ class FormulaContractTests(unittest.TestCase):
                 self.assertTrue(any(item["gc.outcome"] == "fail" for item in audit))
 
                 if failed_control.startswith("external-review."):
+                    self.assertEqual(state["external-review"], {"status": "closed", "gc.outcome": "fail"})
                     self.assertEqual(
-                        state["external-review"],
+                        state["external-review-result"],
                         {"status": "closed", "gc.outcome": "fail"},
                     )
                     self.assertIn(
@@ -634,6 +708,7 @@ class CommandContractTests(unittest.TestCase):
             ".gc/scripts/checks/build-artifact-valid.sh",
             ".gc/scripts/checks/delivery-common.sh",
             ".gc/scripts/checks/delivery-external-review-deadline.sh",
+            ".gc/scripts/checks/delivery-external-review-passed.sh",
             ".gc/scripts/checks/delivery-local-gates.sh",
             ".gc/scripts/checks/delivery-merged.sh",
             ".gc/scripts/checks/delivery-pr-approved.sh",
@@ -1098,7 +1173,7 @@ class MaterializationRecoveryTests(unittest.TestCase):
 
             installed = prepare_delivery.materialize_assets(PACK_ROOT, rig)
 
-            self.assertEqual(len(installed), 21)
+            self.assertEqual(len(installed), 22)
             self.assertFalse((rig / "schemas/build/requirements.v1.yaml").exists())
             manifest = json.loads(
                 (rig / ".gc" / prepare_delivery.MANIFEST_NAME).read_text(encoding="utf-8")

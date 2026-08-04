@@ -185,7 +185,7 @@ default = ""
 [[steps]]
 id = "release-body"
 title = "Complete Delivery release safety scope"
-needs = ["finalize", "publish", "report-pull-request", "external-review", "report-green", "merge", "report-merged", "deploy", "verify-production", "report-complete"]
+needs = ["finalize", "publish", "report-pull-request", "external-review-result", "report-green", "merge", "report-merged", "deploy", "verify-production", "report-complete"]
 metadata = { "gc.kind" = "scope", "gc.scope_name" = "complete-delivery-release", "gc.scope_role" = "body" }
 description_file = "../assets/workflows/complete-delivery/release-body.md"
 
@@ -342,14 +342,29 @@ description_file = "../assets/workflows/complete-delivery/report-pull-request.md
 id = "external-review"
 title = "Reconcile current-head gates and review findings"
 needs = ["report-pull-request"]
-metadata = { "gc.run_target" = "complete-delivery.delivery-engineer", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
 expand = "complete-delivery-pr-gate"
 description_file = "../assets/workflows/complete-delivery/external-review.md"
 
 [[steps]]
+id = "external-review-result"
+title = "Validate the terminal external-review outcome"
+needs = ["external-review"]
+metadata = { "gc.run_target" = "complete-delivery.external-review-resolver", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+description_file = "../assets/workflows/complete-delivery/external-review-result.md"
+
+[steps.check]
+max_attempts = 1
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/checks/delivery-external-review-passed.sh"
+timeout = "1m"
+
+[[steps]]
 id = "report-green"
 title = "Report the green external gate"
-needs = ["external-review"]
+needs = ["external-review-result"]
 metadata = { "gc.run_target" = "complete-delivery.report-editor", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery/report-green.md"
 

@@ -32,6 +32,7 @@ class LaunchPreflightError(RuntimeError):
 DELIVERY_CHECKS = (
     "delivery-common.sh",
     "delivery-external-review-deadline.sh",
+    "delivery-external-review-passed.sh",
     "delivery-local-gates.sh",
     "delivery-merged.sh",
     "delivery-preflight.sh",
