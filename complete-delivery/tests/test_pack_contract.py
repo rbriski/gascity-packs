@@ -850,6 +850,11 @@ class CommandContractTests(unittest.TestCase):
         args = result.stdout.splitlines()
         self.assertEqual(args[:5], ["sling", "finance/gc.run-operator", "fi-123", "--on", "complete-delivery"])
         for value in (
+            "artifact_root=plans/complete-delivery/fi-123",
+            "requirements_path=plans/complete-delivery/fi-123/delivery/requirements.md",
+            "plan_path=plans/complete-delivery/fi-123/delivery/implementation-plan.md",
+            "decomposition_path=plans/complete-delivery/fi-123/delivery/decomposition.md",
+            "final_report_path=plans/complete-delivery/fi-123/delivery/final-report.md",
             "source_bead_id=fi-123",
             "source_title=Requested delivery",
             "launcher_github_preflight=github-city-v1",

@@ -65,6 +65,10 @@ default = ""
 description = "Explicit path to the inherited build-artifact validator when it is not materialized beside the Complete Delivery checks."
 default = ""
 
+[vars.final_report_path]
+description = "Canonical pre-publication final report path under artifact_root/delivery."
+default = ""
+
 [vars.base_branch]
 description = "Pull-request target branch."
 default = "main"
