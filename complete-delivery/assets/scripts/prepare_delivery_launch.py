@@ -44,7 +44,15 @@ DELIVERY_CHECKS = (
     "delivery-source-artifact-valid.sh",
 )
 DELIVERY_SCRIPTS = ("delivery_gate.py", "delivery_report.py")
-GASCITY_CHECKS = ("build-artifact-valid.sh",)
+# Complete Delivery inherits gstack, whose review expansion controls execute
+# these shared Gas City checks inside the target rig.  Treat them as managed
+# runtime assets so a clean transitive import has the exact locked-pack bytes
+# before either expansion can run.
+GASCITY_CHECKS = (
+    "build-artifact-valid.sh",
+    "design-review-approved.sh",
+    "implementation-review-approved.sh",
+)
 GASCITY_SCRIPTS = ("validate_build_artifact.py",)
 GASCITY_SCHEMAS = (
     "decomposition.v1.yaml",

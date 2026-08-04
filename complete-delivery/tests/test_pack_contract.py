@@ -707,9 +707,21 @@ class CommandContractTests(unittest.TestCase):
             result.materialized = {
                 "delivery_preflight": (rig / ".gc/scripts/checks/delivery-preflight.sh").is_file(),
                 "build_artifact": (rig / ".gc/scripts/checks/build-artifact-valid.sh").is_file(),
+                "design_review": (rig / ".gc/scripts/checks/design-review-approved.sh").is_file(),
+                "implementation_review": (
+                    rig / ".gc/scripts/checks/implementation-review-approved.sh"
+                ).is_file(),
                 "validator": (rig / ".gc/scripts/validate_build_artifact.py").is_file(),
                 "schema": (rig / ".gc/schemas/build/requirements.v1.yaml").is_file(),
             }
+            result.materialized_review_checks = {}
+            for name in ("design-review-approved.sh", "implementation-review-approved.sh"):
+                path = rig / ".gc/scripts/checks" / name
+                if path.is_file():
+                    result.materialized_review_checks[name] = {
+                        "bytes": path.read_bytes(),
+                        "executable": bool(path.stat().st_mode & stat.S_IXUSR),
+                    }
             result.materialized_paths = sorted(
                 str(path.relative_to(rig))
                 for root in (rig / ".gc",)
@@ -749,6 +761,8 @@ class CommandContractTests(unittest.TestCase):
         self.assertEqual(result.materialized, {
             "delivery_preflight": True,
             "build_artifact": True,
+            "design_review": True,
+            "implementation_review": True,
             "validator": True,
             "schema": True,
         })
@@ -773,6 +787,8 @@ class CommandContractTests(unittest.TestCase):
             ".gc/scripts/checks/delivery-report-green.sh",
             ".gc/scripts/checks/delivery-report-valid.sh",
             ".gc/scripts/checks/delivery-source-artifact-valid.sh",
+            ".gc/scripts/checks/design-review-approved.sh",
+            ".gc/scripts/checks/implementation-review-approved.sh",
             ".gc/scripts/delivery_gate.py",
             ".gc/scripts/delivery_report.py",
             ".gc/scripts/validate_build_artifact.py",
@@ -791,6 +807,10 @@ class CommandContractTests(unittest.TestCase):
                 "api repos/example/repo/branches/main/protection --silent",
             ],
         )
+        for name, materialized in result.materialized_review_checks.items():
+            source = REPO_ROOT / "gascity/assets/scripts/checks" / name
+            self.assertEqual(materialized["bytes"], source.read_bytes())
+            self.assertTrue(materialized["executable"])
 
     def test_launch_refuses_a_foreign_managed_schema_destination(self) -> None:
         def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
@@ -803,6 +823,20 @@ class CommandContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(result.slinged)
         self.assertIn("not owned by Complete Delivery", result.stderr)
+
+    def test_launch_refuses_a_foreign_gstack_review_check_destination(self) -> None:
+        for name in ("design-review-approved.sh", "implementation-review-approved.sh"):
+            with self.subTest(name=name):
+                def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
+                    destination = rig / ".gc/scripts/checks" / name
+                    destination.parent.mkdir(parents=True)
+                    destination.write_text("foreign review check\n", encoding="utf-8")
+
+                result = self.run_command("fi-123", "--rig=finance", setup=setup)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(result.slinged)
+                self.assertIn("not owned by Complete Delivery", result.stderr)
 
     def test_launch_refuses_a_tracked_managed_destination_even_when_manifest_owned(self) -> None:
         def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
@@ -1233,13 +1267,20 @@ class MaterializationRecoveryTests(unittest.TestCase):
 
             installed = prepare_delivery.materialize_assets(PACK_ROOT, rig)
 
-            self.assertEqual(len(installed), 22)
+            self.assertEqual(len(installed), 24)
             self.assertFalse((rig / "schemas/build/requirements.v1.yaml").exists())
             manifest = json.loads(
                 (rig / ".gc" / prepare_delivery.MANIFEST_NAME).read_text(encoding="utf-8")
             )
             self.assertEqual(manifest["version"], prepare_delivery.MANIFEST_VERSION)
             self.assertEqual(set(manifest["asset_hashes"]), set(manifest["assets"]))
+            for name in ("design-review-approved.sh", "implementation-review-approved.sh"):
+                relative = f".gc/scripts/checks/{name}"
+                destination = rig / relative
+                source = REPO_ROOT / "gascity/assets/scripts/checks" / name
+                self.assertIn(relative, installed)
+                self.assertEqual(destination.read_bytes(), source.read_bytes())
+                self.assertEqual(stat.S_IMODE(destination.stat().st_mode), stat.S_IMODE(source.stat().st_mode))
 
             rejected_rig = self.make_rig(pathlib.Path(directory) / "rejected")
             self.install_real_v1_inventory(rejected_rig)
