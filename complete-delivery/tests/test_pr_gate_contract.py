@@ -515,7 +515,7 @@ class PrGateContractTests(unittest.TestCase):
             outer_formula = tomllib.load(formula_file)
         steps = {step["id"]: step for step in outer_formula["steps"]}
 
-        self.assertEqual(steps["report-green"]["needs"], ["external-review"])
+        self.assertEqual(steps["report-green"]["needs"], ["external-review-result"])
         self.assertEqual(
             steps["report-green"]["check"]["check"]["path"],
             ".gc/scripts/checks/delivery-report-green.sh",
