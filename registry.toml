@@ -295,3 +295,10 @@ schema = 1
     commit = "c8f8cf743eafd4f9c61a34fa5b62db7386474eaf"
     hash = "sha256:55a4519c84ac695273723305f4f72780f707b63fa6b08613e44b55148e8dbe95"
     description = "Bind canonical source-artifact paths before graph creation and surface exact validated retry failures to every build stage."
+
+  [[pack.release]]
+    version = "0.1.4"
+    ref = "main"
+    commit = "1b9a7ae110cf7251eb3da02bbb6e14929fddf03a"
+    hash = "sha256:af78d17d6054bfbf20ab6e2b01e713cf43c7795fbe2707665f561c869ec954af"
+    description = "Align the requirements prompt with the authoritative build-artifact schema and preserve nonblank canonical retry tasks through the exact installed compiler."
