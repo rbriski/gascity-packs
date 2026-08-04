@@ -428,6 +428,7 @@ class PrGateContractTests(unittest.TestCase):
         run_targets = {
             template["metadata"]["gc.run_target"]
             for template in self.formula["template"]
+            if "gc.run_target" in template["metadata"]
         }
         loop = self.templates["{target}.external-review-loop"]
         run_targets.update(

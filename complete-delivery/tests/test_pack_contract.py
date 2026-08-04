@@ -165,7 +165,8 @@ class FormulaContractTests(unittest.TestCase):
         for formula in (self.delivery, self.gate):
             with self.subTest(formula=formula["formula"]):
                 self.assertEqual(formula["requires"]["formula_compiler"], ">=2.0.0")
-                self.assertNotIn("contract", formula)
+        self.assertEqual(self.delivery["contract"], "graph.v2")
+        self.assertEqual(self.gate["contract"], "graph.v2")
 
     def test_preflight_blocks_requirements_and_reporting(self) -> None:
         self.assertEqual(self.steps["delivery-preflight"]["needs"], ["prepare"])
@@ -191,6 +192,79 @@ class FormulaContractTests(unittest.TestCase):
         for step, needs in expected_needs.items():
             with self.subTest(step=step):
                 self.assertEqual(self.steps[step]["needs"], needs)
+
+    def test_release_controls_abort_the_semantic_release_scope(self) -> None:
+        """A failed closed control must quarantine, never unlock, release work."""
+        self.assertEqual(self.delivery["contract"], "graph.v2")
+
+        release_steps = [
+            "finalize",
+            "publish",
+            "report-pull-request",
+            "external-review",
+            "report-green",
+            "merge",
+            "report-merged",
+            "deploy",
+            "verify-production",
+            "report-complete",
+        ]
+        scope = self.steps["release-body"]
+        self.assertEqual(scope["needs"], release_steps)
+        self.assertEqual(scope["metadata"], {
+            "gc.kind": "scope",
+            "gc.scope_name": "complete-delivery-release",
+            "gc.scope_role": "body",
+        })
+
+        # These cover the real failure modes that formerly advanced on
+        # status=closed alone: finalizer, publish Ralph, external-review setup
+        # or loop (reported through its expansion parent), and report-green.
+        # Graph v2's abort_scope turns each non-pass into an auditable failed
+        # scope and skips every later release action, including merge/deploy.
+        failure_paths = {
+            "finalize": ["publish", "merge", "deploy"],
+            "publish": ["report-pull-request", "merge", "deploy"],
+            "external-review": ["report-green", "merge", "deploy"],
+            "report-green": ["merge", "deploy"],
+        }
+        for failed_step, prohibited_after_failure in failure_paths.items():
+            with self.subTest(failed_step=failed_step):
+                metadata = self.steps[failed_step]["metadata"]
+                self.assertEqual(metadata["gc.scope_ref"], "release-body")
+                self.assertEqual(metadata["gc.scope_role"], "member")
+                self.assertEqual(metadata["gc.on_fail"], "abort_scope")
+                failed_index = release_steps.index(failed_step)
+                for prohibited_step in prohibited_after_failure:
+                    self.assertGreater(release_steps.index(prohibited_step), failed_index)
+
+        templates = {node["id"]: node for node in self.gate["template"]}
+        external_scope = templates["{target}.external-review-body"]
+        self.assertEqual(external_scope["needs"], [
+            "{target}.setup-external-review",
+            "{target}.external-review-loop",
+        ])
+        self.assertEqual(external_scope["metadata"], {
+            "gc.kind": "scope",
+            "gc.scope_name": "complete-delivery-external-review",
+            "gc.scope_role": "body",
+        })
+        for external_control in (
+            "{target}.setup-external-review",
+            "{target}.external-review-loop",
+        ):
+            metadata = templates[external_control]["metadata"]
+            self.assertEqual(metadata["gc.scope_ref"], "{target}.external-review-body")
+            self.assertEqual(metadata["gc.scope_role"], "member")
+            self.assertEqual(metadata["gc.on_fail"], "abort_scope")
+        self.assertEqual(
+            templates["{target}.setup-external-review"]["check"]["max_attempts"],
+            1,
+        )
+        self.assertEqual(
+            templates["{target}.external-review-loop"]["check"]["max_attempts"],
+            2,
+        )
 
     def test_external_review_loop_is_bounded_and_ordered(self) -> None:
         self.assertEqual(self.steps["external-review"]["expand"], "complete-delivery-pr-gate")

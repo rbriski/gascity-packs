@@ -7,6 +7,7 @@ and an HTML/CSS living report. One launch owns the entire lifecycle.
 """
 formula = "complete-delivery"
 version = 1
+contract = "graph.v2"
 extends = ["gstack-build"]
 target_required = true
 
@@ -176,6 +177,18 @@ default = ""
 description = "Optional command that publishes the generated report bundle."
 default = ""
 
+# The release path is a semantic fail-stop scope, not a status-only chain.
+# A terminal control that exhausts with `gc.outcome=fail` aborts this scope,
+# causing all remaining members to be skipped rather than released merely
+# because their dependency reached a closed status.  The scope itself records
+# the durable quarantined outcome for recovery and audit.
+[[steps]]
+id = "release-body"
+title = "Complete Delivery release safety scope"
+needs = ["finalize", "publish", "report-pull-request", "external-review", "report-green", "merge", "report-merged", "deploy", "verify-production", "report-complete"]
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "complete-delivery-release", "gc.scope_role" = "body" }
+description_file = "../assets/workflows/complete-delivery/release-body.md"
+
 [[steps]]
 id = "delivery-preflight"
 title = "Validate the repository delivery profile"
@@ -292,7 +305,7 @@ description_file = "../assets/workflows/complete-delivery/release-readiness.md"
 id = "finalize"
 title = "Finalize the pre-publication delivery record"
 needs = ["release-readiness"]
-metadata = { "gc.run_target" = "gstack.release-engineer", "gc.build.artifact_schema" = "gc.build.final-report.v1", "gc.build.artifact_path_keys" = "gc.build.final_report_path,gc.var.final_report_path" }
+metadata = { "gc.run_target" = "gstack.release-engineer", "gc.build.artifact_schema" = "gc.build.final-report.v1", "gc.build.artifact_path_keys" = "gc.build.final_report_path,gc.var.final_report_path", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery/finalize.md"
 
 [steps.check]
@@ -307,7 +320,7 @@ timeout = "5m"
 id = "publish"
 title = "Publish the branch and open the pull request"
 needs = ["finalize"]
-metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery/publish.md"
 
 [steps.check]
@@ -322,14 +335,14 @@ timeout = "10m"
 id = "report-pull-request"
 title = "Report pull-request publication"
 needs = ["publish"]
-metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+metadata = { "gc.run_target" = "complete-delivery.report-editor", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery/report-pull-request.md"
 
 [[steps]]
 id = "external-review"
 title = "Reconcile current-head gates and review findings"
 needs = ["report-pull-request"]
-metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 expand = "complete-delivery-pr-gate"
 description_file = "../assets/workflows/complete-delivery/external-review.md"
 
@@ -337,7 +350,7 @@ description_file = "../assets/workflows/complete-delivery/external-review.md"
 id = "report-green"
 title = "Report the green external gate"
 needs = ["external-review"]
-metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+metadata = { "gc.run_target" = "complete-delivery.report-editor", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery/report-green.md"
 
 [steps.check]
@@ -352,7 +365,7 @@ timeout = "1m"
 id = "merge"
 title = "Merge without bypassing protection"
 needs = ["report-green"]
-metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery/merge.md"
 
 [steps.check]
@@ -367,14 +380,14 @@ timeout = "15m"
 id = "report-merged"
 title = "Report the verified merge"
 needs = ["merge"]
-metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+metadata = { "gc.run_target" = "complete-delivery.report-editor", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery/report-merged.md"
 
 [[steps]]
 id = "deploy"
 title = "Deploy the exact merge SHA"
 needs = ["report-merged"]
-metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery/deploy.md"
 
 [steps.check]
@@ -389,7 +402,7 @@ timeout = "65m"
 id = "verify-production"
 title = "Verify production and exact-SHA attestation"
 needs = ["deploy"]
-metadata = { "gc.run_target" = "complete-delivery.delivery-engineer" }
+metadata = { "gc.run_target" = "complete-delivery.delivery-engineer", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery/verify-production.md"
 
 [steps.check]
@@ -404,7 +417,7 @@ timeout = "125m"
 id = "report-complete"
 title = "Publish the final living report"
 needs = ["verify-production"]
-metadata = { "gc.run_target" = "complete-delivery.report-editor" }
+metadata = { "gc.run_target" = "complete-delivery.report-editor", "gc.scope_ref" = "release-body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 description_file = "../assets/workflows/complete-delivery/report-complete.md"
 
 [steps.check]
