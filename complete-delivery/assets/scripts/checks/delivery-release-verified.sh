@@ -900,6 +900,19 @@ case "$DEPLOY_MODE" in
 esac
 
 STEP_REF="$(delivery_metadata_value "$DELIVERY_STEP_JSON" "gc.step_ref")"
+# Ralph retries carry a generated `.iteration.N` reference. The shared
+# context initializer accepts an empty-description retry only after validating
+# its exact control bead, root, step, run target, title, attempt number, and
+# idempotency key. Normalize only that already-validated lineage back to the
+# logical lifecycle reference consumed by this shared deploy/verify checker.
+if [ "$DELIVERY_LOGICAL_BEAD_ID" != "$DELIVERY_BEAD_ID" ]; then
+  LOGICAL_STEP_REF="$(delivery_metadata_value "${DELIVERY_CONTROL_JSON:-[]}" "gc.step_ref")"
+  case "$LOGICAL_STEP_REF" in
+    complete-delivery.deploy|complete-delivery.verify-production)
+      STEP_REF="$LOGICAL_STEP_REF"
+      ;;
+  esac
+fi
 delivery_validate_not_applicable_evidence() {
   delivery_command_is_nonblank "$NA_REASON" || \
     delivery_fail "not-applicable deployment requires a nonblank deploy_not_applicable_reason"

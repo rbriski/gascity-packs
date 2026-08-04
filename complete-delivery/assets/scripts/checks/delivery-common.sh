@@ -20,7 +20,14 @@ if isinstance(value, list):
     value = value[0] if value else {}
 metadata = value.get("metadata") if isinstance(value, dict) else {}
 result = metadata.get(key, "") if isinstance(metadata, dict) else ""
-print(result if isinstance(result, str) else "")
+if isinstance(result, str):
+    print(result)
+elif isinstance(result, bool):
+    print("true" if result else "false")
+elif isinstance(result, (int, float)):
+    print(result)
+else:
+    print("")
 ' "$2"
 }
 
