@@ -102,6 +102,7 @@ import datetime as dt
 import json
 import os
 import sys
+import uuid
 
 path, root_id, started_text, deadline_text = sys.argv[1:]
 try:
@@ -118,20 +119,29 @@ record = {
     "deadline": deadline.strftime("%Y-%m-%dT%H:%M:%SZ"),
 }
 try:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-except FileExistsError:
-    raise SystemExit(3)
-try:
+    directory_path = os.path.dirname(path)
+    temporary_path = os.path.join(
+        directory_path, f".{os.path.basename(path)}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    descriptor = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         json.dump(record, handle, separators=(",", ":"), sort_keys=True)
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
-finally:
-    # fdopen closes on normal and exceptional exits after assignment.
-    pass
-try:
-    directory = os.open(os.path.dirname(path), os.O_DIRECTORY)
+    # link(2) is an atomic no-replace publication primitive: readers can only
+    # observe the fully fsynced temporary inode, while a competing creator gets
+    # FileExistsError without overwriting the first record.
+    try:
+        os.link(temporary_path, path)
+    except FileExistsError:
+        raise SystemExit(3)
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+    directory = os.open(directory_path, os.O_DIRECTORY)
     try:
         os.fsync(directory)
     finally:
@@ -262,6 +272,19 @@ PY
 fi
 
 delivery_load_record_pair || delivery_fail "external-review deadline record is missing or invalid"
+if [ -n "$DEADLINE" ]; then
+  final_read_timeout="$(delivery_deadline_io_timeout)" || \
+    delivery_fail "external-review deadline has expired before final metadata validation"
+else
+  # A missing root value must still receive a bounded final read so the gate
+  # can report the durable-state error rather than deriving a timeout from an
+  # absent deadline.
+  final_read_timeout="$DEADLINE_IO_TIMEOUT"
+fi
+delivery_refresh_root_metadata "$final_read_timeout"
+if { [ -n "$STARTED_AT" ] && [ -z "$DEADLINE" ]; } || { [ -z "$STARTED_AT" ] && [ -n "$DEADLINE" ]; }; then
+  delivery_fail "external-review deadline metadata is partially missing"
+fi
 delivery_validate_deadline_pair "$STARTED_AT" "$DEADLINE" || \
   delivery_fail "external-review deadline is missing, malformed, moved, or expired"
 if [ "$STARTED_AT" != "$RECORD_STARTED_AT" ] || [ "$DEADLINE" != "$RECORD_DEADLINE" ]; then
