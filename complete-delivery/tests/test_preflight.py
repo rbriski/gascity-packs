@@ -709,6 +709,173 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(ambiguous.returncode, 1)
         self.assertIn("ambiguous or invalid logical lineage", ambiguous.stderr)
 
+    def test_release_checker_normalizes_only_validated_retry_step_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            artifact_delivery = repository / "artifacts" / "delivery"
+            artifact_delivery.mkdir(parents=True)
+            evidence = artifact_delivery / "deploy.log"
+            evidence.write_text("operator-supplied evidence\n", encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gc = bin_dir / "gc"
+            gc.write_text(
+                "#!/bin/sh\n"
+                "case \"${3:-}\" in\n"
+                "  root-1) printf '%s\\n' \"$FAKE_GC_ROOT_JSON\" ;;\n"
+                "  control-deploy) printf '%s\\n' \"$FAKE_GC_CONTROL_JSON\" ;;\n"
+                "  *) printf '%s\\n' \"$FAKE_GC_STEP_JSON\" ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            root_metadata = {
+                "delivery.merge_sha": "a" * 40,
+                "gc.var.deploy_mode": "not-applicable",
+                "gc.var.deploy_not_applicable_reason": "No deployable service changed",
+                "gc.var.artifact_root": "artifacts",
+                "delivery.deploy_evidence_path": str(evidence),
+            }
+            control = {
+                "id": "control-deploy",
+                "title": "Deploy the verified release",
+                "description": "Deploy the verified release through the configured channel.",
+                "metadata": {
+                    "gc.root_bead_id": "root-1",
+                    "gc.step_id": "deploy",
+                    "gc.step_ref": "complete-delivery.deploy",
+                    "gc.run_target": "complete-delivery.delivery-engineer",
+                },
+            }
+            attempt = {
+                "id": "retry-deploy",
+                "title": control["title"],
+                "description": "",
+                "metadata": {
+                    "gc.root_bead_id": "root-1",
+                    "gc.control_for": "control-deploy",
+                    "gc.step_id": "deploy",
+                    "gc.step_ref": "complete-delivery.deploy.iteration.1",
+                    "gc.attempt": "1",
+                    "gc.idempotency_key": "control-deploy:attempt:1",
+                    "gc.run_target": "complete-delivery.delivery-engineer",
+                },
+            }
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GC_BEAD_ID": attempt["id"],
+                    "GC_WORK_DIR": str(repository),
+                    "FAKE_GC_ROOT_JSON": json.dumps([{"metadata": root_metadata}]),
+                    "FAKE_GC_CONTROL_JSON": json.dumps([control]),
+                    "FAKE_GC_STEP_JSON": json.dumps([attempt]),
+                    "PATH": f"{bin_dir}:{environment['PATH']}",
+                }
+            )
+
+            valid = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            self.assertIn("requires agent-provided evidence", valid.stdout)
+
+            invalid_attempt = {
+                **attempt,
+                "metadata": {
+                    **attempt["metadata"],
+                    "gc.idempotency_key": "control-deploy:attempt:2",
+                },
+            }
+            environment["FAKE_GC_STEP_JSON"] = json.dumps([invalid_attempt])
+            invalid = subprocess.run(
+                ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(invalid.returncode, 1)
+            self.assertIn("ambiguous or invalid logical lineage", invalid.stderr)
+
+    def test_release_checker_reads_numeric_command_status_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            repository = root / "repo"
+            repository.mkdir()
+            merge_sha = "a" * 40
+            deploy_metadata, verify_evidence = command_deploy_fixture(repository, merge_sha)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gc = bin_dir / "gc"
+            gc.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${3:-}\" = root-1 ]; then\n"
+                "  printf '%s\\n' \"$FAKE_GC_ROOT_JSON\"\n"
+                "else\n"
+                "  printf '%s\\n' \"$FAKE_GC_STEP_JSON\"\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            base_metadata = {
+                **deploy_metadata,
+                "delivery.merge_sha": merge_sha,
+                "delivery.repo": "example/repo",
+                "delivery.pr_number": "123",
+                "gc.var.deploy_verify_command": "/bin/true",
+                "gc.var.allow_no_smoke": "true",
+                "gc.var.no_smoke_reason": "No production endpoint is exposed",
+                "delivery.no_smoke_reason": "No production endpoint is exposed",
+            }
+            step_json = json.dumps([{"metadata": {
+                "gc.root_bead_id": "root-1",
+                "gc.step_ref": "complete-delivery.verify-production",
+            }}])
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GC_BEAD_ID": "verify-step",
+                    "GC_WORK_DIR": str(repository),
+                    "FAKE_GC_STEP_JSON": step_json,
+                    "PATH": f"{bin_dir}:{environment['PATH']}",
+                }
+            )
+
+            for field in ("delivery.deploy_child_status", "delivery.deploy_wrapper_status"):
+                with self.subTest(numeric_zero_field=field):
+                    verify_evidence.write_text("verified\n", encoding="utf-8")
+                    environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
+                        **base_metadata,
+                        field: 0,
+                    }}])
+                    passed = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(passed.returncode, 0, passed.stderr)
+
+            for field in ("delivery.deploy_child_status", "delivery.deploy_wrapper_status"):
+                with self.subTest(numeric_nonzero_field=field):
+                    verify_evidence.write_text("verified\n", encoding="utf-8")
+                    environment["FAKE_GC_ROOT_JSON"] = json.dumps([{"metadata": {
+                        **base_metadata,
+                        field: 1,
+                    }}])
+                    failed = subprocess.run(
+                        ["bash", str(RELEASE_VERIFIED_SCRIPT)],
+                        capture_output=True,
+                        text=True,
+                        env=environment,
+                    )
+                    self.assertEqual(failed.returncode, 1)
+                    self.assertIn("deploy evidence", failed.stderr)
+
     def test_release_verification_requires_metadata_before_running_commands(self) -> None:
         for missing_key in ("delivery.repo", "delivery.pr_number"):
             with self.subTest(missing_key=missing_key), tempfile.TemporaryDirectory() as directory:
