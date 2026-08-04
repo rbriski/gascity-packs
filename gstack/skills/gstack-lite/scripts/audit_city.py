@@ -12,7 +12,6 @@ import tomllib
 
 STALE_SKILL_NAME = "complete-delivery.complete-delivery"
 REQUIRED_PROVIDERS = {
-    "sol-control",
     "sol-fast",
     "luna-economy",
     "claude-careful",
@@ -66,8 +65,14 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
     if not city_toml_path.is_file() or not pack_toml_path.is_file():
         return [f"{city} is not a Gas City root with city.toml and pack.toml"], notes
 
-    city_toml = load_toml(city_toml_path)
-    pack_toml = load_toml(pack_toml_path)
+    try:
+        city_toml = load_toml(city_toml_path)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return [f"cannot read {city_toml_path}: {exc}"], notes
+    try:
+        pack_toml = load_toml(pack_toml_path)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return [f"cannot read {pack_toml_path}: {exc}"], notes
 
     imports = pack_toml.get("imports", {})
     if "gstack" not in imports:
@@ -92,7 +97,15 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
         errors.append("future rigs must inherit the gc roles import")
 
     rigs = city_toml.get("rigs", [])
-    missing_gc = sorted(rig.get("name", "<unnamed>") for rig in rigs if "gc" not in rig.get("imports", {}))
+    invalid_rigs = [rig for rig in rigs if not isinstance(rig, dict)] if isinstance(rigs, list) else [rigs]
+    if invalid_rigs:
+        errors.append("city.toml rigs must be an array of tables")
+        rigs = []
+    missing_gc = sorted(
+        rig.get("name", "<unnamed>")
+        for rig in rigs
+        if "gc" not in rig.get("imports", {})
+    )
     if missing_gc:
         errors.append(f"current rigs missing explicit gc roles import: {', '.join(missing_gc)}")
 
@@ -110,8 +123,20 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
     stale = stale_skill_links(city)
     if stale and fix_stale_skills:
         for path in stale:
-            path.unlink()
-            notes.append(f"removed stale skill symlink: {path}")
+            try:
+                if not path.is_symlink() or (
+                    "/complete-delivery/skills/complete-delivery"
+                    not in os.readlink(path)
+                ):
+                    notes.append(f"skipped changed skill projection: {path}")
+                    continue
+                path.unlink()
+            except FileNotFoundError:
+                notes.append(f"stale skill symlink already absent: {path}")
+            except OSError as exc:
+                errors.append(f"could not remove stale skill symlink {path}: {exc}")
+            else:
+                notes.append(f"removed stale skill symlink: {path}")
         stale = stale_skill_links(city)
     if stale:
         errors.append(f"{len(stale)} stale Complete Delivery skill symlink(s) remain")

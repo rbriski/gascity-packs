@@ -51,9 +51,10 @@ checks plus read-only routing canaries.
   skill policy from large GraphV2 workflows.
 - Deprecate `complete-delivery` in its README, skill metadata/body, root pack
   index, and registry description while preserving immutable releases.
-- Add `gascity/assets/scripts/checks/gstack-lite-city.py` with read-only audit
-  and an exact-symlink cleanup option. It must never delete caches, evidence, or
-  non-symlink files.
+- Add `gstack/skills/gstack-lite/scripts/audit_city.py` with read-only audit and
+  an exact-symlink cleanup option. Keeping it inside the skill makes the audit
+  available in every projected skill directory. It must never delete caches,
+  evidence, or non-symlink files.
 - Add focused tests for the skill, policy fragment, deprecation contract, and
   audit script.
 
