@@ -3519,6 +3519,7 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(steps["verify-production"]["check"]["max_attempts"], 4)
 
         self.assertEqual(formula["vars"]["deploy_timeout"]["default"], "5m")
+        self.assertEqual(formula["vars"]["final_report_path"]["default"], "")
         self.assertEqual(formula["vars"]["deploy_ci_workflow"]["default"], "")
         self.assertEqual(formula["vars"]["deploy_environment"]["default"], "")
         self.assertEqual(formula["vars"]["coderabbit"]["default"], "off")
