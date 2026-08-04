@@ -281,3 +281,10 @@ schema = 1
     commit = "4726fe4cde1b8bb72a34a29c35db21158290a019"
     hash = "sha256:552be10d362bbeab2d6089c48bc1c3be886f9334b39ff9134a68502a0af28b93"
     description = "Repair release with fail-closed scope propagation, immutable review deadlines, complete runtime assets, validated retry metadata, and recoverable authenticated publication."
+
+  [[pack.release]]
+    version = "0.1.2"
+    ref = "main"
+    commit = "2eb74e08bcb6388f0fcaa701bef53091c946117a"
+    hash = "sha256:0962a6a8aa15ce3f2ac375a3cc3821901b925a05feb84c3aa79ef1d6c5198632"
+    description = "Controller-bound launch and deterministic retry-context release with exact cache integrity and complete generated review assets."
