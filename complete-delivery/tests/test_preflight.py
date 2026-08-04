@@ -2437,6 +2437,19 @@ class PreflightTests(unittest.TestCase):
                     now + timedelta(hours=1)
                 ).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
+            deadline_record = root / ".gc" / "external-review-deadline-root-1.json"
+            deadline_record.parent.mkdir()
+            deadline_record.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "root_id": "root-1",
+                        "started_at": metadata["delivery.external_review_started_at"],
+                        "deadline": metadata["delivery.external_review_deadline"],
+                    }
+                ),
+                encoding="utf-8",
+            )
             gate_path = delivery_directory / "pr-gate.json"
             gc = bin_dir / "gc"
             gc.write_text(
@@ -2593,6 +2606,25 @@ class PreflightTests(unittest.TestCase):
                     case_delivery_directory.mkdir()
                     case_state = case_report_directory / "state.json"
                     case_gate = case_delivery_directory / "pr-gate.json"
+                    case_deadline_record = (
+                        case_root / ".gc" / "external-review-deadline-root-1.json"
+                    )
+                    case_deadline_record.parent.mkdir()
+                    case_deadline_record.write_text(
+                        json.dumps(
+                            {
+                                "version": 1,
+                                "root_id": "root-1",
+                                "started_at": metadata[
+                                    "delivery.external_review_started_at"
+                                ],
+                                "deadline": metadata[
+                                    "delivery.external_review_deadline"
+                                ],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
                     case_state.write_text(
                         json.dumps({
                             **passed_state,

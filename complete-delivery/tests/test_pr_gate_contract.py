@@ -259,7 +259,7 @@ class PrGateContractTests(unittest.TestCase):
     def test_deadline_validation_ignores_large_production_history_projection(self) -> None:
         initialized, state, record = self.run_deadline({}, "--initialize")
         self.assertEqual(initialized.returncode, 0, initialized.stderr)
-        # Production `bd history --json` projects core Issue fields without
+        # The production history projection exposes core Issue fields without
         # metadata.  More importantly, a real root can be hundreds of KiB, so
         # this guard must neither inspect it nor marshal it through argv.
         production_history = [
