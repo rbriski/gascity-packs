@@ -51,6 +51,8 @@ DELIVERY_SCRIPTS = ("delivery_gate.py", "delivery_report.py")
 GASCITY_CHECKS = (
     "build-artifact-valid.sh",
     "design-review-approved.sh",
+    "gstack-plan-review-approved.sh",
+    "gstack-plan-review-context-valid.py",
     "implementation-review-approved.sh",
 )
 GASCITY_SCRIPTS = ("validate_build_artifact.py",)
@@ -94,6 +96,7 @@ LEGACY_V1_ASSET_HASHES = {
     "schemas/build/review.v1.yaml": "sha256:4e9773e44a271204b743d429d0751e3c71a32bb66597c47da0c9c34edc5ac454",
 }
 GC_CONFIG_TIMEOUT_SECONDS = 15
+GC_IMPORT_TIMEOUT_SECONDS = 120
 MAX_DURATION_SECONDS = Decimal(3600)
 DURATION = re.compile(r"([0-9]+(?:\.[0-9]+)?|\.[0-9]+)([smhd]?)")
 CI_WORKFLOW = re.compile(r"\.github/workflows/[A-Za-z0-9_./-]+\.ya?ml")
@@ -104,6 +107,8 @@ GITHUB_CREDENTIAL_ENVIRONMENT = (
     "GH_ENTERPRISE_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
 )
+COMPLETE_DELIVERY_IMPORT = "pack:complete-delivery"
+GIT_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -140,6 +145,24 @@ def gc_config_timeout_seconds() -> float:
     if not 0 < timeout <= 60:
         raise LaunchPreflightError(
             "GC_COMPLETE_DELIVERY_CONFIG_TIMEOUT_SECONDS must be greater than zero and at most 60"
+        )
+    return timeout
+
+
+def gc_import_timeout_seconds() -> float:
+    value = os.environ.get(
+        "GC_COMPLETE_DELIVERY_IMPORT_TIMEOUT_SECONDS",
+        str(GC_IMPORT_TIMEOUT_SECONDS),
+    )
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise LaunchPreflightError(
+            "GC_COMPLETE_DELIVERY_IMPORT_TIMEOUT_SECONDS must be numeric"
+        ) from exc
+    if not 0 < timeout <= 600:
+        raise LaunchPreflightError(
+            "GC_COMPLETE_DELIVERY_IMPORT_TIMEOUT_SECONDS must be greater than zero and at most 600"
         )
     return timeout
 
@@ -699,16 +722,202 @@ def establish_city_github_capability(
 
 
 def sanitized_city_github_environment(city_path: Path) -> dict[str, str]:
-    """Return the credential shape used by controller workers and exec checks."""
+    """Return the sanitized environment used by controller Formula tasks."""
 
     environment = os.environ.copy()
     environment["HOME"] = str(city_path)
+    # ConditionEnv deliberately selects the city-local import cache.  Do not
+    # accidentally prove resolution against a caller's global cache instead.
+    environment.pop("GC_HOME", None)
+    environment.pop("GC_PACK_DIR", None)
     for name in tuple(environment):
         if name.startswith(("GH_", "GITHUB_", "XDG_")):
             environment.pop(name)
     for name in GITHUB_CREDENTIAL_ENVIRONMENT:
         environment.pop(name, None)
     return environment
+
+
+def run_controller_gc(
+    arguments: list[str],
+    *,
+    environment: dict[str, str],
+    purpose: str,
+    timeout_seconds: float | None = None,
+) -> str:
+    """Run one bounded controller-environment command without leaking output."""
+
+    timeout_seconds = timeout_seconds or gc_config_timeout_seconds()
+    try:
+        result = subprocess.run(
+            ["gc", *arguments],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+            env=environment,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise LaunchPreflightError(
+            f"{purpose} timed out after {timeout_seconds:g}s"
+        ) from exc
+    except OSError as exc:
+        raise LaunchPreflightError(f"could not execute {purpose}: {exc}") from exc
+    if result.returncode:
+        # Import tooling can include remote URLs or credential-helper details
+        # in diagnostics.  The bounded command status is sufficient here.
+        raise LaunchPreflightError(f"{purpose} failed with status {result.returncode}")
+    return result.stdout
+
+
+def exact_clean_pack_revision(
+    root: Path, *, environment: dict[str, str], purpose: str
+) -> str:
+    """Return a clean tracked Git revision for one resolved pack checkout."""
+
+    timeout_seconds = gc_config_timeout_seconds()
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+            env=environment,
+        )
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LaunchPreflightError(f"{purpose} has no readable exact revision") from exc
+    if status.returncode or status.stdout.strip():
+        raise LaunchPreflightError(f"{purpose} has modified tracked content")
+    commit = revision.stdout.strip()
+    if revision.returncode or not GIT_COMMIT.fullmatch(commit):
+        raise LaunchPreflightError(f"{purpose} has no readable exact revision")
+    return commit
+
+
+def controller_complete_delivery_pin(environment: dict[str, str]) -> str:
+    """Return the one exact Complete Delivery commit locked by this city."""
+
+    output = run_controller_gc(
+        ["import", "status", "--json"],
+        environment=environment,
+        purpose="controller import-status check",
+    )
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise LaunchPreflightError("controller import-status check returned malformed JSON") from exc
+    imports = payload.get("imports") if isinstance(payload, dict) else None
+    if not isinstance(imports, list):
+        raise LaunchPreflightError("controller import-status check returned no import list")
+    matches = [
+        item
+        for item in imports
+        if isinstance(item, dict) and item.get("name") == COMPLETE_DELIVERY_IMPORT
+    ]
+    if len(matches) != 1:
+        raise LaunchPreflightError(
+            "controller must resolve exactly one locked Complete Delivery import"
+        )
+    pin = matches[0].get("pin")
+    if not isinstance(pin, dict):
+        raise LaunchPreflightError("controller Complete Delivery import has no exact pin")
+    commit = pin.get("commit")
+    version = pin.get("version")
+    constraint = matches[0].get("constraint")
+    if (
+        not isinstance(commit, str)
+        or not GIT_COMMIT.fullmatch(commit)
+        or version != f"sha:{commit}"
+        or constraint != f"sha:{commit}"
+    ):
+        raise LaunchPreflightError("controller Complete Delivery import pin is invalid")
+    return commit
+
+
+def controller_formula_pack_root(
+    rig_name: str, *, environment: dict[str, str], expected_commit: str
+) -> Path:
+    """Resolve the exact Complete Delivery formula root used by controller tasks."""
+
+    output = run_controller_gc(
+        ["formula", "show", "complete-delivery", "--rig", rig_name, "--json"],
+        environment=environment,
+        purpose="controller Complete Delivery formula-resolution check",
+    )
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise LaunchPreflightError(
+            "controller Complete Delivery formula-resolution check returned malformed JSON"
+        ) from exc
+    search_paths = payload.get("search_paths") if isinstance(payload, dict) else None
+    if not isinstance(search_paths, list):
+        raise LaunchPreflightError(
+            "controller Complete Delivery formula-resolution check returned no search paths"
+        )
+    candidates: list[Path] = []
+    for raw_path in search_paths:
+        if not isinstance(raw_path, str) or has_control_characters(raw_path):
+            continue
+        path = Path(raw_path)
+        if path.name != "formulas" or path.parent.name != "complete-delivery":
+            continue
+        try:
+            root = path.parent.resolve(strict=True)
+        except OSError:
+            continue
+        if (root / "formulas" / "complete-delivery.formula.toml").is_file():
+            candidates.append(root)
+    unique_candidates = list(dict.fromkeys(candidates))
+    if len(unique_candidates) != 1:
+        raise LaunchPreflightError(
+            "controller Complete Delivery formula must resolve from exactly one pack root"
+        )
+    root = unique_candidates[0]
+    actual_commit = exact_clean_pack_revision(
+        root,
+        environment=environment,
+        purpose="controller Complete Delivery pack",
+    )
+    if actual_commit != expected_commit:
+        raise LaunchPreflightError(
+            "controller Complete Delivery formula does not resolve from the exact locked revision"
+        )
+    return root
+
+
+def resolve_controller_complete_delivery_pack(city_path: Path, rig_name: str) -> Path:
+    """Install and prove the pack source that Formula tasks will actually use."""
+
+    environment = sanitized_city_github_environment(city_path)
+    # This is the cache selected by Formula ConditionEnv, not the caller's
+    # ambient GC_HOME.  Install is idempotent and uses the city's lockfile.
+    run_controller_gc(
+        ["import", "install"],
+        environment=environment,
+        purpose="controller import installation",
+        timeout_seconds=gc_import_timeout_seconds(),
+    )
+    run_controller_gc(
+        ["import", "check"],
+        environment=environment,
+        purpose="controller import integrity check",
+    )
+    expected_commit = controller_complete_delivery_pin(environment)
+    return controller_formula_pack_root(
+        rig_name, environment=environment, expected_commit=expected_commit
+    )
 
 
 def materialization_plan(pack_root: Path, rig_root: Path) -> list[tuple[Path, Path, str]]:
@@ -1182,10 +1391,16 @@ def main(argv: list[str] | None = None) -> int:
             joined = "\n  - ".join(errors)
             raise LaunchPreflightError(f"Complete Delivery profile is invalid:\n  - {joined}")
 
-        # Resolve all caller-controlled paths and the complete asset source
-        # inventory before establishing a shared controller capability.
+        # Resolve all caller-controlled paths before establishing a shared
+        # controller capability or creating any workflow graph.
         validate_artifact_root(rig_root, args.artifact_root)
-        materialization_plan(pack_root, rig_root)
+        # Formula tasks do not inherit the caller's GC_HOME.  Materialize from
+        # the exact city-local pack root that their sanitized ConditionEnv will
+        # resolve, so both the formula and every generated check use one pin.
+        controller_pack_root = resolve_controller_complete_delivery_pack(
+            city_path, args.rig
+        )
+        materialization_plan(controller_pack_root, rig_root)
 
         # First prove the launcher's currently selected credential store. Then
         # expose that exact directory through the canonical city HOME and repeat
@@ -1202,7 +1417,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Target-rig writes remain transactional and begin only after the
         # sanitized controller capability has been independently revalidated.
-        installed = materialize_assets(pack_root, rig_root)
+        installed = materialize_assets(controller_pack_root, rig_root)
     except LaunchPreflightError as exc:
         print(f"gc complete-delivery delivery start: {exc}", file=sys.stderr)
         return 1
@@ -1213,6 +1428,7 @@ def main(argv: list[str] | None = None) -> int:
         f"complete-delivery launch preflight passed: materialized {len(installed)} managed asset(s)",
         file=sys.stderr,
     )
+    print(city_path)
     return 0
 
 

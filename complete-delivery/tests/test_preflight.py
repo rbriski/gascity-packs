@@ -763,11 +763,37 @@ class PreflightTests(unittest.TestCase):
                     ]
                 },
             }
+            controller_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=PACK_ROOT,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            controller_import_status = {
+                "imports": [
+                    {
+                        "name": "pack:complete-delivery",
+                        "constraint": f"sha:{controller_commit}",
+                        "pin": {
+                            "commit": controller_commit,
+                            "version": f"sha:{controller_commit}",
+                        },
+                    }
+                ]
+            }
+            controller_formula = {
+                "search_paths": [str(PACK_ROOT / "formulas")],
+            }
             gc = bin_dir / "gc"
             gc.write_text(
                 "#!/bin/sh\n"
                 "if [ \"${1:-}\" = config ] && [ \"${2:-}\" = show ]; then printf '%s\\n' \"$FAKE_CONFIG_JSON\"; exit 0; fi\n"
                 "if [ \"${1:-}\" = bd ] && [ \"${2:-}\" = update ]; then exit 0; fi\n"
+                "if [ \"${1:-}\" = import ] && [ \"${2:-}\" = install ]; then exit 0; fi\n"
+                "if [ \"${1:-}\" = import ] && [ \"${2:-}\" = check ]; then exit 0; fi\n"
+                "if [ \"${1:-}\" = import ] && [ \"${2:-}\" = status ]; then printf '%s\\n' \"$FAKE_CONTROLLER_IMPORT_STATUS\"; exit 0; fi\n"
+                "if [ \"${1:-}\" = formula ] && [ \"${2:-}\" = show ]; then printf '%s\\n' \"$FAKE_CONTROLLER_FORMULA\"; exit 0; fi\n"
                 "case \"${3:-}\" in\n"
                 "  fi-123) printf '%s\\n' \"$FAKE_SOURCE_JSON\" ;;\n"
                 "  fi-7v8sz) printf '%s\\n' \"$FAKE_CONTROL_JSON\" ;;\n"
@@ -806,6 +832,8 @@ class PreflightTests(unittest.TestCase):
                 "PATH": f"{bin_dir}:/usr/bin:/bin",
                 "FAKE_GH_CALLS": str(root / "gh-calls"),
                 "FAKE_CONFIG_JSON": json.dumps(config),
+                "FAKE_CONTROLLER_IMPORT_STATUS": json.dumps(controller_import_status),
+                "FAKE_CONTROLLER_FORMULA": json.dumps(controller_formula),
                 "FAKE_SOURCE_JSON": json.dumps([{"title": "Requested delivery"}]),
                 "FAKE_ROOT_JSON": json.dumps([{"id": "fi-e5t6l", "metadata": root_metadata}]),
                 "FAKE_CONTROL_JSON": json.dumps([control]),
