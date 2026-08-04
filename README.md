@@ -199,13 +199,14 @@ rationale.
 
 ### Delivery lifecycle packs
 
-- [complete-delivery](./complete-delivery) imports `gstack` and owns the
-  terminal path from preflighted intent through planning, implementation,
-  exact local gates, authoritative internal review, bounded current-head CI
-  reconciliation, protected merge, deployment, production revision
-  attestation, and a milestone-driven owner report. Repository-specific
-  commands live once in rig `formula_vars`; the normal launch is one command.
-  CodeRabbit is optional and off by default.
+- **Current default — Gstack Lite:** import [gstack](./gstack) for focused
+  skills and `gascity/roles` for the small execution roles. Use one bead, one
+  owner, deterministic checks, one independent review, bounded repair, and the
+  repository's normal protected publish/deploy/smoke path. It is a policy and
+  skill, not another mandatory graph.
+- **Archived — [complete-delivery](./complete-delivery):** retained for audit
+  and regression evidence only after its production-shaped control-plane
+  canary failed. Do not install or route ordinary work through it.
 
 ### Contributor workflow packs
 
