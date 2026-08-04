@@ -11,7 +11,14 @@ import tomllib
 
 
 STALE_SKILL_NAME = "complete-delivery.complete-delivery"
-REQUIRED_PROVIDERS = {"sol-fast", "luna-economy", "claude-review", "sol-rescue"}
+REQUIRED_PROVIDERS = {
+    "sol-control",
+    "sol-fast",
+    "luna-economy",
+    "claude-careful",
+    "claude-review",
+    "sol-rescue",
+}
 
 
 def load_toml(path: Path) -> dict:

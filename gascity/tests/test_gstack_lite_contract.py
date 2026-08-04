@@ -64,8 +64,12 @@ append_fragments = ["gstack-lite-policy"]
 
 [providers.sol-fast]
 base = "builtin:codex"
+[providers.sol-control]
+base = "builtin:codex"
 [providers.luna-economy]
 base = "builtin:codex"
+[providers.claude-careful]
+base = "builtin:claude"
 [providers.claude-review]
 base = "builtin:claude"
 [providers.sol-rescue]
@@ -92,6 +96,16 @@ source = "gc"
             stale.symlink_to("/cache/complete-delivery/skills/complete-delivery")
             unrelated = skill_dir / "keep-me"
             unrelated.symlink_to("/cache/gstack/skills/review")
+            same_name_unrelated_target = (
+                city / ".agents/skills/complete-delivery.complete-delivery"
+            )
+            same_name_unrelated_target.parent.mkdir(parents=True)
+            same_name_unrelated_target.symlink_to("/cache/gstack/skills/review")
+            regular_same_name = (
+                city / ".claude/skills/complete-delivery.complete-delivery"
+            )
+            regular_same_name.parent.mkdir(parents=True)
+            regular_same_name.write_text("preserve me", encoding="utf-8")
 
             errors, _ = audit_module.audit(city, fix_stale_skills=False)
             self.assertIn("1 stale Complete Delivery skill symlink(s) remain", errors)
@@ -101,6 +115,8 @@ source = "gc"
             self.assertTrue(any("removed stale skill symlink" in note for note in notes))
             self.assertFalse(stale.exists())
             self.assertTrue(unrelated.is_symlink())
+            self.assertTrue(same_name_unrelated_target.is_symlink())
+            self.assertTrue(regular_same_name.is_file())
 
 
 if __name__ == "__main__":
