@@ -58,6 +58,9 @@ records.
 - City-level gstack skills remain imported.
 - The small `gascity/roles` pack is present for every current rig and inherited
   by future rigs.
+- Every registered rig starts suspended, caps total sessions at five, and
+  explicitly caps its polecat pool at one or two; the audit rejects drift after
+  a future rig is added.
 - Normal implementation, economy, review, and rescue lanes remain scale-to-zero
   and bounded by the pragmatic concurrency policy.
 - One independent reviewer uses the Claude family by default where the
@@ -65,8 +68,8 @@ records.
 
 ### As an operator debugging drift, I have a deterministic audit
 
-- A script validates imports, required aliases, policy fragments, rig role
-  coverage, and stale Complete Delivery skill projections.
+- A script validates imports, required aliases, policy fragments, rig role and
+  concurrency coverage, and stale Complete Delivery skill projections.
 - Its cleanup mode removes only exact stale Complete Delivery skill symlinks.
 - Pack tests, city validation, formula discovery, and live canaries establish
   that the intended routes actually work.

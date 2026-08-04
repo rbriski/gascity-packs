@@ -68,7 +68,9 @@ checks plus read-only routing canaries.
 - Make the specialized implementation reviewer a global Claude/Opus patch and
   remove redundant per-rig patches.
 - Bound ordinary polecat pools to at most two writers per rig; retain smaller
-  limits where already stricter.
+  limits where already stricter. Because the current defaults schema inherits
+  imports but not rig pool patches, make the audit reject any newly registered
+  rig missing suspension, total-session, or polecat caps.
 - Update the local `mol-do-work` text to identify itself as the implementation
   leg of Gstack Lite and require verification/accounting evidence.
 - Run the audit cleanup to remove only stale Complete Delivery skill links,

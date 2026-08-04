@@ -44,8 +44,15 @@ max_active_sessions = 1
 
 [[rigs]]
 name = "demo"
+suspended_on_start = true
+max_active_sessions = 5
 [rigs.imports.gc]
 source = "gc"
+
+[[rigs.patches]]
+agent = "polecat"
+[rigs.patches.pool]
+max = 2
 """
 
 
@@ -193,6 +200,24 @@ class GstackLiteContractTests(unittest.TestCase):
                 city_without_rig_table,
                 VALID_PACK,
                 "city.toml rigs must be an array of tables",
+            ),
+            (
+                "unsafe startup",
+                VALID_CITY.replace("suspended_on_start = true", "suspended_on_start = false"),
+                VALID_PACK,
+                "current rigs must set suspended_on_start=true: demo",
+            ),
+            (
+                "unsafe total session cap",
+                VALID_CITY.replace("max_active_sessions = 5", "max_active_sessions = 6"),
+                VALID_PACK,
+                "current rigs must cap max_active_sessions between 1 and 5: demo",
+            ),
+            (
+                "unsafe writer cap",
+                VALID_CITY.replace("max = 2", "max = 3"),
+                VALID_PACK,
+                "current rigs must set one polecat pool cap between 1 and 2: demo",
             ),
         ]
 

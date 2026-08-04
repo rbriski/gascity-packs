@@ -109,6 +109,45 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
     if missing_gc:
         errors.append(f"current rigs missing explicit gc roles import: {', '.join(missing_gc)}")
 
+    unsafe_start = sorted(
+        rig.get("name", "<unnamed>")
+        for rig in rigs
+        if rig.get("suspended_on_start") is not True
+    )
+    if unsafe_start:
+        errors.append(
+            "current rigs must set suspended_on_start=true: "
+            + ", ".join(unsafe_start)
+        )
+
+    unsafe_session_caps = sorted(
+        rig.get("name", "<unnamed>")
+        for rig in rigs
+        if type(rig.get("max_active_sessions")) is not int
+        or not 1 <= rig["max_active_sessions"] <= 5
+    )
+    if unsafe_session_caps:
+        errors.append(
+            "current rigs must cap max_active_sessions between 1 and 5: "
+            + ", ".join(unsafe_session_caps)
+        )
+
+    unsafe_writer_caps: list[str] = []
+    for rig in rigs:
+        polecat_patches = [
+            patch
+            for patch in rig.get("patches", [])
+            if isinstance(patch, dict) and patch.get("agent") == "polecat"
+        ]
+        caps = [patch.get("pool", {}).get("max") for patch in polecat_patches]
+        if len(caps) != 1 or type(caps[0]) is not int or not 1 <= caps[0] <= 2:
+            unsafe_writer_caps.append(rig.get("name", "<unnamed>"))
+    if unsafe_writer_caps:
+        errors.append(
+            "current rigs must set one polecat pool cap between 1 and 2: "
+            + ", ".join(sorted(unsafe_writer_caps))
+        )
+
     reviewer_patches = [
         patch
         for patch in city_toml.get("patches", {}).get("agent", [])
