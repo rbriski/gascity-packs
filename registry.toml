@@ -274,3 +274,10 @@ schema = 1
     commit = "0258322b80d75af640b22aa933cc3518378aa3a4"
     hash = "sha256:abe44282517092897bc4ca76620293ee9bd37a98ca409cc20734b596212973a0"
     description = "Initial Complete Delivery release with PR-sized delivery maps, bounded review loops, protected merge, deployment verification, and living reports."
+
+  [[pack.release]]
+    version = "0.1.1"
+    ref = "main"
+    commit = "4726fe4cde1b8bb72a34a29c35db21158290a019"
+    hash = "sha256:552be10d362bbeab2d6089c48bc1c3be886f9334b39ff9134a68502a0af28b93"
+    description = "Repair release with fail-closed scope propagation, immutable review deadlines, complete runtime assets, validated retry metadata, and recoverable authenticated publication."
