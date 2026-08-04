@@ -102,6 +102,8 @@ def test_write_gate_workspace_materializes_pack_check_scripts(tmp_path) -> None:
     check_script = checks_source / "build-artifact-valid.sh"
     check_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     check_script.chmod(0o755)
+    python_check = checks_source / "gstack-plan-review-context-valid.py"
+    python_check.write_text("print('root-bound')\n", encoding="utf-8")
     validator = pack_source / "assets" / "scripts" / "validate_build_artifact.py"
     validator.write_text("print('ok')\n", encoding="utf-8")
     schema = schemas_source / "requirements.v1.yaml"
@@ -116,11 +118,13 @@ def test_write_gate_workspace_materializes_pack_check_scripts(tmp_path) -> None:
     )
 
     materialized_check = workspace.rig_dir / ".gc" / "scripts" / "checks" / "build-artifact-valid.sh"
+    materialized_python_check = workspace.rig_dir / ".gc" / "scripts" / "checks" / "gstack-plan-review-context-valid.py"
     materialized_validator = workspace.rig_dir / ".gc" / "scripts" / "validate_build_artifact.py"
     materialized_schema = workspace.rig_dir / "schemas" / "build" / "requirements.v1.yaml"
 
     assert materialized_check.read_text(encoding="utf-8") == "#!/usr/bin/env bash\nexit 0\n"
     assert os.access(materialized_check, os.X_OK)
+    assert materialized_python_check.read_text(encoding="utf-8") == "print('root-bound')\n"
     assert materialized_validator.read_text(encoding="utf-8") == "print('ok')\n"
     assert materialized_schema.read_text(encoding="utf-8") == "schema_id: gc.build.requirements.v1\n"
 

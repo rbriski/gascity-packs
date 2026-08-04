@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -177,14 +178,18 @@ def expected_output(contract: dict[str, Any], name: str) -> Path:
 
 
 def root_payload(contract: dict[str, Any]) -> dict[str, str]:
+    """Return the immutable identity shared by every retry attempt.
+
+    The plan is intentionally identified by path here, not content hash: the
+    apply lane is allowed to edit it before it requests the next Ralph
+    iteration. Content fingerprints belong to the attempt snapshot below.
+    """
     return {
         "root_bead_id": contract["root_id"],
         "source_bead_id": contract["source"],
         "artifact_root": str(contract["artifact_root"]),
         "plan_path": str(contract["plan"]),
-        "plan_sha256": digest(contract["plan"]),
         "review_context_path": str(contract["context"]),
-        "review_context_sha256": digest(contract["context"]),
     }
 
 
@@ -193,6 +198,8 @@ def context_payload(contract: dict[str, Any]) -> dict[str, str]:
         **root_payload(contract),
         "attempt": contract["attempt"],
         "scope_ref": contract["scope"],
+        "plan_sha256": digest(contract["plan"]),
+        "review_context_sha256": digest(contract["context"]),
     }
 
 
@@ -209,7 +216,7 @@ def validate_root_binding(contract: dict[str, Any]) -> None:
         fail("durable plan-review binding does not match the durable root")
 
 
-def validate_context(contract: dict[str, Any]) -> Path:
+def validate_context(contract: dict[str, Any], *, require_current_snapshot: bool = True) -> Path:
     validate_root_binding(contract)
     candidate = context_path(contract)
     if not candidate.is_file():
@@ -219,8 +226,19 @@ def validate_context(contract: dict[str, Any]) -> Path:
         actual = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         fail(f"attempt-local plan-review context is invalid: {exc}")
-    if actual != context_payload(contract):
-        fail("attempt-local plan-review context does not match the durable root binding")
+    expected = context_payload(contract)
+    if require_current_snapshot:
+        if actual != expected:
+            fail("attempt-local plan-review context does not match the durable root binding")
+    else:
+        # Apply may have legitimately edited the plan after --apply-inputs
+        # validated this attempt's immutable binding and producer outputs.  Do
+        # not recompute the saved snapshot during its post-edit --apply check.
+        identity = {key: actual.get(key) for key in (*root_payload(contract), "attempt", "scope_ref")}
+        expected_identity = {key: expected[key] for key in identity}
+        hashes = (actual.get("plan_sha256", ""), actual.get("review_context_sha256", ""))
+        if identity != expected_identity or any(len(value) != 64 for value in hashes):
+            fail("attempt-local plan-review context does not preserve its immutable binding")
     return path
 
 
@@ -270,11 +288,16 @@ def item_for(items: list[dict[str, Any]], step_id: str) -> dict[str, Any]:
     matches = [value for value in items if metadata(value).get("gc.step_id") == step_id]
     if len(matches) != 1:
         fail(f"expected exactly one current-attempt {step_id} bead, found {len(matches)}")
-    return matches[0]
+    item = matches[0]
+    if item.get("status") != "closed":
+        fail(f"{step_id} must be closed before another lane consumes it")
+    if metadata(item).get("gc.outcome") != "pass":
+        fail(f"{step_id} must have gc.outcome=pass before another lane consumes it")
+    return item
 
 
-def validate_lanes(contract: dict[str, Any]) -> None:
-    validate_context(contract)
+def validate_lanes(contract: dict[str, Any], *, require_current_snapshot: bool = True) -> None:
+    validate_context(contract, require_current_snapshot=require_current_snapshot)
     items = matching_items(contract)
     for lane, (step_id, output_name) in LANES.items():
         item = item_for(items, step_id)
@@ -289,7 +312,7 @@ def prepare() -> None:
     directory = contained_path(root_binding_path(contract).parent, contract["artifact_root"], "plan-review binding directory", exists=False)
     directory.mkdir(parents=True, exist_ok=True)
     path = root_binding_path(contract)
-    path.write_text(json.dumps(root_payload(contract), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_json_atomic(path, root_payload(contract))
     for bead_id in (contract["root_id"], contract["bead_id"]):
         result = subprocess.run(
             ["gc", "bd", "update", bead_id, "--set-metadata", f"gstack.plan_review.context_path={path}"],
@@ -312,7 +335,10 @@ def lane_inputs(name: str) -> None:
     directory = contained_path(attempt_dir(contract), contract["artifact_root"], "attempt directory", exists=False)
     directory.mkdir(parents=True, exist_ok=True)
     path = context_path(contract)
-    path.write_text(json.dumps(context_payload(contract), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Four fresh review lanes prepare this same attempt concurrently.  Atomic
+    # replacement makes the shared snapshot idempotent and never observable as
+    # a partially written JSON document.
+    write_json_atomic(path, context_payload(contract))
     print(path)
 
 
@@ -342,6 +368,7 @@ def validate_synthesis_inputs() -> dict[str, Any]:
 def validate_synthesis() -> None:
     contract = validate_synthesis_inputs()
     validate_output(contract, contract["bead"], "synthesis", "gstack.plan_review.synthesis_path")
+    validate_output(contract, contract["bead"], "synthesis", "gstack.plan_review.output_path")
     print("validated plan-review synthesis")
 
 
@@ -353,15 +380,25 @@ def validate_apply_inputs() -> dict[str, Any]:
     items = matching_items(contract)
     synthesis = item_for(items, SYNTHESIS_STEP)
     validate_output(contract, synthesis, "synthesis", "gstack.plan_review.synthesis_path")
+    validate_output(contract, synthesis, "synthesis", "gstack.plan_review.output_path")
     return contract
 
 
 def validate_apply() -> None:
-    contract = validate_apply_inputs()
+    contract = binding(current_bead_id())
+    if contract["meta"].get("gc.step_id") != APPLY_STEP:
+        fail("--apply was invoked outside the apply lane")
+    validate_root_binding(contract)
+    validate_lanes(contract, require_current_snapshot=False)
+    items = matching_items(contract)
+    synthesis = item_for(items, SYNTHESIS_STEP)
+    validate_output(contract, synthesis, "synthesis", "gstack.plan_review.synthesis_path")
+    validate_output(contract, synthesis, "synthesis", "gstack.plan_review.output_path")
     verdict = contract["meta"].get("design_review.verdict", "")
     if verdict not in {"done", "iterate"}:
         fail("design_review.verdict must be done or iterate")
     validate_output(contract, contract["bead"], "remediation", "design_review.report_path")
+    validate_output(contract, contract["bead"], "remediation", "gstack.plan_review.output_path")
     print("validated plan-review apply output")
 
 
@@ -371,12 +408,32 @@ def validate_loop() -> None:
     items = matching_items(contract)
     synthesis = item_for(items, SYNTHESIS_STEP)
     validate_output(contract, synthesis, "synthesis", "gstack.plan_review.synthesis_path")
+    validate_output(contract, synthesis, "synthesis", "gstack.plan_review.output_path")
     apply = item_for(items, APPLY_STEP)
     validate_output(contract, apply, "remediation", "design_review.report_path")
+    validate_output(contract, apply, "remediation", "gstack.plan_review.output_path")
     verdict = metadata(apply).get("design_review.verdict", "")
     if verdict != "done":
         fail("plan review needs another pass")
     print("gstack plan review approved with root-bound current-attempt outputs")
+
+
+def write_json_atomic(path: Path, payload: dict[str, str]) -> None:
+    """Publish setup state atomically so concurrent lane setup cannot read a truncation."""
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+    except BaseException:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def main() -> int:

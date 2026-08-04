@@ -373,7 +373,7 @@ METHODOLOGY_FLOW_CONTRACTS = {
         },
         "expansion_checks": {
             "gstack-code-review": "implementation-review-approved.sh",
-            "gstack-plan-review": "design-review-approved.sh",
+            "gstack-plan-review": "gstack-plan-review-approved.sh",
             "gstack-qa-review": "implementation-review-approved.sh",
             "gstack-release-readiness": "implementation-review-approved.sh",
         },
@@ -870,6 +870,11 @@ def materialize_pack_check_scripts(pack_source: Path, rig_dir: Path) -> None:
     checks_target = scripts_target / "checks"
     checks_target.mkdir(parents=True, exist_ok=True)
     for script in sorted(checks_source.glob("*.sh")):
+        shutil.copy2(script, checks_target / script.name)
+    # Some checks are small Python contracts invoked by shell wrappers.  Keep
+    # these alongside the wrappers so a derived inference runtime receives the
+    # complete executable contract rather than a dangling entrypoint.
+    for script in sorted(checks_source.glob("*.py")):
         shutil.copy2(script, checks_target / script.name)
 
     validator_source = scripts_source / "validate_build_artifact.py"
