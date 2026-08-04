@@ -6,7 +6,6 @@ import json
 import os
 import pathlib
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,17 +32,27 @@ class PrGateContractTests(unittest.TestCase):
     def run_deadline(
         self,
         metadata: dict[str, str],
-        history: list[dict],
         mode: str | None,
+        record: dict[str, object] | None = None,
         extra_env: dict[str, str] | None = None,
-        without_flock: bool = False,
+        history: list[dict] | None = None,
+        abandoned_temporary_record: bool = False,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             state = root / "state.json"
             history_path = root / "history.json"
             state.write_text(json.dumps([{"metadata": metadata}]), encoding="utf-8")
-            history_path.write_text(json.dumps(history), encoding="utf-8")
+            history_path.write_text(json.dumps(history or []), encoding="utf-8")
+            record_path = root / ".gc" / "external-review-deadline-root-1.json"
+            if record is not None:
+                record_path.parent.mkdir()
+                record_path.write_text(json.dumps(record), encoding="utf-8")
+            elif abandoned_temporary_record:
+                record_path.parent.mkdir()
+                (record_path.parent / ".external-review-deadline-root-1.aborted.tmp").write_text(
+                    "{partial", encoding="utf-8"
+                )
             gc = root / "gc"
             gc.write_text(
                 "#!/usr/bin/env python3\n"
@@ -53,11 +62,16 @@ class PrGateContractTests(unittest.TestCase):
                 "args = sys.argv[1:]\n"
                 "subcommand = args[1] if len(args) > 1 and args[0] == 'bd' else ''\n"
                 "if subcommand == 'show':\n"
+                " import time\n"
+                " if os.environ.get('FAKE_GC_HANG_SUBCOMMAND') == subcommand: time.sleep(6)\n"
+                " counter_path = os.environ.get('FAKE_GC_SHOW_COUNTER')\n"
+                " count = int(open(counter_path).read()) + 1 if counter_path and os.path.exists(counter_path) else 1\n"
+                " if counter_path: open(counter_path, 'w').write(str(count))\n"
+                " if str(count) == os.environ.get('FAKE_GC_MUTATE_ON_SHOW', ''):\n"
+                "  data = json.load(open(state)); data[0]['metadata'].update(json.loads(os.environ['FAKE_GC_MUTATED_METADATA'])); open(state, 'w').write(json.dumps(data))\n"
                 " print(open(state).read())\n"
                 "elif subcommand == 'history':\n"
-                " import time\n"
-                " if os.environ.get('FAKE_GC_HANG_SUBCOMMAND') == subcommand: time.sleep(2)\n"
-                " print(open(history).read())\n"
+                " raise SystemExit('history must not be read by the deadline guard')\n"
                 "elif subcommand == 'update':\n"
                 " data = json.load(open(state)); meta = data[0]['metadata']\n"
                 " for index, value in enumerate(args):\n"
@@ -81,23 +95,16 @@ class PrGateContractTests(unittest.TestCase):
             })
             if extra_env:
                 env.update(extra_env)
-            if without_flock:
-                commands = root / "commands-without-flock"
-                commands.mkdir()
-                for name in ("cat", "date", "dirname", "mkdir", "mktemp", "python3", "rm", "sleep", "timeout"):
-                    target = shutil.which(name, path=env["PATH"])
-                    assert target is not None, name
-                    (commands / name).symlink_to(target)
-                env["PATH"] = f"{root}:{commands}"
             command = ["/bin/bash", str(DEADLINE_SCRIPT)]
             if mode is not None:
                 command.append(mode)
             result = subprocess.run(command, capture_output=True, text=True, env=env)
-            return result, json.loads(state.read_text(encoding="utf-8")), json.loads(history_path.read_text(encoding="utf-8"))
+            returned_record = json.loads(record_path.read_text(encoding="utf-8")) if record_path.exists() else None
+            return result, json.loads(state.read_text(encoding="utf-8")), returned_record
 
     def test_external_review_deadline_is_first_write_immutable_and_fail_closed(self) -> None:
         before = datetime.now(timezone.utc).replace(microsecond=0)
-        initialized, state, history = self.run_deadline({}, [], "--initialize")
+        initialized, state, record = self.run_deadline({}, "--initialize")
         after = datetime.now(timezone.utc).replace(microsecond=0)
         self.assertEqual(initialized.returncode, 0, initialized.stderr)
         metadata = state[0]["metadata"]
@@ -110,12 +117,14 @@ class PrGateContractTests(unittest.TestCase):
         self.assertLessEqual(before, started)
         self.assertLessEqual(started, after)
         self.assertEqual(deadline, started + timedelta(hours=2))
-        self.assertEqual(len(history), 1)
+        self.assertEqual(record["root_id"], "root-1")
+        self.assertEqual(record["started_at"], metadata["delivery.external_review_started_at"])
+        self.assertEqual(record["deadline"], metadata["delivery.external_review_deadline"])
 
-        resumed, state, resumed_history = self.run_deadline(metadata, history, "--initialize")
+        resumed, state, resumed_record = self.run_deadline(metadata, "--initialize", record)
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
         self.assertEqual(state[0]["metadata"], metadata)
-        self.assertEqual(resumed_history, history)
+        self.assertEqual(resumed_record, record)
 
         for label, changed_metadata, changed_history, expected in (
             ("missing", {}, [], "missing"),
@@ -140,11 +149,11 @@ class PrGateContractTests(unittest.TestCase):
                     ).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 },
                 [{"Issue": {"metadata": metadata}}],
-                "does not match immutable first entry",
+                "does not match immutable record",
             ),
         ):
             with self.subTest(label=label):
-                result, _, _ = self.run_deadline(changed_metadata, changed_history, "--validate")
+                result, _, _ = self.run_deadline(changed_metadata, "--validate", record, history=changed_history)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected, result.stderr)
 
@@ -155,8 +164,8 @@ class PrGateContractTests(unittest.TestCase):
         }
         result, _, _ = self.run_deadline(
             expired,
-            [{"Issue": {"metadata": expired}}],
             "--validate",
+            {"version": 1, "root_id": "root-1", "started_at": expired["delivery.external_review_started_at"], "deadline": expired["delivery.external_review_deadline"]},
             {"DELIVERY_NOW_UTC": "1970-01-01T00:00:00Z"},
         )
         self.assertNotEqual(result.returncode, 0)
@@ -166,37 +175,104 @@ class PrGateContractTests(unittest.TestCase):
         )
 
     def test_deadline_defaults_to_validation_and_bounds_discovery_reads(self) -> None:
-        defaulted, state, history = self.run_deadline({}, [], None)
+        defaulted, state, record = self.run_deadline({}, None)
         self.assertNotEqual(defaulted.returncode, 0)
         self.assertIn("missing", defaulted.stderr)
         self.assertEqual(state[0]["metadata"], {})
-        self.assertEqual(history, [])
+        self.assertIsNone(record)
 
         timed_out, _, _ = self.run_deadline(
-            {}, [], "--initialize", {"FAKE_GC_HANG_SUBCOMMAND": "history"}
+            {}, "--initialize", extra_env={"FAKE_GC_HANG_SUBCOMMAND": "show"}
         )
         self.assertNotEqual(timed_out.returncode, 0)
-        self.assertIn("during deadline discovery", timed_out.stderr)
-        self.assertIn('timeout --signal=KILL 1s gc bd history', DEADLINE_SCRIPT.read_text(encoding="utf-8"))
+        self.assertIn("gc bd show", timed_out.stderr)
+        self.assertIn("DELIVERY_GC_TIMEOUT=5s", DEADLINE_SCRIPT.read_text(encoding="utf-8"))
 
-    def test_only_first_deadline_initialization_requires_flock(self) -> None:
-        initialized, _state, history = self.run_deadline({}, [], "--initialize")
+    def test_deadline_record_is_atomic_and_required_after_initialization(self) -> None:
+        initialized, _state, record = self.run_deadline({}, "--initialize")
         self.assertEqual(initialized.returncode, 0, initialized.stderr)
         metadata = _state[0]["metadata"]
 
         validated, _, _ = self.run_deadline(
-            metadata, history, "--validate", without_flock=True
+            metadata, "--validate", record
         )
         self.assertEqual(validated.returncode, 0, validated.stderr)
 
-        unavailable, _, _ = self.run_deadline(
-            {}, [], "--initialize", without_flock=True
-        )
-        self.assertNotEqual(unavailable.returncode, 0)
-        self.assertIn("flock is required", unavailable.stderr)
+        missing, _, _ = self.run_deadline(metadata, "--validate")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("record is missing", missing.stderr)
+        source = DEADLINE_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("os.O_EXCL", source)
+        self.assertIn("os.link", source)
+        self.assertNotIn("gc bd history", source)
 
-    def test_deadline_recomputes_real_clock_after_internal_reads(self) -> None:
-        now = datetime.now(timezone.utc).replace(microsecond=0)
+    def test_initializer_migrates_a_previously_persisted_metadata_pair(self) -> None:
+        initialized, state, record = self.run_deadline({}, "--initialize")
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        migrated, _, migrated_record = self.run_deadline(
+            state[0]["metadata"], "--initialize"
+        )
+        self.assertEqual(migrated.returncode, 0, migrated.stderr)
+        self.assertEqual(migrated_record, record)
+
+    def test_initializer_recovers_after_an_aborted_unpublished_writer(self) -> None:
+        initialized, state, record = self.run_deadline(
+            {}, "--initialize", abandoned_temporary_record=True
+        )
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        self.assertEqual(record["root_id"], "root-1")
+        self.assertIn("delivery.external_review_deadline", state[0]["metadata"])
+
+    def test_validation_re_reads_root_metadata_before_authorizing(self) -> None:
+        started = datetime.now(timezone.utc).replace(microsecond=0)
+        deadline = started + timedelta(hours=2)
+        metadata = {
+            "delivery.external_review_started_at": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "delivery.external_review_deadline": deadline.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        record = {
+            "version": 1,
+            "root_id": "root-1",
+            "started_at": metadata["delivery.external_review_started_at"],
+            "deadline": metadata["delivery.external_review_deadline"],
+        }
+        moved = {
+            "delivery.external_review_deadline": (deadline - timedelta(minutes=1)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            counter = pathlib.Path(directory) / "show-count"
+            result, _, _ = self.run_deadline(
+                metadata,
+                "--validate",
+                record,
+                extra_env={
+                    "FAKE_GC_SHOW_COUNTER": str(counter),
+                    "FAKE_GC_MUTATE_ON_SHOW": "2",
+                    "FAKE_GC_MUTATED_METADATA": json.dumps(moved),
+                },
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match immutable record", result.stderr)
+
+    def test_deadline_validation_ignores_large_production_history_projection(self) -> None:
+        initialized, state, record = self.run_deadline({}, "--initialize")
+        self.assertEqual(initialized.returncode, 0, initialized.stderr)
+        # The production history projection exposes core Issue fields without
+        # metadata.  More importantly, a real root can be hundreds of KiB, so
+        # this guard must neither inspect it nor marshal it through argv.
+        production_history = [
+            {"Issue": {"id": f"root-{index}", "title": "x" * 700}}
+            for index in range(600)
+        ]
+        self.assertGreater(len(json.dumps(production_history)), 400_000)
+        validated, _, _ = self.run_deadline(
+            state[0]["metadata"], "--validate", record, history=production_history
+        )
+        self.assertEqual(validated.returncode, 0, validated.stderr)
+
+    def test_deadline_rejects_a_record_that_is_already_expired_before_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             state = root / "state.json"
@@ -240,10 +316,7 @@ class PrGateContractTests(unittest.TestCase):
                 "FAKE_GC_STATE": str(state),
                 "FAKE_GC_HISTORY": str(history_path),
                 "FAKE_DATE_COUNTER": str(root / "date-count"),
-                "FAKE_DATE_VALUES": ",".join((
-                    now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    (now + timedelta(hours=2, seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                )),
+                "FAKE_DATE_VALUES": "2000-01-01T00:00:00Z",
                 "PATH": f"{root}:{environment['PATH']}",
             })
             result = subprocess.run(
@@ -322,19 +395,32 @@ class PrGateContractTests(unittest.TestCase):
                 metadata["delivery.external_review_deadline"],
                 (datetime.strptime(metadata["delivery.external_review_started_at"], "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
-            self.assertIn("DEADLINE_LOCK_WAIT=30", DEADLINE_SCRIPT.read_text(encoding="utf-8"))
-            self.assertIn("delivery_lock_held_timeout", DEADLINE_SCRIPT.read_text(encoding="utf-8"))
-            self.assertIn('if [ "${cap%s}" -gt "${remaining%s}" ]; then', DEADLINE_SCRIPT.read_text(encoding="utf-8"))
+            self.assertTrue((root / ".gc" / "external-review-deadline-root-1.json").is_file())
+            # The competing initializer waits while the winning creator's
+            # metadata update is delayed.  Both observe one published pair;
+            # no reader can observe the writer's temporary inode.
+            self.assertEqual(
+                json.loads(
+                    (root / ".gc" / "external-review-deadline-root-1.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                {
+                    "version": 1,
+                    "root_id": "root-1",
+                    "started_at": metadata["delivery.external_review_started_at"],
+                    "deadline": metadata["delivery.external_review_deadline"],
+                },
+            )
+            source = DEADLINE_SCRIPT.read_text(encoding="utf-8")
+            self.assertIn("os.O_EXCL", source)
+            self.assertIn("os.link", source)
+            self.assertNotIn("gc bd history", source)
             timeout_calls = [
                 json.loads(line)
                 for line in timeout_log.read_text(encoding="utf-8").splitlines()
             ]
-            history_timeouts = []
-            for args in timeout_calls:
-                command_index = 2 if args and args[0].startswith("--") else 1
-                if args[command_index : command_index + 3] == ["gc", "bd", "history"]:
-                    history_timeouts.append(args[command_index - 1])
-            self.assertEqual(sorted(history_timeouts), ["1s", "5s", "5s"])
+            self.assertFalse(any("history" in args for args in timeout_calls))
 
     def test_external_review_actions_and_terminal_gate_require_deadline_validation(self) -> None:
         workflows = PACK_ROOT / "assets" / "workflows" / "complete-delivery-pr-gate"
@@ -1265,6 +1351,19 @@ class PrGateContractTests(unittest.TestCase):
                 "delivery.external_review_started_at": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "delivery.external_review_deadline": (started + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
+            deadline_record = root / ".gc" / "external-review-deadline-step-1.json"
+            deadline_record.parent.mkdir()
+            deadline_record.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "root_id": "step-1",
+                        "started_at": metadata["delivery.external_review_started_at"],
+                        "deadline": metadata["delivery.external_review_deadline"],
+                    }
+                ),
+                encoding="utf-8",
+            )
             gc.write_text(
                 '#!/bin/sh\nif [ "${2:-}" = history ]; then\n  printf "%s\\n" "$FAKE_GC_HISTORY_JSON"\nelse\n  printf "%s\\n" "$FAKE_GC_STEP_JSON"\nfi\n',
                 encoding="utf-8",
@@ -1301,6 +1400,7 @@ class PrGateContractTests(unittest.TestCase):
             environment.update(
                 {
                     "GC_BEAD_ID": "step-1",
+                    "GC_WORK_DIR": str(root),
                     "FAKE_GC_STEP_JSON": json.dumps([{"metadata": metadata}]),
                     "FAKE_GC_HISTORY_JSON": json.dumps([{"Issue": {"metadata": metadata}}]),
                     "PATH": f"{bin_dir}:{environment['PATH']}",

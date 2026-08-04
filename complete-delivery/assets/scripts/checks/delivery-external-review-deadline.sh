@@ -5,10 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=delivery-common.sh
 source "$SCRIPT_DIR/delivery-common.sh"
 command -v timeout >/dev/null 2>&1 || delivery_fail "timeout is required on PATH"
-# Context has to be read before this gate can discover a durable deadline.
-# Bound those bootstrap reads tightly; once a deadline is known, all later gc
-# calls use its remaining time instead.
-DELIVERY_GC_TIMEOUT=1s
+
+# A Beads read can take longer than the old one-second assumption on a real
+# workflow root.  All reads remain bounded, and every mutation below is also
+# bounded by the immutable deadline once it is known.
+DELIVERY_GC_TIMEOUT=5s
 delivery_initialize_context
 unset DELIVERY_GC_TIMEOUT
 
@@ -18,13 +19,140 @@ case "$MODE" in
   *) delivery_fail "usage: delivery-external-review-deadline.sh [--initialize|--validate]" ;;
 esac
 
+[[ "$DELIVERY_ROOT_ID" =~ ^[A-Za-z0-9._-]+$ ]] || \
+  delivery_fail "workflow root ID is unsafe for deadline record"
+DEADLINE_RECORD_DIR="$DELIVERY_WORK_DIR/.gc"
+DEADLINE_RECORD="$DEADLINE_RECORD_DIR/external-review-deadline-$DELIVERY_ROOT_ID.json"
+DEADLINE_IO_TIMEOUT=5s
+
 STARTED_AT="$(delivery_root_metadata delivery.external_review_started_at)"
 DEADLINE="$(delivery_root_metadata delivery.external_review_deadline)"
 
-delivery_refresh_root_metadata() {
-  local timeout_value="$1"
+delivery_validate_deadline_pair() {
+  python3 - "$1" "$2" <<'PY'
+import datetime as dt
+import re
+import sys
 
-  DELIVERY_GC_TIMEOUT="$timeout_value"
+UTC = dt.timezone.utc
+PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+def parse(value, field):
+    if not isinstance(value, str) or not PATTERN.fullmatch(value):
+        raise SystemExit(f"external-review {field} must be canonical UTC YYYY-MM-DDTHH:MM:SSZ")
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise SystemExit(f"external-review {field} is malformed: {exc}")
+
+started = parse(sys.argv[1], "started_at")
+deadline = parse(sys.argv[2], "deadline")
+if deadline <= started or deadline > started + dt.timedelta(hours=2):
+    raise SystemExit("external-review deadline must be after entry and no later than two hours after entry")
+PY
+}
+
+delivery_read_deadline_record() {
+  python3 - "$DEADLINE_RECORD" "$DELIVERY_ROOT_ID" <<'PY'
+import datetime as dt
+import json
+import os
+import re
+import stat
+import sys
+
+path, root_id = sys.argv[1:]
+try:
+    info = os.lstat(path)
+except FileNotFoundError:
+    raise SystemExit("external-review deadline record is missing")
+if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+    raise SystemExit("external-review deadline record must be one regular file")
+try:
+    with open(path, encoding="utf-8") as handle:
+        record = json.load(handle)
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"external-review deadline record is invalid: {exc}")
+if not isinstance(record, dict) or set(record) != {"version", "root_id", "started_at", "deadline"}:
+    raise SystemExit("external-review deadline record has an invalid shape")
+if record.get("version") != 1 or record.get("root_id") != root_id:
+    raise SystemExit("external-review deadline record does not belong to this workflow root")
+pattern = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+for key in ("started_at", "deadline"):
+    if not isinstance(record.get(key), str) or not pattern.fullmatch(record[key]):
+        raise SystemExit(f"external-review deadline record {key} is not canonical UTC")
+try:
+    started = dt.datetime.strptime(record["started_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    deadline = dt.datetime.strptime(record["deadline"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+except ValueError as exc:
+    raise SystemExit(f"external-review deadline record is malformed: {exc}")
+if deadline <= started or deadline > started + dt.timedelta(hours=2):
+    raise SystemExit("external-review deadline record exceeds two-hour bound")
+print(record["started_at"])
+print(record["deadline"])
+PY
+}
+
+delivery_create_deadline_record() {
+  local started_at="$1"
+  local deadline="$2"
+  mkdir -p "$DEADLINE_RECORD_DIR" || return 1
+  python3 - "$DEADLINE_RECORD" "$DELIVERY_ROOT_ID" "$started_at" "$deadline" <<'PY'
+import datetime as dt
+import json
+import os
+import sys
+import uuid
+
+path, root_id, started_text, deadline_text = sys.argv[1:]
+try:
+    started = dt.datetime.strptime(started_text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    deadline = dt.datetime.strptime(deadline_text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+except ValueError as exc:
+    raise SystemExit(f"external-review deadline record is malformed: {exc}")
+if deadline <= started or deadline > started + dt.timedelta(hours=2):
+    raise SystemExit("external-review deadline record exceeds two-hour bound")
+record = {
+    "version": 1,
+    "root_id": root_id,
+    "started_at": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "deadline": deadline.strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+try:
+    directory_path = os.path.dirname(path)
+    temporary_path = os.path.join(
+        directory_path, f".{os.path.basename(path)}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    descriptor = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, separators=(",", ":"), sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    # link(2) is an atomic no-replace publication primitive: readers can only
+    # observe the fully fsynced temporary inode, while a competing creator gets
+    # FileExistsError without overwriting the first record.
+    try:
+        os.link(temporary_path, path)
+    except FileExistsError:
+        raise SystemExit(3)
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+    directory = os.open(directory_path, os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except OSError as exc:
+    raise SystemExit(f"cannot sync external-review deadline record: {exc}")
+PY
+}
+
+delivery_refresh_root_metadata() {
+  DELIVERY_GC_TIMEOUT="$1"
   DELIVERY_ROOT_JSON="$(delivery_read_bead_json "$DELIVERY_ROOT_ID")" || \
     delivery_fail "gc bd show $DELIVERY_ROOT_ID failed while refreshing external-review deadline"
   unset DELIVERY_GC_TIMEOUT
@@ -43,8 +171,6 @@ try:
     deadline = dt.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
 except ValueError:
     raise SystemExit("external-review deadline must be canonical UTC YYYY-MM-DDTHH:MM:SSZ")
-# Subtract one full second so a command's timeout cannot extend beyond the
-# immutable canonical-second deadline while the clock advances during launch.
 remaining = int((deadline - dt.datetime.now(dt.timezone.utc)).total_seconds()) - 1
 if remaining <= 0:
     raise SystemExit("external-review deadline has expired")
@@ -52,190 +178,118 @@ print(f"{remaining}s")
 PY
 }
 
-delivery_history_before_deadline() {
-  local remaining cap
-  remaining="$(delivery_remaining_deadline_timeout)" || return 1
-  cap="${1:-$remaining}"
-  if [ "${cap%s}" -gt "${remaining%s}" ]; then
-    cap="$remaining"
-  fi
-  timeout --signal=KILL "$cap" gc bd history "$DELIVERY_ROOT_ID" --json
-}
-
-# A holder must never retain the shared initialization lock for most of the
-# two-hour review window merely because the data plane is slow.  The immutable
-# deadline still bounds the operations, while this short cap bounds lock
-# contention and lets another lane fail closed promptly.
-DEADLINE_LOCK_IO_TIMEOUT=5s
-
-delivery_lock_held_timeout() {
+delivery_deadline_io_timeout() {
   local remaining
   remaining="$(delivery_remaining_deadline_timeout)" || return 1
-  if [ "${remaining%s}" -lt "${DEADLINE_LOCK_IO_TIMEOUT%s}" ]; then
+  if [ "${remaining%s}" -lt "${DEADLINE_IO_TIMEOUT%s}" ]; then
     printf '%s' "$remaining"
   else
-    printf '%s' "$DEADLINE_LOCK_IO_TIMEOUT"
+    printf '%s' "$DEADLINE_IO_TIMEOUT"
   fi
 }
 
-# Concurrent setup lanes share a worktree.  Serialize only first-entry
-# initialization, then re-read durable metadata while holding the lock so a
-# waiter reuses the first persisted pair instead of overwriting it.
-deadline_lock_held=false
-if [ "$MODE" = "--initialize" ] && [ -z "$STARTED_AT" ] && [ -z "$DEADLINE" ]; then
-  command -v flock >/dev/null 2>&1 || \
-    delivery_fail "flock is required on PATH to initialize an external-review deadline"
-  # The lock holder performs two bounded metadata reads plus one durable
-  # update. Thirty seconds covers loaded concurrent initialization without
-  # turning a wedged data plane into an unbounded wait; lock exhaustion fails
-  # closed below.
-  DEADLINE_LOCK_WAIT=30
-  DEADLINE_LOCK_DIR="$DELIVERY_WORK_DIR/.gc"
-  mkdir -p "$DEADLINE_LOCK_DIR" || delivery_fail "cannot create external-review deadline lock directory"
-  exec {deadline_lock_fd}>"$DEADLINE_LOCK_DIR/external-review-deadline-$DELIVERY_ROOT_ID.lock"
-  flock -w "$DEADLINE_LOCK_WAIT" "$deadline_lock_fd" || \
-    delivery_fail "cannot acquire external-review deadline initialization lock"
-  deadline_lock_held=true
-  delivery_refresh_root_metadata 1s
+delivery_persist_recorded_pair() {
+  local timeout_value
+  timeout_value="$(delivery_deadline_io_timeout)" || return 1
+  timeout --signal=KILL "$timeout_value" gc bd update "$DELIVERY_ROOT_ID" \
+    --set-metadata "delivery.external_review_started_at=$1" \
+    --set-metadata "delivery.external_review_deadline=$2"
+}
+
+delivery_load_record_pair() {
+  local output
+  output="$(delivery_read_deadline_record)" || return 1
+  readarray -t RECORD_PAIR <<<"$output"
+  [ "${#RECORD_PAIR[@]}" -eq 2 ] || return 1
+  RECORD_STARTED_AT="${RECORD_PAIR[0]}"
+  RECORD_DEADLINE="${RECORD_PAIR[1]}"
+}
+
+if { [ -n "$STARTED_AT" ] && [ -z "$DEADLINE" ]; } || { [ -z "$STARTED_AT" ] && [ -n "$DEADLINE" ]; }; then
+  delivery_fail "external-review deadline metadata is partially missing"
 fi
 
-if [ -n "$DEADLINE" ]; then
-  if [ "$deadline_lock_held" = true ]; then
-    known_timeout="$(delivery_lock_held_timeout 2>&1)" || \
-      delivery_fail "$known_timeout"
+if [ "$MODE" = "--initialize" ] && [ -n "$STARTED_AT" ] && [ ! -e "$DEADLINE_RECORD" ]; then
+  # A repair can be installed between the legacy metadata write and a later
+  # validation.  Seed its first immutable record from that already-durable
+  # pair only through the explicit initializer, never validate.
+  delivery_validate_deadline_pair "$STARTED_AT" "$DEADLINE" || \
+    delivery_fail "external-review deadline is missing, malformed, moved, or expired"
+  delivery_remaining_deadline_timeout >/dev/null || delivery_fail "external-review deadline has expired"
+  if delivery_create_deadline_record "$STARTED_AT" "$DEADLINE"; then
+    :
   else
-    known_timeout="$(delivery_remaining_deadline_timeout 2>&1)" || \
-      delivery_fail "$known_timeout"
+    create_status=$?
+    [ "$create_status" -eq 3 ] || delivery_fail "cannot create external-review deadline record"
   fi
-  HISTORY="$(delivery_history_before_deadline "$known_timeout")" || \
-    delivery_fail "cannot read workflow-root metadata history before external-review deadline"
-  if [ "$deadline_lock_held" = true ]; then
-    delivery_remaining_deadline_timeout >/dev/null || \
-      delivery_fail "external-review deadline expired after lock-held history read"
+fi
+
+if [ "$MODE" = "--initialize" ] && [ -z "$STARTED_AT" ]; then
+  # O_EXCL is the first-write serialization point.  A waiter never replaces
+  # the record; it reuses its exact pair and can finish a creator's interrupted
+  # metadata update after bounded re-reads.
+  record_creator=false
+  if [ ! -e "$DEADLINE_RECORD" ]; then
+    NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    INITIAL_DEADLINE="$(python3 - "$NOW" <<'PY'
+import datetime as dt
+import sys
+started = dt.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+print((started + dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+    )"
+    if delivery_create_deadline_record "$NOW" "$INITIAL_DEADLINE"; then
+      record_creator=true
+    else
+      create_status=$?
+      [ "$create_status" -eq 3 ] || delivery_fail "cannot create external-review deadline record"
+    fi
   fi
+  delivery_load_record_pair || delivery_fail "cannot read external-review deadline record"
+  delivery_refresh_root_metadata "$DEADLINE_IO_TIMEOUT"
+  if { [ -n "$STARTED_AT" ] && [ -z "$DEADLINE" ]; } || { [ -z "$STARTED_AT" ] && [ -n "$DEADLINE" ]; }; then
+    delivery_fail "external-review deadline metadata is partially missing"
+  fi
+  if [ -z "$STARTED_AT" ]; then
+    # A second initializer waits for the creator's bounded update.  If that
+    # process crashed, it safely completes the exact O_EXCL-recorded pair.
+    if [ "$record_creator" = false ]; then
+      for _ in 1 2 3 4 5; do
+        sleep 1
+        delivery_refresh_root_metadata "$DEADLINE_IO_TIMEOUT"
+        [ -n "$STARTED_AT" ] && break
+      done
+    fi
+    if [ -z "$STARTED_AT" ]; then
+      STARTED_AT="$RECORD_STARTED_AT"
+      DEADLINE="$RECORD_DEADLINE"
+      delivery_remaining_deadline_timeout >/dev/null || delivery_fail "external-review deadline expired before persistence"
+      delivery_persist_recorded_pair "$STARTED_AT" "$DEADLINE" || \
+        delivery_fail "cannot persist external-review deadline on workflow root before expiration"
+      delivery_refresh_root_metadata "$DEADLINE_IO_TIMEOUT"
+    fi
+  fi
+fi
+
+delivery_load_record_pair || delivery_fail "external-review deadline record is missing or invalid"
+if [ -n "$DEADLINE" ]; then
+  final_read_timeout="$(delivery_deadline_io_timeout)" || \
+    delivery_fail "external-review deadline has expired before final metadata validation"
 else
-  HISTORY="$(timeout --signal=KILL 1s gc bd history "$DELIVERY_ROOT_ID" --json)" || \
-    delivery_fail "cannot read workflow-root metadata history during deadline discovery"
+  # A missing root value must still receive a bounded final read so the gate
+  # can report the durable-state error rather than deriving a timeout from an
+  # absent deadline.
+  final_read_timeout="$DEADLINE_IO_TIMEOUT"
 fi
-
-if [ "$MODE" = "--initialize" ] && [ -z "$STARTED_AT" ] && [ -z "$DEADLINE" ]; then
-  # Read the real UTC clock only after the pre-persistence history read.  The
-  # resulting pair is therefore not stale before it is made immutable.
-  NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  INITIAL_OUTPUT="$(python3 - "$NOW" "$HISTORY" <<'PY'
-import datetime as dt
-import json
-import re
-import sys
-
-UTC = dt.timezone.utc
-PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
-
-def parse(value, field):
-    if not isinstance(value, str) or not PATTERN.fullmatch(value):
-        raise SystemExit(f"external-review {field} must be canonical UTC YYYY-MM-DDTHH:MM:SSZ")
-    try:
-        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-    except ValueError as exc:
-        raise SystemExit(f"external-review {field} is malformed: {exc}")
-
-now = parse(sys.argv[1], "current time")
-try:
-    history = json.loads(sys.argv[2])
-except json.JSONDecodeError as exc:
-    raise SystemExit(f"workflow-root metadata history is malformed: {exc}")
-if not isinstance(history, list):
-    raise SystemExit("workflow-root metadata history must be a list")
-for item in history:
-    metadata = item.get("Issue", {}).get("metadata", {}) if isinstance(item, dict) else {}
-    if not isinstance(metadata, dict):
-        raise SystemExit("workflow-root metadata history is malformed")
-    if metadata.get("delivery.external_review_started_at") or metadata.get("delivery.external_review_deadline"):
-        raise SystemExit("external-review deadline already has durable history but is missing from workflow-root metadata")
-print(now.strftime("%Y-%m-%dT%H:%M:%SZ"))
-print((now + dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
-PY
-  )" || delivery_fail "cannot initialize external-review deadline"
-  readarray -t INITIAL <<<"$INITIAL_OUTPUT"
-  STARTED_AT="${INITIAL[0]}"
-  DEADLINE="${INITIAL[1]}"
-  delivery_remaining_deadline_timeout >/dev/null || \
-    delivery_fail "external-review deadline expired before persistence"
-  # Use a short deadline-derived cap while the initialization lock is held.
-  # The deadline has just been computed, but validate again after each
-  # operation before treating persistence or history as authority.
-  lock_timeout="$(delivery_lock_held_timeout)" || \
-    delivery_fail "external-review deadline expired before persistence"
-  timeout --signal=KILL "$lock_timeout" gc bd update "$DELIVERY_ROOT_ID" \
-    --set-metadata "delivery.external_review_started_at=${INITIAL[0]}" \
-    --set-metadata "delivery.external_review_deadline=${INITIAL[1]}" || \
-    delivery_fail "cannot persist external-review deadline on workflow root before expiration"
-  delivery_remaining_deadline_timeout >/dev/null || \
-    delivery_fail "external-review deadline expired after persistence"
-  lock_timeout="$(delivery_lock_held_timeout)" || \
-    delivery_fail "external-review deadline expired before history read"
-  HISTORY="$(delivery_history_before_deadline "$lock_timeout")" || \
-    delivery_fail "cannot re-read persisted workflow-root deadline before expiration"
-  delivery_remaining_deadline_timeout >/dev/null || \
-    delivery_fail "external-review deadline expired after history read"
+delivery_refresh_root_metadata "$final_read_timeout"
+if { [ -n "$STARTED_AT" ] && [ -z "$DEADLINE" ]; } || { [ -z "$STARTED_AT" ] && [ -n "$DEADLINE" ]; }; then
+  delivery_fail "external-review deadline metadata is partially missing"
 fi
-
-# This is a fail-closed production gate. Do not accept a caller-provided
-# clock: a stale/expired deadline must not become valid merely because a
-# caller freezes time in its environment. Recompute it after every internal
-# read so validation cannot authorize work that crossed the deadline in-flight.
-NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-python3 - "$NOW" "$STARTED_AT" "$DEADLINE" "$HISTORY" <<'PY' || \
+delivery_validate_deadline_pair "$STARTED_AT" "$DEADLINE" || \
   delivery_fail "external-review deadline is missing, malformed, moved, or expired"
-import datetime as dt
-import json
-import re
-import sys
-
-UTC = dt.timezone.utc
-PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
-
-def parse(value, field):
-    if not isinstance(value, str) or not PATTERN.fullmatch(value):
-        raise SystemExit(f"external-review {field} must be canonical UTC YYYY-MM-DDTHH:MM:SSZ")
-    try:
-        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-    except ValueError as exc:
-        raise SystemExit(f"external-review {field} is malformed: {exc}")
-
-now = parse(sys.argv[1], "current time")
-started = parse(sys.argv[2], "started_at")
-deadline = parse(sys.argv[3], "deadline")
-if deadline <= started or deadline > started + dt.timedelta(hours=2):
-    raise SystemExit("external-review deadline must be after entry and no later than two hours after entry")
-if now >= deadline:
-    raise SystemExit("external-review deadline has expired")
-try:
-    history = json.loads(sys.argv[4])
-except json.JSONDecodeError as exc:
-    raise SystemExit(f"workflow-root metadata history is malformed: {exc}")
-if not isinstance(history, list):
-    raise SystemExit("workflow-root metadata history must be a list")
-recorded = None
-for item in reversed(history):
-    metadata = item.get("Issue", {}).get("metadata", {}) if isinstance(item, dict) else {}
-    if not isinstance(metadata, dict):
-        raise SystemExit("workflow-root metadata history is malformed")
-    pair = (metadata.get("delivery.external_review_started_at"), metadata.get("delivery.external_review_deadline"))
-    if pair == (None, None) or pair == ("", ""):
-        continue
-    if not pair[0] or not pair[1]:
-        raise SystemExit("external-review deadline history is partially missing")
-    pair_started = parse(pair[0], "history started_at")
-    pair_deadline = parse(pair[1], "history deadline")
-    if pair_deadline <= pair_started or pair_deadline > pair_started + dt.timedelta(hours=2):
-        raise SystemExit("external-review deadline history exceeds two-hour bound")
-    if recorded is None:
-        recorded = pair
-    elif pair != recorded:
-        raise SystemExit("external-review deadline was reset or moved forward")
-if recorded is None or recorded != (sys.argv[2], sys.argv[3]):
-    raise SystemExit("external-review deadline current value does not match immutable first entry")
-PY
+if [ "$STARTED_AT" != "$RECORD_STARTED_AT" ] || [ "$DEADLINE" != "$RECORD_DEADLINE" ]; then
+  delivery_fail "external-review deadline current value does not match immutable record"
+fi
+delivery_remaining_deadline_timeout >/dev/null || delivery_fail "external-review deadline has expired"
 
 echo "complete-delivery external-review deadline valid: $DEADLINE"
