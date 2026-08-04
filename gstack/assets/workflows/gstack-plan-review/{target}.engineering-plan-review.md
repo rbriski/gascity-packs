@@ -11,10 +11,11 @@ Before reading, create and validate your fresh context:
 .gc/scripts/checks/gstack-plan-review-context-valid.py --lane-inputs engineering
 ```
 
-Read only that attempt-local `context.json`. Write the report
-exactly to `<artifact_root>/plan-review/<root-bead-id>/attempt-<N>/engineering.md`.
+The command prints one JSON manifest. Read exactly its `plan_path` and
+`review_context_path`; write only to its sole `permitted_output_paths` entry.
+Do not infer paths from the repository or a prior attempt.
 Start it with `root_bead_id`, `source_bead_id`, `attempt`, `scope_ref`, and
-`context_path` binding lines, set that exact path as
+`context_path` binding lines, set the manifest output path as
 `gstack.plan_review.output_path`, then run:
 
 ```bash

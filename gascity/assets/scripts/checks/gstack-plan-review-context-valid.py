@@ -177,6 +177,23 @@ def expected_output(contract: dict[str, Any], name: str) -> Path:
     return attempt_dir(contract) / f"{name}.md"
 
 
+def print_manifest(contract: dict[str, Any], *, inputs: list[Path], outputs: list[Path]) -> None:
+    """Publish the only paths a pre-task consumer may read or write."""
+    print(
+        json.dumps(
+            {
+                **root_payload(contract),
+                "attempt": contract["attempt"],
+                "scope_ref": contract["scope"],
+                "context_path": str(context_path(contract)),
+                "permitted_input_paths": [str(path) for path in inputs],
+                "permitted_output_paths": [str(path) for path in outputs],
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def root_payload(contract: dict[str, Any]) -> dict[str, str]:
     """Return the immutable identity shared by every retry attempt.
 
@@ -339,7 +356,12 @@ def lane_inputs(name: str) -> None:
     # replacement makes the shared snapshot idempotent and never observable as
     # a partially written JSON document.
     write_json_atomic(path, context_payload(contract))
-    print(path)
+    _, output_name = LANES[name]
+    print_manifest(
+        contract,
+        inputs=[contract["plan"], contract["context"]],
+        outputs=[expected_output(contract, output_name)],
+    )
 
 
 def validate_lane(name: str) -> None:
@@ -382,6 +404,22 @@ def validate_apply_inputs() -> dict[str, Any]:
     validate_output(contract, synthesis, "synthesis", "gstack.plan_review.synthesis_path")
     validate_output(contract, synthesis, "synthesis", "gstack.plan_review.output_path")
     return contract
+
+
+def synthesis_inputs_manifest(contract: dict[str, Any]) -> None:
+    print_manifest(
+        contract,
+        inputs=[expected_output(contract, output_name) for _, output_name in LANES.values()],
+        outputs=[expected_output(contract, "synthesis")],
+    )
+
+
+def apply_inputs_manifest(contract: dict[str, Any]) -> None:
+    print_manifest(
+        contract,
+        inputs=[expected_output(contract, "synthesis"), contract["plan"]],
+        outputs=[contract["plan"], expected_output(contract, "remediation")],
+    )
 
 
 def validate_apply() -> None:
@@ -456,11 +494,11 @@ def main() -> int:
         elif args.lane:
             validate_lane(args.lane)
         elif args.synthesis_inputs:
-            validate_synthesis_inputs()
+            synthesis_inputs_manifest(validate_synthesis_inputs())
         elif args.synthesis:
             validate_synthesis()
         elif args.apply_inputs:
-            validate_apply_inputs()
+            apply_inputs_manifest(validate_apply_inputs())
         elif args.apply:
             validate_apply()
         else:

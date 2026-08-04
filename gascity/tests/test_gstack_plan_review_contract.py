@@ -147,9 +147,17 @@ class GstackPlanReviewContractTests(unittest.TestCase):
             payload = {"beads": {"root": fixture.root, **lane_beads}, "items": []}
             fixture.fixture.write_text(json.dumps(payload), encoding="utf-8")
             processes = [fixture.invoke("--lane-inputs", lane, bead_id=lane) for lane, _, _ in LANES]
-            for process in processes:
+            for (lane, _, output_name), process in zip(LANES, processes):
                 stdout, stderr = process.communicate(timeout=10)
                 self.assertEqual(process.returncode, 0, stderr or stdout)
+                self.assertEqual(
+                    json.loads(stdout),
+                    fixture.manifest(
+                        contract,
+                        inputs=[fixture.plan, fixture.review_input],
+                        outputs=[fixture.context_path(contract).parent / f"{output_name}.md"],
+                    ),
+                )
             snapshot = fixture.context_path(contract)
             self.assertEqual(
                 json.loads(snapshot.read_text(encoding="utf-8")),
@@ -164,6 +172,46 @@ class GstackPlanReviewContractTests(unittest.TestCase):
                     "plan_sha256": hashlib.sha256(fixture.plan.read_bytes()).hexdigest(),
                     "review_context_sha256": hashlib.sha256(fixture.review_input.read_bytes()).hexdigest(),
                 },
+            )
+
+    def test_synthesis_and_apply_inputs_print_bound_path_manifests(self) -> None:
+        with fixture_environment() as fixture:
+            self.assertEqual(
+                fixture.run({"beads": {"root": fixture.root, "setup": fixture.setup}, "items": []}, "--prepare", bead_id="setup").returncode,
+                0,
+            )
+            contract = fixture.contract("1")
+            lanes = fixture.completed_lane_items(contract)
+            synthesis = fixture.synthesis_item(contract)
+            synthesis_inputs = fixture.run(
+                {"beads": {"root": fixture.root, "synthesis": synthesis}, "items": lanes},
+                "--synthesis-inputs",
+                bead_id="synthesis",
+            )
+            self.assertEqual(synthesis_inputs.returncode, 0, synthesis_inputs.stderr)
+            self.assertEqual(
+                json.loads(synthesis_inputs.stdout),
+                fixture.manifest(
+                    contract,
+                    inputs=[fixture.context_path(contract).parent / f"{name}.md" for _, _, name in LANES],
+                    outputs=[fixture.context_path(contract).parent / "synthesis.md"],
+                ),
+            )
+
+            apply = fixture.apply_item(contract, verdict="done")
+            apply_inputs = fixture.run(
+                {"beads": {"root": fixture.root, "apply": apply}, "items": lanes + [synthesis]},
+                "--apply-inputs",
+                bead_id="apply",
+            )
+            self.assertEqual(apply_inputs.returncode, 0, apply_inputs.stderr)
+            self.assertEqual(
+                json.loads(apply_inputs.stdout),
+                fixture.manifest(
+                    contract,
+                    inputs=[fixture.context_path(contract).parent / "synthesis.md", fixture.plan],
+                    outputs=[fixture.plan, fixture.context_path(contract).parent / "remediation.md"],
+                ),
             )
 
 
@@ -200,6 +248,20 @@ class Fixture:
 
     def header(self, contract: dict[str, str]) -> str:
         return "\n".join(("root_bead_id: root", "source_bead_id: source-finance", f"attempt: {contract['gc.attempt']}", f"scope_ref: {contract['gc.scope_ref']}", f"context_path: {self.context_path(contract)}"))
+
+    def manifest(self, contract: dict[str, str], *, inputs: list[pathlib.Path], outputs: list[pathlib.Path]) -> dict[str, object]:
+        return {
+            "root_bead_id": "root",
+            "source_bead_id": "source-finance",
+            "artifact_root": str(self.artifact),
+            "plan_path": str(self.plan),
+            "review_context_path": str(self.review_input),
+            "attempt": contract["gc.attempt"],
+            "scope_ref": contract["gc.scope_ref"],
+            "context_path": str(self.context_path(contract)),
+            "permitted_input_paths": [str(path) for path in inputs],
+            "permitted_output_paths": [str(path) for path in outputs],
+        }
 
     def invoke(self, *args: str, bead_id: str) -> subprocess.Popen[str]:
         return subprocess.Popen([str(SCRIPT), *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={**os.environ, "GC_BEAD_ID": bead_id, "GC_FIXTURE": str(self.fixture), "PATH": f"{self.tmp}{os.pathsep}{os.environ['PATH']}"})

@@ -6,15 +6,15 @@ Before reading or editing, run:
 .gc/scripts/checks/gstack-plan-review-context-valid.py --apply-inputs
 ```
 
-It accepts only the current attempt's root-bound synthesis and lane outputs.
-Read that synthesis and update only the bound plan artifact in place when
-required fixes remain. Keep optional ambition clearly separated from accepted scope. In
-interactive mode, only add new scope after explicit approval is recorded; in
-autonomous mode, preserve optional scope as deferred follow-up.
+It prints one JSON manifest. Read exactly its synthesis and plan paths in
+`permitted_input_paths`. Write only to the bound plan and remediation paths in
+`permitted_output_paths`; do not infer paths from the repository or a prior
+attempt. Update the bound plan artifact in place when required fixes remain.
+Keep optional ambition clearly separated from accepted scope. In interactive
+mode, only add new scope after explicit approval is recorded; in autonomous
+mode, preserve optional scope as deferred follow-up.
 
-Write the remediation summary exactly to
-`<artifact_root>/plan-review/<root-bead-id>/attempt-<N>/remediation.md`, include
-the five binding lines, set `design_review.report_path` and
+Include the five manifest binding lines, set `design_review.report_path` and
 `gstack.plan_review.output_path` to that exact path, then run `--apply` again
 before closing.
 

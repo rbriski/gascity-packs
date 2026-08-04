@@ -6,11 +6,10 @@ Before reading any report, run:
 .gc/scripts/checks/gstack-plan-review-context-valid.py --synthesis-inputs
 ```
 
-It requires all four current-attempt, root-bound lane outputs. Read only those
-validated founder, design, engineering, and developer-experience reports. Write
-the synthesis exactly to
-`<artifact_root>/plan-review/<root-bead-id>/attempt-<N>/synthesis.md`, include
-the five binding lines (`root_bead_id`, `source_bead_id`, `attempt`,
+It prints one JSON manifest. Read exactly the four lane reports in
+`permitted_input_paths`, then write only to its sole `permitted_output_paths`
+entry. Do not infer paths from the repository or a prior attempt. Include the
+five manifest binding lines (`root_bead_id`, `source_bead_id`, `attempt`,
 `scope_ref`, and `context_path`), and set both
 `gstack.plan_review.synthesis_path` and `gstack.plan_review.output_path` to
 that exact path.
