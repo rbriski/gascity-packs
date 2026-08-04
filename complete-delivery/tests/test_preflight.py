@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -4046,28 +4047,146 @@ class SourceArtifactTests(unittest.TestCase):
                     )
                 )
 
-    def test_requirements_first_attempt_fixture_passes_complete_schema_contract(self) -> None:
-        result = self.run_check(
-            self.artifact(artifact_kind="requirements"),
-            artifact_kind="requirements",
-            command_args=("--context", "requirements"),
-            step_metadata={
-                "gc.attempt": "1",
-                "gc.step_id": "requirements",
-                "gc.step_ref": "complete-delivery.requirements.iteration.1",
-            },
-            root_metadata_updates=self.source_artifact_context_root_metadata(),
+    def test_compiled_requirements_contract_produces_valid_attempt_artifacts(self) -> None:
+        with FORMULA_PATH.open("rb") as formula_file:
+            formula = tomllib.load(formula_file)
+        step = next(item for item in formula["steps"] if item["id"] == "requirements")
+        description_path = (FORMULA_PATH.parent / step["description_file"]).resolve()
+        compiled_description = description_path.read_text(encoding="utf-8")
+        compiled_description = compiled_description.replace(
+            "{{requirements_path}}", "artifacts/delivery/requirements.md"
+        ).replace("{{interaction_mode}}", "autonomous")
+        materialized_step = {
+            "description": compiled_description,
+            "metadata": step["metadata"],
+        }
+
+        self.assertTrue(materialized_step["description"].strip())
+        self.assertNotIn("{{requirements_path}}", materialized_step["description"])
+        self.assertEqual(
+            materialized_step["metadata"]["gc.build.artifact_schema"],
+            "gc.build.requirements.v1",
+        )
+        template_match = re.search(
+            r"```yaml\n(?P<front_matter>.*?)\n```",
+            materialized_step["description"],
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            template_match,
+            "compiled requirements task must carry the complete front-matter template",
+        )
+        assert template_match is not None
+        front_matter_template = template_match.group("front_matter")
+        self.assertIn("path: beads/<source-id>", front_matter_template)
+        self.assertIn("hash: bead:<source-id>", front_matter_template)
+
+        acceptance_criteria = "The requested outcome is delivered."
+        source_hash = "sha256:" + hashlib.sha256(
+            acceptance_criteria.encode("utf-8")
+        ).hexdigest()
+        required_sections = (
+            "Problem Statement",
+            "W6H",
+            "User Stories",
+            "Technical Stories",
+            "Behavior Requirements",
+            "Example Mapping",
+            "Acceptance Criteria",
+            "Out Of Scope",
+            "Open Questions",
         )
 
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        manifest = json.loads(result.stdout)
-        self.assertEqual(manifest["attempt"], 1)
-        self.assertEqual(manifest["logical_control_id"], "")
-        self.assertEqual(manifest["attempt_log"], [])
-        self.assertEqual(
-            manifest["permitted_output_paths"],
-            [manifest["canonical_paths"]["requirements_path"]],
-        )
+        for attempt in (1, 2, 3):
+            with self.subTest(attempt=attempt):
+                front_matter = (
+                    front_matter_template.replace("<CLAIMED_ROOT_BEAD_ID>", "root-1")
+                    .replace(
+                        "<positive integer from metadata.gc.attempt>", str(attempt)
+                    )
+                    .replace("<source-id>", "fi-123")
+                )
+                body = [
+                    "## Source Intent\n\nfi-123 — Requested delivery",
+                    *(f"## {section}\n\n{section} content." for section in required_sections),
+                    "## Coverage\n\n| ID | Status |\n| --- | --- |\n| source-intent | covered |",
+                ]
+                artifact = (
+                    "---\n"
+                    + front_matter
+                    + "\nsource:\n"
+                    + "  id: fi-123\n"
+                    + f"  title: {json.dumps('Requested delivery')}\n"
+                    + "  anchor: gc:fi-123\n"
+                    + f"  acceptance_criteria_sha256: {source_hash}\n"
+                    + "---\n\n"
+                    + "\n\n".join(body)
+                    + "\n"
+                )
+                attempt_log = [
+                    {
+                        "action": "fail",
+                        "attempt": str(prior_attempt),
+                        "outcome": "fail",
+                        "reason": f"forced requirements validation failure {prior_attempt}",
+                    }
+                    for prior_attempt in range(1, attempt)
+                ]
+                step_metadata = {
+                    **materialized_step["metadata"],
+                    "gc.attempt": str(attempt),
+                    "gc.step_id": "requirements",
+                    "gc.step_ref": (
+                        "complete-delivery.requirements"
+                        f".iteration.{attempt}"
+                    ),
+                }
+                control = None
+                if attempt > 1:
+                    step_metadata.update(
+                        {
+                            "gc.control_for": "control-1",
+                            "gc.idempotency_key": f"control-1:attempt:{attempt}",
+                        }
+                    )
+                    control = [
+                        {
+                            "id": "control-1",
+                            "title": "source artifact",
+                            "description": materialized_step["description"],
+                            "metadata": {
+                                "gc.root_bead_id": "root-1",
+                                "gc.step_id": "requirements",
+                                "gc.step_ref": "complete-delivery.requirements",
+                                "gc.run_target": "gstack.office-hours",
+                                "gc.attempt_log": json.dumps(
+                                    attempt_log, separators=(",", ":")
+                                ),
+                            },
+                        }
+                    ]
+
+                result = self.run_check(
+                    artifact,
+                    artifact_kind="requirements",
+                    command_args=("--context", "requirements"),
+                    step_metadata=step_metadata,
+                    control_json=control,
+                    root_metadata_updates=self.source_artifact_context_root_metadata(),
+                )
+
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                manifest = json.loads(result.stdout)
+                self.assertEqual(manifest["attempt"], attempt)
+                self.assertEqual(manifest["attempt_log"], attempt_log)
+                self.assertEqual(
+                    manifest["prior_failure_reason"],
+                    attempt_log[-1]["reason"] if attempt_log else "",
+                )
+                self.assertEqual(
+                    manifest["permitted_output_paths"],
+                    [manifest["canonical_paths"]["requirements_path"]],
+                )
 
     def test_source_artifact_context_recovers_exact_retry_failure_from_control(self) -> None:
         retry_metadata = {

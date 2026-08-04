@@ -49,8 +49,8 @@ producer:
 status: approved
 trace:
   upstream:
-    - path: gc:<source-id>
-      hash: <the source acceptance-criteria sha256 value>
+    - path: beads/<source-id>
+      hash: bead:<source-id>
       ids: [source-intent]
   coverage:
     - id: source-intent
@@ -61,8 +61,17 @@ The body must contain all required H2 sections, in this order: `Problem
 Statement`, `W6H`, `User Stories`, `Technical Stories`, `Behavior
 Requirements`, `Example Mapping`, `Acceptance Criteria`, `Out Of Scope`, and
 `Open Questions`. Include a Markdown coverage table whose `source-intent`
-status exactly matches the YAML trace coverage. Do not omit `trace`, substitute
-blank provenance values, or serialize `producer.attempt` as a string.
+status exactly matches the YAML trace coverage, using this validator-recognized
+shape:
+
+| ID | Status |
+| --- | --- |
+| source-intent | covered |
+
+Do not omit `trace`, substitute blank provenance values, or serialize
+`producer.attempt` as a string. Because the durable input is a bead, do not use
+`gc:<source-id>` or the acceptance-criteria digest as its trace path/hash; the
+canonical trace pair is `beads/<source-id>` and `bead:<source-id>`.
 In YAML front matter, record `source.id`, `source.title`,
 `source.anchor: gc:<source-id>`, and `source.acceptance_criteria_sha256` using
 the exact durable values resolved above. The hash is `sha256:` plus the SHA-256
@@ -91,11 +100,13 @@ The task contract is immutable across all three attempts: a retry must use this
 same nonblank task body, its canonical output path, and the exact prior failure
 reason supplied by the context manifest. On success, close the claimed attempt
 with `gc.outcome=pass` and record `gc.build.requirements_path` as the exact
-canonical requirements path. On a repair attempt, preserve the existing file
-and repair the specific `prior_failure_reason`; never replace the task contract
-with an empty description or infer a different output authority. The graph's
-source-artifact check validates schema `gc.build.requirements.v1` and requires
-the exact durable source fields; missing or mismatched grounding is non-pass.
+canonical requirements path using `gc bd update "<CLAIMED_ROOT_BEAD_ID>"
+--set-metadata "gc.build.requirements_path=<canonical requirements path>"`. On a
+repair attempt, preserve the existing file and repair the specific
+`prior_failure_reason`; never replace the task contract with an empty
+description or infer a different output authority. The graph's source-artifact
+check validates schema `gc.build.requirements.v1` and requires the exact
+durable source fields; missing or mismatched grounding is non-pass.
 
 Do not invoke provider-native subagents. This Gas City lane is the
 office-hours worker for the build.
