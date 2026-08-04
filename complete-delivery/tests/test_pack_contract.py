@@ -247,7 +247,7 @@ class FormulaContractBaseTests:
 class FormulaContractTests(FormulaContractBaseTests, unittest.TestCase):
     SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-external-review-passed.sh"
 
-    def run_check(self, outcome: str) -> subprocess.CompletedProcess[str]:
+    def run_check(self, outcome: str = "pass", *, mode: str = "normal") -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             fake_gc = root / "gc"
@@ -256,7 +256,25 @@ class FormulaContractTests(FormulaContractBaseTests, unittest.TestCase):
 if [ "$1" = "bd" ] && [ "$2" = "show" ]; then
   if [ "$3" = "gate" ]; then printf '%s\\n' "$FAKE_STEP_JSON"; else printf '%s\\n' "$FAKE_ROOT_JSON"; fi
 elif [ "$1" = "bd" ] && [ "$2" = "list" ]; then
-  printf '%s\\n' "$FAKE_LIST_JSON"
+  printf '%s\\n' "$@" > "$FAKE_GC_ARGS"
+  if [ "$FAKE_LIST_MODE" = "oversized" ]; then
+    python3 - <<'PY'
+import json
+print(json.dumps([{
+    "id": "external-scope",
+    "status": "closed",
+    "description": "x" * (3 * 1024 * 1024),
+    "metadata": {
+        "gc.root_bead_id": "root",
+        "gc.step_id": "external-review",
+        "gc.kind": "scope",
+        "gc.outcome": "pass",
+    },
+}]))
+PY
+  else
+    printf '%s\\n' "$FAKE_LIST_JSON"
+  fi
 else
   exit 64
 fi
@@ -272,27 +290,64 @@ fi
                     "metadata": {"gc.root_bead_id": "root"},
                 }]),
                 "FAKE_ROOT_JSON": json.dumps([{"id": "root", "metadata": {}}]),
-                "FAKE_LIST_JSON": json.dumps([{
-                    "id": "external-scope",
-                    "status": "closed",
-                    "metadata": {
-                        "gc.root_bead_id": "root",
-                        "gc.step_id": "external-review",
-                        "gc.kind": "scope",
-                        "gc.outcome": outcome,
-                    },
-                }]),
+                "FAKE_LIST_MODE": mode,
+                "FAKE_GC_ARGS": str(root / "gc-args"),
                 "PATH": f"{root}:{environment['PATH']}",
             })
-            return subprocess.run(
+            candidate = {
+                "id": "external-scope",
+                "status": "closed",
+                "metadata": {
+                    "gc.root_bead_id": "root",
+                    "gc.step_id": "external-review",
+                    "gc.kind": "scope",
+                    "gc.outcome": outcome,
+                },
+            }
+            if mode == "missing":
+                candidates = []
+            elif mode == "duplicate":
+                candidates = [candidate, {**candidate, "id": "external-scope-2"}]
+            else:
+                if mode == "nonterminal":
+                    candidate["status"] = "in_progress"
+                elif mode == "wrong-kind":
+                    candidate["metadata"]["gc.kind"] = "workflow"
+                elif mode == "wrong-step":
+                    candidate["metadata"]["gc.step_id"] = "report-green"
+                elif mode == "wrong-root":
+                    candidate["metadata"]["gc.root_bead_id"] = "other-root"
+                candidates = [candidate]
+            environment["FAKE_LIST_JSON"] = json.dumps(candidates)
+            result = subprocess.run(
                 ["bash", str(self.SCRIPT)], capture_output=True, text=True, env=environment
             )
+            result.gc_args = (root / "gc-args").read_text(encoding="utf-8")
+            return result
 
     def test_requires_the_nested_scope_to_explicitly_pass(self) -> None:
         self.assertEqual(self.run_check("pass").returncode, 0)
         failed = self.run_check("fail")
         self.assertEqual(failed.returncode, 1)
         self.assertIn("external-review scope did not pass", failed.stderr)
+
+    def test_external_review_scope_query_is_exact_and_argv_safe(self) -> None:
+        passed = self.run_check("pass")
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertIn("gc.root_bead_id=root", passed.gc_args)
+        self.assertIn("gc.step_id=external-review", passed.gc_args)
+        self.assertIn("gc.kind=scope", passed.gc_args)
+
+        # This payload is larger than a typical ARG_MAX. It must be accepted
+        # through stdin rather than forwarded as one Python argv element.
+        oversized = self.run_check(mode="oversized")
+        self.assertEqual(oversized.returncode, 0, oversized.stderr)
+
+    def test_requires_one_terminal_matching_external_review_scope(self) -> None:
+        for mode in ("missing", "duplicate", "nonterminal", "wrong-kind", "wrong-step", "wrong-root"):
+            with self.subTest(mode=mode):
+                result = self.run_check(mode=mode)
+                self.assertEqual(result.returncode, 1)
 
     def test_release_controls_abort_the_semantic_release_scope(self) -> None:
         """A failed closed control must quarantine, never unlock, release work."""
