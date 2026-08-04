@@ -71,10 +71,10 @@ def text(value):
     return value if isinstance(value, str) else ""
 
 def attempt_number(value):
-    # Beads persists --set-metadata values as JSON scalars.  Ralph's retry
-    # controller emits gc.attempt as a JSON number, while older callers used
-    # a string.  Normalize only positive integral values; booleans and floats
-    # must not silently become valid retry identities.
+    # Live Ralph retries currently persist gc.attempt as a canonical decimal
+    # string.  Accept a positive JSON integer as narrow storage compatibility,
+    # but never coerce booleans, floats, signs, or noncanonical strings into a
+    # valid retry identity.
     if isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value):
         return value
     if type(value) is int and value > 0:

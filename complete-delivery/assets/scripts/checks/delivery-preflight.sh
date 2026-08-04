@@ -220,12 +220,12 @@ if [ -n "$PRODUCTION_URL" ] && ! is_https_url "$PRODUCTION_URL"; then
   errors+=("production_url must be an https URL")
 fi
 
-if [ "$LAUNCHER_GITHUB_PREFLIGHT" != "github-v1" ]; then
+if [ "$LAUNCHER_GITHUB_PREFLIGHT" != "github-city-v1" ]; then
   errors+=("missing durable authenticated launcher GitHub preflight evidence")
 fi
 
 worker_github_preflight() {
-  local repository_json name_with_owner base_branch encoded_base_branch evidence
+  local origin_url repository_json name_with_owner base_branch encoded_base_branch evidence
   if ! delivery_is_preflight_control; then
     errors+=("worker GitHub preflight can only attest the complete-delivery delivery-preflight control")
     return 1
@@ -234,7 +234,11 @@ worker_github_preflight() {
     errors+=("worker gh authentication check failed")
     return 1
   fi
-  if ! repository_json="$(gh repo view --json nameWithOwner 2>/dev/null)"; then
+  if ! origin_url="$(git remote get-url origin 2>/dev/null)" || [ -z "$origin_url" ]; then
+    errors+=("worker GitHub repository resolution found no origin remote")
+    return 1
+  fi
+  if ! repository_json="$(gh repo view "$origin_url" --json nameWithOwner 2>/dev/null)"; then
     errors+=("worker GitHub repository resolution failed")
     return 1
   fi
@@ -275,9 +279,9 @@ PY
   WORKER_GITHUB_PREFLIGHT="$evidence"
 }
 
-# Gas City 1.4's Ralph ConditionEnv intentionally sanitizes HOME.  The first
-# worker runs the credentialed checks and writes root-bound evidence; retries
-# and mechanical conditions must never touch gh or a credential store.
+# The first worker revalidates the launcher's city capability and writes
+# root-bound evidence. Later iterations consume that exact evidence rather
+# than minting a second attestation.
 if [ -z "${GC_ITERATION:-}" ]; then
   worker_github_preflight || true
 elif ! delivery_worker_preflight_evidence_is_valid "$WORKER_GITHUB_PREFLIGHT"; then

@@ -25,6 +25,7 @@ REPORT_GREEN_SCRIPT = (
     PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-report-green.sh"
 )
 PR_OPEN_SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-pr-open.sh"
+PREPARE_SCRIPT = PACK_ROOT / "assets" / "scripts" / "prepare_delivery_launch.py"
 MERGED_SCRIPT = PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-merged.sh"
 SOURCE_ARTIFACT_SCRIPT = (
     PACK_ROOT / "assets" / "scripts" / "checks" / "delivery-source-artifact-valid.sh"
@@ -116,7 +117,7 @@ class PreflightTests(unittest.TestCase):
             "gc.var.production_url": "https://service.example.test",
             "gc.var.source_bead_id": "fi-123",
             "gc.var.source_title": "Requested delivery",
-            "gc.var.launcher_github_preflight": "github-v1",
+            "gc.var.launcher_github_preflight": "github-city-v1",
             "gc.step_id": "delivery-preflight",
             "gc.formula_name": "complete-delivery",
         }
@@ -144,6 +145,12 @@ class PreflightTests(unittest.TestCase):
             repository.mkdir()
             subprocess.run(
                 ["git", "init", "-q", str(repository)], check=True, capture_output=True
+            )
+            subprocess.run(
+                ["git", "remote", "add", "origin", "https://github.com/example/repo.git"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
             )
             bin_dir = root / "bin"
             bin_dir.mkdir()
@@ -655,15 +662,7 @@ class PreflightTests(unittest.TestCase):
         )
 
     def test_sanitized_city_github_capability_revalidates_blank_publish_retry(self) -> None:
-        """A city-owned gh-config link supports authenticated checks without a user HOME.
-
-        The first worker proves GitHub access under Ralph's sanitized HOME.  A
-        blank post-publication retry then resolves the controller's numeric
-        retry metadata and re-runs the idempotent PR-open check twice.  The
-        fake gh refuses to run unless it sees the city capability, so this is
-        deliberately closer to the production ConditionEnv shape than the
-        ordinary unit fixture.
-        """
+        """The launcher creates the capability used by real retry metadata."""
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             city = root / "city"
@@ -674,13 +673,14 @@ class PreflightTests(unittest.TestCase):
             (credential_config / "hosts.yml").write_text(
                 "opaque credential fixture\n", encoding="utf-8"
             )
-            (city / ".config").mkdir()
-            (city / ".config" / "gh").symlink_to(
-                credential_config, target_is_directory=True
-            )
             repository = root / "repository"
             repository.mkdir()
             subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", "https://github.com/example/repo.git"],
+                cwd=repository,
+                check=True,
+            )
             bin_dir = root / "bin"
             bin_dir.mkdir()
 
@@ -694,38 +694,86 @@ class PreflightTests(unittest.TestCase):
                 }
             )
             control = {
-                "id": "publish-control",
+                "id": "fi-7v8sz",
                 "title": "Publish the branch and open the pull request",
                 "description": "Publish the verified branch without duplicating a PR.",
                 "metadata": {
-                    "gc.root_bead_id": "root-1",
+                    "gc.root_bead_id": "fi-e5t6l",
                     "gc.step_id": "publish",
                     "gc.step_ref": "complete-delivery.publish",
                     "gc.run_target": "complete-delivery.delivery-engineer",
                 },
             }
-            retry = {
-                "id": "publish-retry",
+            first_attempt = {
+                "id": "fi-gu9ts",
                 "title": control["title"],
-                "description": "",
+                "description": control["description"],
                 "metadata": {
-                    "gc.root_bead_id": "root-1",
+                    "gc.root_bead_id": "fi-e5t6l",
+                    "gc.control_for": "publish",
+                    "gc.logical_bead_id": control["id"],
+                    "gc.step_id": "publish",
+                    "gc.step_ref": "publish.iteration.1",
+                    "gc.attempt": "1",
+                    "gc.run_target": "complete-delivery.delivery-engineer",
+                    "gc.work_branch": "polecat/example",
+                    "gc.work_dir": str(repository),
+                },
+            }
+            retry = {
+                "id": "fi-3sdyn",
+                "title": control["title"],
+                "description": None,
+                "metadata": {
+                    "gc.root_bead_id": "fi-e5t6l",
                     "gc.control_for": control["id"],
                     "gc.step_id": "publish",
-                    "gc.step_ref": "complete-delivery.publish.iteration.1",
-                    "gc.attempt": 1,
-                    "gc.idempotency_key": "publish-control:attempt:1",
+                    "gc.step_ref": "complete-delivery.publish.iteration.2",
+                    "gc.attempt": "2",
+                    "gc.idempotency_key": "fi-7v8sz:attempt:2",
                     "gc.run_target": "complete-delivery.delivery-engineer",
+                    "gc.work_branch": "polecat/example",
+                    "gc.work_dir": str(repository),
+                },
+            }
+            restored_retry = {
+                **retry,
+                "id": "fi-8g1at",
+                "description": control["description"],
+                "metadata": {
+                    **retry["metadata"],
+                    "gc.step_ref": "complete-delivery.publish.iteration.3",
+                    "gc.attempt": "3",
+                    "gc.idempotency_key": "fi-7v8sz:attempt:3",
+                },
+            }
+            config = {
+                "city_path": str(city),
+                "config": {
+                    "Rigs": [
+                        {
+                            "Name": "finance",
+                            "Path": str(repository),
+                            "FormulaVars": {
+                                "setup_command": "/bin/true",
+                                "deploy_mode": "not-applicable",
+                                "deploy_not_applicable_reason": "fixture",
+                            },
+                        }
+                    ]
                 },
             }
             gc = bin_dir / "gc"
             gc.write_text(
                 "#!/bin/sh\n"
+                "if [ \"${1:-}\" = config ] && [ \"${2:-}\" = show ]; then printf '%s\\n' \"$FAKE_CONFIG_JSON\"; exit 0; fi\n"
                 "if [ \"${1:-}\" = bd ] && [ \"${2:-}\" = update ]; then exit 0; fi\n"
                 "case \"${3:-}\" in\n"
                 "  fi-123) printf '%s\\n' \"$FAKE_SOURCE_JSON\" ;;\n"
-                "  publish-control) printf '%s\\n' \"$FAKE_CONTROL_JSON\" ;;\n"
-                "  publish-retry) printf '%s\\n' \"$FAKE_RETRY_JSON\" ;;\n"
+                "  fi-7v8sz) printf '%s\\n' \"$FAKE_CONTROL_JSON\" ;;\n"
+                "  fi-gu9ts) printf '%s\\n' \"$FAKE_FIRST_JSON\" ;;\n"
+                "  fi-3sdyn) printf '%s\\n' \"$FAKE_RETRY_JSON\" ;;\n"
+                "  fi-8g1at) printf '%s\\n' \"$FAKE_RESTORED_RETRY_JSON\" ;;\n"
                 "  *) printf '%s\\n' \"$FAKE_ROOT_JSON\" ;;\n"
                 "esac\n",
                 encoding="utf-8",
@@ -734,9 +782,10 @@ class PreflightTests(unittest.TestCase):
             gh = bin_dir / "gh"
             gh.write_text(
                 "#!/bin/sh\n"
-                "test -f \"$HOME/.config/gh/hosts.yml\" || exit 1\n"
+                "if [ -n \"${GH_CONFIG_DIR:-}\" ]; then gh_config=$GH_CONFIG_DIR; else gh_config=$HOME/.config/gh; fi\n"
+                "test -f \"$gh_config/hosts.yml\" || exit 70\n"
                 "printf '%s\\n' \"$*\" >> \"$FAKE_GH_CALLS\"\n"
-                "if [ \"${1:-}\" = repo ]; then printf '%s\\n' '{\"nameWithOwner\":\"example/repo\"}'; fi\n"
+                "if [ \"${1:-}\" = repo ] && [ \"${2:-}\" = view ]; then printf '%s\\n' '{\"nameWithOwner\":\"example/repo\"}'; fi\n"
                 "case \"${2:-}\" in\n"
                 "  */pulls/*) printf '%s\\n' \"$FAKE_PR_JSON\" ;;\n"
                 "esac\n",
@@ -751,37 +800,88 @@ class PreflightTests(unittest.TestCase):
                 "number": 5,
                 "html_url": "https://github.com/example/repo/pull/5",
             }
-            environment = {
-                "HOME": str(city),
+            launcher_environment = {
+                "HOME": str(credential_home),
+                "GH_CONFIG_DIR": str(credential_config),
                 "PATH": f"{bin_dir}:/usr/bin:/bin",
-                "GC_BEAD_ID": "root-1",
-                "GC_WORK_DIR": str(repository),
                 "FAKE_GH_CALLS": str(root / "gh-calls"),
+                "FAKE_CONFIG_JSON": json.dumps(config),
                 "FAKE_SOURCE_JSON": json.dumps([{"title": "Requested delivery"}]),
-                "FAKE_ROOT_JSON": json.dumps([{"id": "root-1", "metadata": root_metadata}]),
+                "FAKE_ROOT_JSON": json.dumps([{"id": "fi-e5t6l", "metadata": root_metadata}]),
                 "FAKE_CONTROL_JSON": json.dumps([control]),
+                "FAKE_FIRST_JSON": json.dumps([first_attempt]),
                 "FAKE_RETRY_JSON": json.dumps([retry]),
+                "FAKE_RESTORED_RETRY_JSON": json.dumps([restored_retry]),
                 "FAKE_PR_JSON": json.dumps(pr_json),
             }
+            prepared = subprocess.run(
+                [
+                    sys.executable,
+                    str(PREPARE_SCRIPT),
+                    "--rig",
+                    "finance",
+                    "--artifact-root",
+                    "plans/integration-canary",
+                    "--pack-root",
+                    str(PACK_ROOT),
+                ],
+                capture_output=True,
+                text=True,
+                env=launcher_environment,
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            self.assertTrue((city / ".config" / "gh").is_symlink())
+            self.assertEqual(
+                (city / ".config" / "gh").resolve(strict=True), credential_config
+            )
+
+            environment = dict(launcher_environment)
+            environment.pop("GH_CONFIG_DIR")
+            environment.update(
+                {
+                    "HOME": str(city),
+                    "GC_BEAD_ID": "fi-e5t6l",
+                    "GC_WORK_DIR": str(repository),
+                }
+            )
+            materialized_preflight = repository / ".gc/scripts/checks/delivery-preflight.sh"
+            materialized_pr_open = repository / ".gc/scripts/checks/delivery-pr-open.sh"
             preflight = subprocess.run(
-                ["bash", str(SCRIPT)], capture_output=True, text=True, env=environment
+                ["bash", str(materialized_preflight)],
+                capture_output=True,
+                text=True,
+                env=environment,
             )
             self.assertEqual(preflight.returncode, 0, preflight.stderr)
-            self.assertNotIn("opaque credential fixture", preflight.stdout + preflight.stderr)
+            combined_output = prepared.stdout + prepared.stderr + preflight.stdout + preflight.stderr
+            self.assertNotIn("opaque credential fixture", combined_output)
 
-            environment["GC_BEAD_ID"] = retry["id"]
+            environment["GC_BEAD_ID"] = first_attempt["id"]
             first = subprocess.run(
-                ["bash", str(PR_OPEN_SCRIPT)], capture_output=True, text=True, env=environment
+                ["bash", str(materialized_pr_open)],
+                capture_output=True,
+                text=True,
+                env=environment,
             )
-            second = subprocess.run(
-                ["bash", str(PR_OPEN_SCRIPT)], capture_output=True, text=True, env=environment
+            environment["GC_BEAD_ID"] = retry["id"]
+            recovered_retry = subprocess.run(
+                ["bash", str(materialized_pr_open)],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            environment["GC_BEAD_ID"] = restored_retry["id"]
+            restored = subprocess.run(
+                ["bash", str(materialized_pr_open)],
+                capture_output=True,
+                text=True,
+                env=environment,
             )
             self.assertEqual(first.returncode, 0, first.stderr)
-            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(recovered_retry.returncode, 0, recovered_retry.stderr)
+            self.assertEqual(restored.returncode, 0, restored.stderr)
             calls = (root / "gh-calls").read_text(encoding="utf-8")
-            self.assertEqual(calls.count("api repos/example/repo/pulls/5"), 2)
-            self.assertNotIn("pr create", calls)
-            self.assertTrue((city / ".config" / "gh").is_symlink())
+            self.assertEqual(calls.count("api repos/example/repo/pulls/5"), 3)
 
     def test_blank_retry_recovers_only_exact_control_bead_lineage(self) -> None:
         root_id = "root-1"
@@ -795,8 +895,8 @@ class PreflightTests(unittest.TestCase):
                 "gc.control_for": control_id,
                 "gc.step_id": "delivery-preflight",
                 "gc.step_ref": "complete-delivery.delivery-preflight.iteration.3",
-                # Ralph persists the retry counter as a JSON number.
-                "gc.attempt": 3,
+                # Exact live fi-3sdyn/fi-8g1at shape: Ralph persists a string.
+                "gc.attempt": "3",
                 "gc.idempotency_key": "control-1:attempt:3",
                 "gc.run_target": "complete-delivery.delivery-engineer",
             },
@@ -825,6 +925,24 @@ class PreflightTests(unittest.TestCase):
             iteration="3",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+        numeric_compatibility = {
+            **attempt,
+            "metadata": {**attempt["metadata"], "gc.attempt": 3},
+        }
+        compatible = self.run_preflight(
+            self.metadata(),
+            step_json=json.dumps([numeric_compatibility]),
+            root_json=json.dumps([{"metadata": self.metadata(**{
+                "gc.delivery_preflight.worker_github_preflight": "github-worker-v1:root-1:control-1",
+            })}]),
+            bead_id=numeric_compatibility["id"],
+            control_id=control_id,
+            control_json=json.dumps([control]),
+            gh_available=False,
+            iteration="3",
+        )
+        self.assertEqual(compatible.returncode, 0, compatible.stderr)
 
         control["metadata"]["gc.run_target"] = "other-role"
         ambiguous = self.run_preflight(

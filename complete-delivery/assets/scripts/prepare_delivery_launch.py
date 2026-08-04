@@ -98,6 +98,12 @@ MAX_DURATION_SECONDS = Decimal(3600)
 DURATION = re.compile(r"([0-9]+(?:\.[0-9]+)?|\.[0-9]+)([smhd]?)")
 CI_WORKFLOW = re.compile(r"\.github/workflows/[A-Za-z0-9_./-]+\.ya?ml")
 HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+GITHUB_CREDENTIAL_ENVIRONMENT = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -138,7 +144,7 @@ def gc_config_timeout_seconds() -> float:
     return timeout
 
 
-def run_gc_config() -> dict[str, Any]:
+def run_gc_config() -> tuple[dict[str, Any], Path]:
     timeout_seconds = gc_config_timeout_seconds()
     try:
         result = subprocess.run(
@@ -165,7 +171,24 @@ def run_gc_config() -> dict[str, Any]:
         raise LaunchPreflightError("gc config show returned malformed JSON") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("config"), dict):
         raise LaunchPreflightError("gc config show returned no exact resolved config object")
-    return payload["config"]
+    city_value = payload.get("city_path")
+    if (
+        not isinstance(city_value, str)
+        or not city_value
+        or city_value != city_value.strip()
+        or has_control_characters(city_value)
+    ):
+        raise LaunchPreflightError("gc config show returned no exact city path")
+    city_path = Path(city_value)
+    if not city_path.is_absolute():
+        raise LaunchPreflightError("resolved city path must be absolute")
+    try:
+        resolved_city_path = city_path.resolve(strict=True)
+    except OSError as exc:
+        raise LaunchPreflightError(f"resolved city path is unavailable: {exc}") from exc
+    if resolved_city_path != city_path or city_path == Path("/") or not city_path.is_dir():
+        raise LaunchPreflightError("resolved city path must be one canonical directory")
+    return payload["config"], city_path
 
 
 def target_rig(config: dict[str, Any], name: str) -> dict[str, Any]:
@@ -437,7 +460,13 @@ def validate_profile(profile: dict[str, Any]) -> list[str]:
     return errors
 
 
-def run_github_command(arguments: list[str], *, cwd: Path, purpose: str) -> str:
+def run_github_command(
+    arguments: list[str],
+    *,
+    cwd: Path,
+    purpose: str,
+    environment: dict[str, str] | None = None,
+) -> str:
     """Run a launcher-only GitHub prerequisite without exposing credentials."""
 
     timeout_seconds = gc_config_timeout_seconds()
@@ -449,6 +478,7 @@ def run_github_command(arguments: list[str], *, cwd: Path, purpose: str) -> str:
             text=True,
             timeout=timeout_seconds,
             check=False,
+            env=environment,
         )
     except FileNotFoundError as exc:
         raise LaunchPreflightError("gh is required on PATH") from exc
@@ -459,14 +489,69 @@ def run_github_command(arguments: list[str], *, cwd: Path, purpose: str) -> str:
     except OSError as exc:
         raise LaunchPreflightError(f"could not execute {purpose}: {exc}") from exc
     if result.returncode:
-        diagnostic = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
-        raise LaunchPreflightError(
-            f"{purpose} failed with status {result.returncode}: {diagnostic}"
-        )
+        # GitHub CLI diagnostics may include authentication context supplied by
+        # credential helpers.  The status and named predicate are sufficient
+        # for a fail-closed launch error; never echo command output here.
+        raise LaunchPreflightError(f"{purpose} failed with status {result.returncode}")
     return result.stdout
 
 
-def verify_github_delivery_prerequisites(rig_root: Path, profile: dict[str, Any]) -> None:
+def origin_remote_url(rig_root: Path) -> str:
+    """Return one safe explicit origin URL without printing embedded state."""
+
+    timeout_seconds = gc_config_timeout_seconds()
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=rig_root,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LaunchPreflightError("registered rig has no readable origin remote") from exc
+    value = result.stdout.strip()
+    if (
+        result.returncode
+        or not value
+        or value != result.stdout.rstrip("\n")
+        or has_control_characters(value)
+        or any(character.isspace() for character in value)
+    ):
+        raise LaunchPreflightError("registered rig has no safe origin remote URL")
+
+    if "://" in value:
+        try:
+            parsed = urlsplit(value)
+            parsed.port
+        except ValueError as exc:
+            raise LaunchPreflightError("registered rig origin remote URL is invalid") from exc
+        components = [component for component in parsed.path.split("/") if component]
+        if (
+            parsed.scheme not in {"https", "ssh"}
+            or not parsed.hostname
+            or parsed.password is not None
+            or (parsed.scheme == "https" and parsed.username is not None)
+            or parsed.query
+            or parsed.fragment
+            or len(components) != 2
+        ):
+            raise LaunchPreflightError("registered rig origin remote URL is not a safe GitHub repository")
+    elif not re.fullmatch(
+        r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9.-]+:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?",
+        value,
+    ):
+        raise LaunchPreflightError("registered rig origin remote URL is not a safe GitHub repository")
+    return value
+
+
+def verify_github_delivery_prerequisites(
+    rig_root: Path,
+    profile: dict[str, Any],
+    *,
+    environment: dict[str, str] | None = None,
+) -> None:
     """Verify credentialed GitHub facts before Formula ConditionEnv is sanitized.
 
     Formula v2 executes its mechanical checks with a deliberately restricted
@@ -474,6 +559,12 @@ def verify_github_delivery_prerequisites(rig_root: Path, profile: dict[str, Any]
     gh credential store.  The Formula receives a versioned durable attestation
     only after all three live GitHub predicates below have passed.
     """
+
+    command_environment = os.environ.copy() if environment is None else environment.copy()
+    # Repository identity must come from the registered rig checkout, never an
+    # ambient CI/CLI override that points gh at a different repository.
+    command_environment.pop("GH_REPO", None)
+    command_environment.pop("GITHUB_REPOSITORY", None)
 
     timeout_seconds = gc_config_timeout_seconds()
     try:
@@ -490,11 +581,17 @@ def verify_github_delivery_prerequisites(rig_root: Path, profile: dict[str, Any]
     if repository.returncode or repository.stdout.strip() != "true":
         raise LaunchPreflightError("registered rig is not a readable git worktree")
 
-    run_github_command(["auth", "status"], cwd=rig_root, purpose="gh authentication check")
+    run_github_command(
+        ["auth", "status"],
+        cwd=rig_root,
+        purpose="gh authentication check",
+        environment=command_environment,
+    )
     repo_json = run_github_command(
-        ["repo", "view", "--json", "nameWithOwner"],
+        ["repo", "view", origin_remote_url(rig_root), "--json", "nameWithOwner"],
         cwd=rig_root,
         purpose="GitHub repository resolution",
+        environment=command_environment,
     )
     try:
         payload = json.loads(repo_json)
@@ -515,7 +612,103 @@ def verify_github_delivery_prerequisites(rig_root: Path, profile: dict[str, Any]
         ],
         cwd=rig_root,
         purpose=f"protected base branch check for {base_branch}",
+        environment=command_environment,
     )
+
+
+def github_config_source(environment: dict[str, str] | None = None) -> Path:
+    """Resolve the config directory used by the authenticated launcher gh.
+
+    GitHub CLI prefers GH_CONFIG_DIR, then XDG_CONFIG_HOME, then HOME.  Honor
+    that order instead of assuming a particular user's home directory.  The
+    directory is linked, never copied or inspected, so credentials cannot
+    enter launcher output or the target repository.
+    """
+
+    values = os.environ if environment is None else environment
+    if values.get("GH_CONFIG_DIR"):
+        raw_value = values["GH_CONFIG_DIR"]
+    elif values.get("XDG_CONFIG_HOME"):
+        raw_value = str(Path(values["XDG_CONFIG_HOME"]) / "gh")
+    elif values.get("HOME"):
+        raw_value = str(Path(values["HOME"]) / ".config" / "gh")
+    else:
+        raise LaunchPreflightError(
+            "authenticated GitHub config cannot be located without GH_CONFIG_DIR, "
+            "XDG_CONFIG_HOME, or HOME"
+        )
+    if (
+        raw_value != raw_value.strip()
+        or has_control_characters(raw_value)
+        or not Path(raw_value).is_absolute()
+    ):
+        raise LaunchPreflightError("authenticated GitHub config path must be absolute and canonical")
+    try:
+        source = Path(raw_value).resolve(strict=True)
+    except OSError as exc:
+        raise LaunchPreflightError("authenticated GitHub config directory is unavailable") from exc
+    if not source.is_dir():
+        raise LaunchPreflightError("authenticated GitHub config path is not a directory")
+    return source
+
+
+def validate_city_github_destination(city_path: Path, source: Path) -> Path:
+    """Validate a collision-free city capability destination without writing."""
+
+    config_parent = city_path / ".config"
+    destination = config_parent / "gh"
+    if config_parent.is_symlink() or (config_parent.exists() and not config_parent.is_dir()):
+        raise LaunchPreflightError("city GitHub capability parent is not a real directory")
+    if destination.is_symlink():
+        try:
+            resolved_destination = destination.resolve(strict=True)
+        except OSError as exc:
+            raise LaunchPreflightError("city GitHub capability is a broken symlink") from exc
+        if resolved_destination != source:
+            raise LaunchPreflightError("city GitHub capability collides with a different symlink")
+        return destination
+    if destination.exists():
+        raise LaunchPreflightError("city GitHub capability collides with an existing path")
+    return destination
+
+
+def establish_city_github_capability(
+    city_path: Path, *, environment: dict[str, str] | None = None
+) -> Path:
+    """Create or revalidate the city-owned gh-config link without overwriting."""
+
+    source = github_config_source(environment)
+    destination = validate_city_github_destination(city_path, source)
+    if destination.is_symlink():
+        return destination
+    parent = destination.parent
+    try:
+        parent.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    if parent.is_symlink() or not parent.is_dir():
+        raise LaunchPreflightError("city GitHub capability parent is not a real directory")
+    try:
+        destination.symlink_to(source, target_is_directory=True)
+    except FileExistsError:
+        # A concurrent launcher may have installed the same capability.  Only
+        # that exact idempotent result is acceptable; no path is overwritten.
+        pass
+    validate_city_github_destination(city_path, source)
+    return destination
+
+
+def sanitized_city_github_environment(city_path: Path) -> dict[str, str]:
+    """Return the credential shape used by controller workers and exec checks."""
+
+    environment = os.environ.copy()
+    environment["HOME"] = str(city_path)
+    for name in tuple(environment):
+        if name.startswith(("GH_", "GITHUB_", "XDG_")):
+            environment.pop(name)
+    for name in GITHUB_CREDENTIAL_ENVIRONMENT:
+        environment.pop(name, None)
+    return environment
 
 
 def materialization_plan(pack_root: Path, rig_root: Path) -> list[tuple[Path, Path, str]]:
@@ -978,7 +1171,7 @@ def main(argv: list[str] | None = None) -> int:
         if not pack_root.is_dir():
             raise LaunchPreflightError("GC_PACK_DIR must point to the Complete Delivery pack")
 
-        config = run_gc_config()
+        config, city_path = run_gc_config()
         rig = target_rig(config, args.rig)
         rig_root = registered_rig_root(rig, args.rig)
         profile = rig.get("FormulaVars")
@@ -989,14 +1182,26 @@ def main(argv: list[str] | None = None) -> int:
             joined = "\n  - ".join(errors)
             raise LaunchPreflightError(f"Complete Delivery profile is invalid:\n  - {joined}")
 
-        # This must run before Formula v2 creates a root whose future
-        # ConditionEnv deliberately cannot read the launcher's gh config.
-        verify_github_delivery_prerequisites(rig_root, profile)
-
-        # Every validation above, including the collision check and the complete
-        # source/destination plan, runs before the first target-rig mutation.
+        # Resolve all caller-controlled paths and the complete asset source
+        # inventory before establishing a shared controller capability.
         validate_artifact_root(rig_root, args.artifact_root)
         materialization_plan(pack_root, rig_root)
+
+        # First prove the launcher's currently selected credential store. Then
+        # expose that exact directory through the canonical city HOME and repeat
+        # every live predicate with token/config overrides removed. No Formula
+        # graph exists unless both environments authenticate the same rig.
+        verify_github_delivery_prerequisites(rig_root, profile)
+        establish_city_github_capability(city_path)
+        verify_github_delivery_prerequisites(
+            rig_root,
+            profile,
+            environment=sanitized_city_github_environment(city_path),
+        )
+        validate_city_github_destination(city_path, github_config_source())
+
+        # Target-rig writes remain transactional and begin only after the
+        # sanitized controller capability has been independently revalidated.
         installed = materialize_assets(pack_root, rig_root)
     except LaunchPreflightError as exc:
         print(f"gc complete-delivery delivery start: {exc}", file=sys.stderr)

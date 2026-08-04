@@ -105,6 +105,12 @@ begins. A bad profile fails in minutes with a single list of missing settings
 instead of surfacing after implementation. The PR gate evaluates the union of
 explicitly named checks and every check required by branch protection.
 
+Before pouring a graph, the launcher resolves the GitHub CLI config actually
+selected by `GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, or `HOME`, then establishes an
+exact city `.config/gh` symlink for controller workers. It never copies or
+prints credentials, refuses an existing foreign path, and repeats the auth,
+repository, and protected-base checks with the controller's sanitized HOME.
+
 Local-gate commands are trusted repository-owner configuration parsed as a
 restricted executable plus literal arguments. They cannot use pipelines,
 `&&`, redirection, globs, command substitution, or `cd` prefixes. Put commands

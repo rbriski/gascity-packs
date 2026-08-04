@@ -506,6 +506,45 @@ class PrGateContractTests(unittest.TestCase):
     def assert_prose_contains(self, text: str, expected: str) -> None:
         self.assertIn(" ".join(expected.split()), " ".join(text.split()))
 
+    def test_delivery_engineer_recovers_real_retry_shapes_and_never_duplicates_prs(self) -> None:
+        prompt = (
+            PACK_ROOT / "agents" / "delivery-engineer" / "prompt.template.md"
+        ).read_text(encoding="utf-8")
+        publish = (
+            PACK_ROOT / "assets" / "workflows" / "complete-delivery" / "publish.md"
+        ).read_text(encoding="utf-8")
+
+        for requirement in (
+            "A nonblank task description is already the canonical contract",
+            "gc.attempt=\"1\"",
+            "gc.control_for=\"publish\"",
+            "gc.logical_bead_id",
+            "gc.step_ref=\"publish.iteration.1\"",
+            "gc.attempt` is the controller's positive decimal string",
+            "gc.idempotency_key` is exactly `<control-bead-id>:attempt:<attempt>`",
+            "Preserve the claimed/root `gc.work_dir` and `gc.work_branch`",
+            "gc.failure_class=ambiguous_lineage",
+            "release no downstream work",
+        ):
+            self.assert_prose_contains(prompt, requirement)
+
+        for requirement in (
+            "read the exact `origin` URL and pass that URL to `gh repo view`",
+            "If any of `delivery.repo`, `delivery.branch`, `delivery.head_sha`, `delivery.pr_number`, or `delivery.pr_url` is already recorded, treat this as a revalidation",
+            "Require exactly one open match",
+            "A revalidation path must never run `gh pr create`",
+            "With one match, adopt, update, and revalidate it",
+            "More than one match is ambiguous and fails closed",
+            "Only the zero-match branch may run `gh pr create --repo <repository>`, exactly once",
+            "never use a failed validation as permission to open a replacement PR",
+        ):
+            self.assert_prose_contains(publish, requirement)
+
+        self.assertLess(
+            publish.index("Read all existing workflow-root publication identity"),
+            publish.index("Only the zero-match branch may run `gh pr"),
+        )
+
     def test_formula_routes_every_lane_to_a_declared_agent(self) -> None:
         declared_targets = {
             f"complete-delivery.{manifest.parent.name}"
