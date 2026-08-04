@@ -150,7 +150,10 @@ case "$CONTROLLER_HOME" in
   *) echo "$PREFIX: launch preflight returned no canonical controller HOME" >&2; exit 1 ;;
 esac
 
-if timeout --signal=KILL "$SLING_TIMEOUT" env -u GC_HOME -u GC_PACK_DIR HOME="$CONTROLLER_HOME" \
+if timeout --signal=KILL "$SLING_TIMEOUT" env \
+  -u GC_HOME -u GC_PACK_DIR \
+  -u XDG_CACHE_HOME -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u XDG_RUNTIME_DIR -u XDG_STATE_HOME \
+  HOME="$CONTROLLER_HOME" \
   gc sling "$RIG/$AGENT" "$BEAD_ID" --on complete-delivery \
   --var "artifact_root=$ARTIFACT_ROOT" \
   --var "source_bead_id=$BEAD_ID" \

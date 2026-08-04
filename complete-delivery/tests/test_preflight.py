@@ -774,6 +774,7 @@ class PreflightTests(unittest.TestCase):
                 "imports": [
                     {
                         "name": "pack:complete-delivery",
+                        "constraint": f"sha:{controller_commit}",
                         "pin": {
                             "commit": controller_commit,
                             "version": f"sha:{controller_commit}",

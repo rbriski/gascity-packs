@@ -673,6 +673,7 @@ class CommandContractTests(unittest.TestCase):
                 "imports": [
                     {
                         "name": "pack:complete-delivery",
+                        "constraint": f"sha:{controller_commit}",
                         "pin": {
                             "commit": controller_commit,
                             "version": f"sha:{controller_commit}",
@@ -689,7 +690,7 @@ class CommandContractTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 "printf '%s\\n' \"$*\" >> \"$FAKE_GC_CALLS\"\n"
                 "case \"${1:-}:${2:-}\" in import:*|formula:show|sling:*)\n"
-                "  printf 'HOME=%s|GC_HOME=%s|GC_PACK_DIR=%s\\n' \"${HOME:-}\" \"${GC_HOME:-}\" \"${GC_PACK_DIR:-}\" >> \"$FAKE_CONTROLLER_ENVS\" ;;\n"
+                "  printf 'HOME=%s|GC_HOME=%s|GC_PACK_DIR=%s|XDG_CONFIG_HOME=%s\\n' \"${HOME:-}\" \"${GC_HOME:-}\" \"${GC_PACK_DIR:-}\" \"${XDG_CONFIG_HOME:-}\" >> \"$FAKE_CONTROLLER_ENVS\" ;;\n"
                 "esac\n"
                 "if [ \"${1:-}\" = config ] && [ \"${2:-}\" = show ]; then\n"
                 "  [ \"${FAKE_GC_SLEEP_STAGE:-}\" != config ] || exec sleep 5\n"
@@ -749,6 +750,7 @@ class CommandContractTests(unittest.TestCase):
             fake_gh.chmod(0o755)
             environment = os.environ.copy()
             environment["GC_PACK_DIR"] = str(PACK_ROOT)
+            environment["XDG_CONFIG_HOME"] = str(root / "caller-xdg")
             environment["PATH"] = f"{directory}:{environment['PATH']}"
             environment["FAKE_GC_CONFIG"] = json.dumps(config)
             environment["FAKE_CONTROLLER_IMPORT_STATUS"] = json.dumps(controller_import_status)
@@ -940,7 +942,8 @@ class CommandContractTests(unittest.TestCase):
         self.assertEqual(len(result.controller_envs), 5)
         self.assertTrue(all(f"HOME={result.city}" in value for value in result.controller_envs))
         self.assertTrue(all("GC_HOME=|" in value for value in result.controller_envs))
-        self.assertTrue(all(value.endswith("GC_PACK_DIR=") for value in result.controller_envs))
+        self.assertTrue(all("GC_PACK_DIR=|" in value for value in result.controller_envs))
+        self.assertTrue(all(value.endswith("XDG_CONFIG_HOME=") for value in result.controller_envs))
 
     def test_controller_integrity_failure_stops_before_assets_or_dispatch(self) -> None:
         result = self.run_command(
@@ -962,6 +965,7 @@ class CommandContractTests(unittest.TestCase):
                 "imports": [
                     {
                         "name": "pack:complete-delivery",
+                        "constraint": f"sha:{foreign_commit}",
                         "pin": {"commit": foreign_commit, "version": f"sha:{foreign_commit}"},
                     }
                 ]
@@ -978,6 +982,39 @@ class CommandContractTests(unittest.TestCase):
         self.assertIn("exact locked revision", result.stderr)
         self.assertFalse(result.slinged)
         self.assertEqual(result.materialized_paths, [])
+
+        current_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PACK_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        floating = self.run_command(
+            "fi-123",
+            "--rig",
+            "finance",
+            environment_updates={
+                "FAKE_CONTROLLER_IMPORT_STATUS": json.dumps(
+                    {
+                        "imports": [
+                            {
+                                "name": "pack:complete-delivery",
+                                "constraint": "0.1.2",
+                                "pin": {
+                                    "commit": current_commit,
+                                    "version": f"sha:{current_commit}",
+                                },
+                            }
+                        ]
+                    }
+                )
+            },
+        )
+        self.assertEqual(floating.returncode, 1)
+        self.assertIn("import pin is invalid", floating.stderr)
+        self.assertFalse(floating.slinged)
+        self.assertEqual(floating.materialized_paths, [])
 
     def test_generated_checks_are_materialized_from_the_controller_resolved_pack(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

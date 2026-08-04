@@ -834,10 +834,12 @@ def controller_complete_delivery_pin(environment: dict[str, str]) -> str:
         raise LaunchPreflightError("controller Complete Delivery import has no exact pin")
     commit = pin.get("commit")
     version = pin.get("version")
+    constraint = matches[0].get("constraint")
     if (
         not isinstance(commit, str)
         or not GIT_COMMIT.fullmatch(commit)
         or version != f"sha:{commit}"
+        or constraint != f"sha:{commit}"
     ):
         raise LaunchPreflightError("controller Complete Delivery import pin is invalid")
     return commit
