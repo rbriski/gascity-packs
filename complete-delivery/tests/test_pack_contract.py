@@ -688,7 +688,7 @@ class CommandContractTests(unittest.TestCase):
             fake_gc.write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' \"$*\" >> \"$FAKE_GC_CALLS\"\n"
-                "case \"${1:-}:${2:-}\" in import:*|formula:show)\n"
+                "case \"${1:-}:${2:-}\" in import:*|formula:show|sling:*)\n"
                 "  printf 'HOME=%s|GC_HOME=%s|GC_PACK_DIR=%s\\n' \"${HOME:-}\" \"${GC_HOME:-}\" \"${GC_PACK_DIR:-}\" >> \"$FAKE_CONTROLLER_ENVS\" ;;\n"
                 "esac\n"
                 "if [ \"${1:-}\" = config ] && [ \"${2:-}\" = show ]; then\n"
@@ -706,6 +706,11 @@ class CommandContractTests(unittest.TestCase):
                 "if [ \"${1:-}\" = import ] && [ \"${2:-}\" = install ]; then\n"
                 "  [ \"${FAKE_GC_SLEEP_STAGE:-}\" != import-install ] || exec sleep 5\n"
                 "  [ \"${FAKE_GC_FAIL_STAGE:-}\" != import-install ] || exit 26\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"${1:-}\" = import ] && [ \"${2:-}\" = check ]; then\n"
+                "  [ \"${FAKE_GC_SLEEP_STAGE:-}\" != import-check ] || exec sleep 5\n"
+                "  [ \"${FAKE_GC_FAIL_STAGE:-}\" != import-check ] || exit 29\n"
                 "  exit 0\n"
                 "fi\n"
                 "if [ \"${1:-}\" = import ] && [ \"${2:-}\" = status ]; then\n"
@@ -806,7 +811,12 @@ class CommandContractTests(unittest.TestCase):
                 preflight_check.read_text(encoding="utf-8") if preflight_check.is_file() else ""
             )
             result.materialized_review_checks = {}
-            for name in ("design-review-approved.sh", "implementation-review-approved.sh"):
+            for name in (
+                "design-review-approved.sh",
+                "gstack-plan-review-approved.sh",
+                "gstack-plan-review-context-valid.py",
+                "implementation-review-approved.sh",
+            ):
                 path = rig / ".gc/scripts/checks" / name
                 if path.is_file():
                     result.materialized_review_checks[name] = {
@@ -879,6 +889,8 @@ class CommandContractTests(unittest.TestCase):
             ".gc/scripts/checks/delivery-report-valid.sh",
             ".gc/scripts/checks/delivery-source-artifact-valid.sh",
             ".gc/scripts/checks/design-review-approved.sh",
+            ".gc/scripts/checks/gstack-plan-review-approved.sh",
+            ".gc/scripts/checks/gstack-plan-review-context-valid.py",
             ".gc/scripts/checks/implementation-review-approved.sh",
             ".gc/scripts/delivery_gate.py",
             ".gc/scripts/delivery_report.py",
@@ -917,16 +929,31 @@ class CommandContractTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         install = result.calls.index("import install")
+        integrity = result.calls.index("import check")
         status = result.calls.index("import status --json")
         formula = result.calls.index("formula show complete-delivery --rig finance --json")
         sling = next(index for index, call in enumerate(result.calls) if call.startswith("sling "))
-        self.assertLess(install, status)
+        self.assertLess(install, integrity)
+        self.assertLess(integrity, status)
         self.assertLess(status, formula)
         self.assertLess(formula, sling)
-        self.assertEqual(len(result.controller_envs), 3)
+        self.assertEqual(len(result.controller_envs), 5)
         self.assertTrue(all(f"HOME={result.city}" in value for value in result.controller_envs))
         self.assertTrue(all("GC_HOME=|" in value for value in result.controller_envs))
         self.assertTrue(all(value.endswith("GC_PACK_DIR=") for value in result.controller_envs))
+
+    def test_controller_integrity_failure_stops_before_assets_or_dispatch(self) -> None:
+        result = self.run_command(
+            "fi-123",
+            "--rig",
+            "finance",
+            environment_updates={"FAKE_GC_FAIL_STAGE": "import-check"},
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("controller import integrity check failed with status 29", result.stderr)
+        self.assertFalse(result.slinged)
+        self.assertEqual(result.materialized_paths, [])
 
     def test_stale_or_foreign_controller_pack_fails_before_assets_or_dispatch(self) -> None:
         foreign_commit = "b" * 40
@@ -977,6 +1004,31 @@ class CommandContractTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("controller-local marker", result.materialized_preflight_contents)
+
+    def test_modified_controller_pack_fails_before_assets_or_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            controller_repo = pathlib.Path(directory) / "controller-packs"
+            shutil.copytree(REPO_ROOT / "complete-delivery", controller_repo / "complete-delivery")
+            shutil.copytree(REPO_ROOT / "gascity", controller_repo / "gascity")
+            subprocess.run(["git", "init", "-q", str(controller_repo)], check=True)
+            subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=controller_repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Complete Delivery tests"], cwd=controller_repo, check=True)
+            subprocess.run(["git", "add", "."], cwd=controller_repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "controller cache fixture"], cwd=controller_repo, check=True)
+            formula = controller_repo / "complete-delivery/formulas/complete-delivery.formula.toml"
+            formula.write_text(formula.read_text(encoding="utf-8") + "\n# modified cache\n", encoding="utf-8")
+
+            result = self.run_command(
+                "fi-123",
+                "--rig",
+                "finance",
+                controller_pack_root=controller_repo / "complete-delivery",
+            )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("controller Complete Delivery pack has modified tracked content", result.stderr)
+        self.assertFalse(result.slinged)
+        self.assertEqual(result.materialized_paths, [])
 
     def test_existing_exact_city_github_capability_is_revalidated_idempotently(self) -> None:
         def setup(root: pathlib.Path, _rig: pathlib.Path) -> None:
@@ -1031,7 +1083,12 @@ class CommandContractTests(unittest.TestCase):
         self.assertIn("not owned by Complete Delivery", result.stderr)
 
     def test_launch_refuses_a_foreign_gstack_review_check_destination(self) -> None:
-        for name in ("design-review-approved.sh", "implementation-review-approved.sh"):
+        for name in (
+            "design-review-approved.sh",
+            "gstack-plan-review-approved.sh",
+            "gstack-plan-review-context-valid.py",
+            "implementation-review-approved.sh",
+        ):
             with self.subTest(name=name):
                 def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
                     destination = rig / ".gc/scripts/checks" / name
@@ -1388,6 +1445,20 @@ class CommandContractTests(unittest.TestCase):
         self.assertFalse(config_timeout.slinged)
         self.assertEqual(config_timeout.materialized_paths, [])
 
+        import_timeout = self.run_command(
+            "fi-123",
+            "--rig",
+            "finance",
+            environment_updates={
+                "FAKE_GC_SLEEP_STAGE": "import-install",
+                "GC_COMPLETE_DELIVERY_IMPORT_TIMEOUT_SECONDS": "0.05",
+            },
+        )
+        self.assertEqual(import_timeout.returncode, 1)
+        self.assertIn("controller import installation timed out", import_timeout.stderr)
+        self.assertFalse(import_timeout.slinged)
+        self.assertEqual(import_timeout.materialized_paths, [])
+
         source_timeout = self.run_command(
             "fi-123",
             "--rig",
@@ -1548,14 +1619,19 @@ class MaterializationRecoveryTests(unittest.TestCase):
 
             installed = prepare_delivery.materialize_assets(PACK_ROOT, rig)
 
-            self.assertEqual(len(installed), 24)
+            self.assertEqual(len(installed), 26)
             self.assertFalse((rig / "schemas/build/requirements.v1.yaml").exists())
             manifest = json.loads(
                 (rig / ".gc" / prepare_delivery.MANIFEST_NAME).read_text(encoding="utf-8")
             )
             self.assertEqual(manifest["version"], prepare_delivery.MANIFEST_VERSION)
             self.assertEqual(set(manifest["asset_hashes"]), set(manifest["assets"]))
-            for name in ("design-review-approved.sh", "implementation-review-approved.sh"):
+            for name in (
+                "design-review-approved.sh",
+                "gstack-plan-review-approved.sh",
+                "gstack-plan-review-context-valid.py",
+                "implementation-review-approved.sh",
+            ):
                 relative = f".gc/scripts/checks/{name}"
                 destination = rig / relative
                 source = REPO_ROOT / "gascity/assets/scripts/checks" / name

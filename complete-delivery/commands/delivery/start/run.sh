@@ -86,7 +86,7 @@ case "$AGENT" in
 esac
 [ -n "$ARTIFACT_ROOT" ] || ARTIFACT_ROOT="plans/complete-delivery/$BEAD_ID"
 
-for command_name in gc python3 timeout mktemp; do
+for command_name in env gc python3 timeout mktemp; do
   command -v "$command_name" >/dev/null 2>&1 || {
     echo "$PREFIX: $command_name is not on PATH" >&2
     exit 1
@@ -142,11 +142,16 @@ print(title.strip())
 # The Python preflight resolves the registered rig, validates the complete
 # profile and artifact root without mutation, then atomically materializes the
 # exact managed inventory. No workflow graph exists yet if it fails.
-python3 "$GC_PACK_DIR/assets/scripts/prepare_delivery_launch.py" \
+CONTROLLER_HOME="$(python3 "$GC_PACK_DIR/assets/scripts/prepare_delivery_launch.py" \
   --rig "$RIG" \
-  --artifact-root "$ARTIFACT_ROOT"
+  --artifact-root "$ARTIFACT_ROOT")" || exit 1
+case "$CONTROLLER_HOME" in
+  /*) ;;
+  *) echo "$PREFIX: launch preflight returned no canonical controller HOME" >&2; exit 1 ;;
+esac
 
-if timeout --signal=KILL "$SLING_TIMEOUT" gc sling "$RIG/$AGENT" "$BEAD_ID" --on complete-delivery \
+if timeout --signal=KILL "$SLING_TIMEOUT" env -u GC_HOME -u GC_PACK_DIR HOME="$CONTROLLER_HOME" \
+  gc sling "$RIG/$AGENT" "$BEAD_ID" --on complete-delivery \
   --var "artifact_root=$ARTIFACT_ROOT" \
   --var "source_bead_id=$BEAD_ID" \
   --var "source_title=$SOURCE_TITLE" \

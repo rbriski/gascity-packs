@@ -51,6 +51,8 @@ DELIVERY_SCRIPTS = ("delivery_gate.py", "delivery_report.py")
 GASCITY_CHECKS = (
     "build-artifact-valid.sh",
     "design-review-approved.sh",
+    "gstack-plan-review-approved.sh",
+    "gstack-plan-review-context-valid.py",
     "implementation-review-approved.sh",
 )
 GASCITY_SCRIPTS = ("validate_build_artifact.py",)
@@ -94,6 +96,7 @@ LEGACY_V1_ASSET_HASHES = {
     "schemas/build/review.v1.yaml": "sha256:4e9773e44a271204b743d429d0751e3c71a32bb66597c47da0c9c34edc5ac454",
 }
 GC_CONFIG_TIMEOUT_SECONDS = 15
+GC_IMPORT_TIMEOUT_SECONDS = 120
 MAX_DURATION_SECONDS = Decimal(3600)
 DURATION = re.compile(r"([0-9]+(?:\.[0-9]+)?|\.[0-9]+)([smhd]?)")
 CI_WORKFLOW = re.compile(r"\.github/workflows/[A-Za-z0-9_./-]+\.ya?ml")
@@ -142,6 +145,24 @@ def gc_config_timeout_seconds() -> float:
     if not 0 < timeout <= 60:
         raise LaunchPreflightError(
             "GC_COMPLETE_DELIVERY_CONFIG_TIMEOUT_SECONDS must be greater than zero and at most 60"
+        )
+    return timeout
+
+
+def gc_import_timeout_seconds() -> float:
+    value = os.environ.get(
+        "GC_COMPLETE_DELIVERY_IMPORT_TIMEOUT_SECONDS",
+        str(GC_IMPORT_TIMEOUT_SECONDS),
+    )
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise LaunchPreflightError(
+            "GC_COMPLETE_DELIVERY_IMPORT_TIMEOUT_SECONDS must be numeric"
+        ) from exc
+    if not 0 < timeout <= 600:
+        raise LaunchPreflightError(
+            "GC_COMPLETE_DELIVERY_IMPORT_TIMEOUT_SECONDS must be greater than zero and at most 600"
         )
     return timeout
 
@@ -718,11 +739,15 @@ def sanitized_city_github_environment(city_path: Path) -> dict[str, str]:
 
 
 def run_controller_gc(
-    arguments: list[str], *, environment: dict[str, str], purpose: str
+    arguments: list[str],
+    *,
+    environment: dict[str, str],
+    purpose: str,
+    timeout_seconds: float | None = None,
 ) -> str:
     """Run one bounded controller-environment command without leaking output."""
 
-    timeout_seconds = gc_config_timeout_seconds()
+    timeout_seconds = timeout_seconds or gc_config_timeout_seconds()
     try:
         result = subprocess.run(
             ["gc", *arguments],
@@ -743,6 +768,41 @@ def run_controller_gc(
         # in diagnostics.  The bounded command status is sufficient here.
         raise LaunchPreflightError(f"{purpose} failed with status {result.returncode}")
     return result.stdout
+
+
+def exact_clean_pack_revision(
+    root: Path, *, environment: dict[str, str], purpose: str
+) -> str:
+    """Return a clean tracked Git revision for one resolved pack checkout."""
+
+    timeout_seconds = gc_config_timeout_seconds()
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+            env=environment,
+        )
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LaunchPreflightError(f"{purpose} has no readable exact revision") from exc
+    if status.returncode or status.stdout.strip():
+        raise LaunchPreflightError(f"{purpose} has modified tracked content")
+    commit = revision.stdout.strip()
+    if revision.returncode or not GIT_COMMIT.fullmatch(commit):
+        raise LaunchPreflightError(f"{purpose} has no readable exact revision")
+    return commit
 
 
 def controller_complete_delivery_pin(environment: dict[str, str]) -> str:
@@ -823,20 +883,12 @@ def controller_formula_pack_root(
             "controller Complete Delivery formula must resolve from exactly one pack root"
         )
     root = unique_candidates[0]
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=gc_config_timeout_seconds(),
-            check=False,
-            env=environment,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise LaunchPreflightError("controller Complete Delivery pack has no readable exact revision") from exc
-    actual_commit = result.stdout.strip()
-    if result.returncode or actual_commit != expected_commit:
+    actual_commit = exact_clean_pack_revision(
+        root,
+        environment=environment,
+        purpose="controller Complete Delivery pack",
+    )
+    if actual_commit != expected_commit:
         raise LaunchPreflightError(
             "controller Complete Delivery formula does not resolve from the exact locked revision"
         )
@@ -853,6 +905,12 @@ def resolve_controller_complete_delivery_pack(city_path: Path, rig_name: str) ->
         ["import", "install"],
         environment=environment,
         purpose="controller import installation",
+        timeout_seconds=gc_import_timeout_seconds(),
+    )
+    run_controller_gc(
+        ["import", "check"],
+        environment=environment,
+        purpose="controller import integrity check",
     )
     expected_commit = controller_complete_delivery_pin(environment)
     return controller_formula_pack_root(
@@ -1368,6 +1426,7 @@ def main(argv: list[str] | None = None) -> int:
         f"complete-delivery launch preflight passed: materialized {len(installed)} managed asset(s)",
         file=sys.stderr,
     )
+    print(city_path)
     return 0
 
 
