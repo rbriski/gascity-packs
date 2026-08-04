@@ -1,8 +1,8 @@
-Terminal safety scope for external review setup and the bounded frozen-head
-loop.
+This expansion's target is the terminal safety scope consumed by Complete
+Delivery's outer `external-review` release member. Its outcome is
+authoritative: a non-pass setup, bounded repair loop, or final review report
+aborts this scope and cannot release `report-green`, merge, or deploy work.
 
-A non-pass setup or loop outcome aborts the remaining review work and leaves
-the expansion failed for Complete Delivery's parent release safety scope to
-quarantine. Do not rewrite outcomes or silently continue from a closed failed
-control; recovery must be a fresh, auditable attempt with current-head
-evidence.
+Do not rewrite failed outcomes or convert a failure into a successful close.
+Preserve the original check output and failure metadata for explicit,
+auditable recovery.

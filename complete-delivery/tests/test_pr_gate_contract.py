@@ -445,7 +445,9 @@ class PrGateContractTests(unittest.TestCase):
         self.assertTrue(run_targets <= declared_targets)
 
     def test_formula_routes_terminal_report_update_to_report_editor(self) -> None:
-        terminal = self.templates["{target}"]
+        # The expansion target is now the scope body; its final report member
+        # remains the only terminal report-editor lane.
+        terminal = self.templates["{target}.finalize-external-review"]
 
         self.assertEqual(
             terminal["metadata"]["gc.run_target"],
