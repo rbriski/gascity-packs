@@ -3738,6 +3738,8 @@ class SourceArtifactTests(unittest.TestCase):
         step_source_title: str | None = None,
         root_bead: bool = False,
         command_args: tuple[str, ...] = (),
+        step_metadata: dict[str, str] | None = None,
+        control_json: object | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -3813,6 +3815,7 @@ class SourceArtifactTests(unittest.TestCase):
                 "  step-1) printf '%s\\n' \"$FAKE_STEP_JSON\" ;;\n"
                 "  root-1) printf '%s\\n' \"$FAKE_ROOT_JSON\" ;;\n"
                 "  fi-123) printf '%s\\n' \"$FAKE_SOURCE_JSON\" ;;\n"
+                "  control-1) printf '%s\\n' \"$FAKE_CONTROL_JSON\" ;;\n"
                 "  *) exit 1 ;;\n"
                 "esac\n",
                 encoding="utf-8",
@@ -3830,7 +3833,7 @@ class SourceArtifactTests(unittest.TestCase):
                 )
                 python3.chmod(0o755)
             artifact_path_key = f"gc.build.{artifact_kind}_path"
-            step = [{"id": "step-1", "metadata": {
+            step = [{"id": "step-1", "title": "source artifact", "metadata": {
                 "gc.root_bead_id": "root-1",
                 "gc.build.artifact_schema": f"gc.build.{artifact_kind}.v1",
                 "gc.build.artifact_path_keys": artifact_path_keys or artifact_path_key,
@@ -3849,6 +3852,7 @@ class SourceArtifactTests(unittest.TestCase):
                     if step_source_title is not None
                     else {}
                 ),
+                **(step_metadata or {}),
             }}]
             root_metadata = {
                 artifact_path_key: artifact_path_value,
@@ -3920,6 +3924,7 @@ class SourceArtifactTests(unittest.TestCase):
                 "FAKE_STEP_JSON": json.dumps(step),
                 "FAKE_ROOT_JSON": json.dumps(workflow_root),
                 "FAKE_SOURCE_JSON": json.dumps(source),
+                "FAKE_CONTROL_JSON": json.dumps(control_json or []),
                 "PATH": f"{bin_dir}:{environment['PATH']}",
             })
             return subprocess.run(
@@ -3974,6 +3979,49 @@ class SourceArtifactTests(unittest.TestCase):
         self.assertTrue(
             all("/artifacts/delivery/" in path for path in manifest["canonical_paths"].values())
         )
+
+    def test_source_artifact_context_recovers_exact_retry_failure_from_control(self) -> None:
+        retry_metadata = {
+            "gc.attempt": "2",
+            "gc.control_for": "control-1",
+            "gc.step_id": "plan",
+            "gc.step_ref": "plan.iteration.2",
+            "gc.run_target": "gstack.founder-reviewer",
+            "gc.idempotency_key": "control-1:attempt:2",
+        }
+        control = [{
+            "id": "control-1",
+            "title": "source artifact",
+            "description": "Write the source-grounded delivery plan.",
+            "metadata": {
+                "gc.root_bead_id": "root-1",
+                "gc.step_id": "plan",
+                "gc.step_ref": "plan",
+                "gc.run_target": "gstack.founder-reviewer",
+                "gc.attempt_log": "source-bound artifact path is missing",
+            },
+        }]
+        result = self.run_check(
+            self.artifact(),
+            command_args=("--context", "plan"),
+            step_metadata=retry_metadata,
+            control_json=control,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = json.loads(result.stdout)
+        self.assertEqual(manifest["attempt"], 2)
+        self.assertEqual(manifest["logical_control_id"], "control-1")
+        self.assertEqual(manifest["attempt_log"], "source-bound artifact path is missing")
+
+        control[0]["metadata"].pop("gc.attempt_log")
+        missing_log = self.run_check(
+            self.artifact(),
+            command_args=("--context", "plan"),
+            step_metadata=retry_metadata,
+            control_json=control,
+        )
+        self.assertNotEqual(missing_log.returncode, 0)
+        self.assertIn("has no gc.attempt_log", missing_log.stderr)
 
     def test_source_artifact_normalizes_durable_title_like_preflight(self) -> None:
         result = self.run_check(
