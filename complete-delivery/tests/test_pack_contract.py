@@ -1179,6 +1179,11 @@ class CommandContractTests(unittest.TestCase):
 
 
 class MaterializationRecoveryTests(unittest.TestCase):
+    # LEGACY_V1_ASSET_HASHES attests the 0.1.0 release, not the mutable main
+    # branch. Keep this fixture pinned to those release bytes so it exercises
+    # the supported legacy upgrade rather than manufacturing a false tamper.
+    LEGACY_V1_RELEASE = "d8fc7e834f2c66101d1141c80db58e7fa82594bf"
+
     def make_rig(self, root: pathlib.Path) -> pathlib.Path:
         rig = root / "rig"
         rig.mkdir(parents=True)
@@ -1202,7 +1207,7 @@ class MaterializationRecoveryTests(unittest.TestCase):
             else:
                 self.fail(f"unexpected v1 asset {relative}")
             contents = subprocess.run(
-                ["git", "show", f"origin/main:{source}"],
+                ["git", "show", f"{self.LEGACY_V1_RELEASE}:{source}"],
                 cwd=REPO_ROOT,
                 capture_output=True,
                 check=True,
