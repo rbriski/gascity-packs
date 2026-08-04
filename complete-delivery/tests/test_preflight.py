@@ -654,6 +654,135 @@ class PreflightTests(unittest.TestCase):
             ],
         )
 
+    def test_sanitized_city_github_capability_revalidates_blank_publish_retry(self) -> None:
+        """A city-owned gh-config link supports authenticated checks without a user HOME.
+
+        The first worker proves GitHub access under Ralph's sanitized HOME.  A
+        blank post-publication retry then resolves the controller's numeric
+        retry metadata and re-runs the idempotent PR-open check twice.  The
+        fake gh refuses to run unless it sees the city capability, so this is
+        deliberately closer to the production ConditionEnv shape than the
+        ordinary unit fixture.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            city = root / "city"
+            city.mkdir()
+            credential_home = root / "credential-home"
+            credential_config = credential_home / ".config" / "gh"
+            credential_config.mkdir(parents=True)
+            (credential_config / "hosts.yml").write_text(
+                "opaque credential fixture\n", encoding="utf-8"
+            )
+            (city / ".config").mkdir()
+            (city / ".config" / "gh").symlink_to(
+                credential_config, target_is_directory=True
+            )
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+
+            root_metadata = self.metadata(
+                **{
+                    "delivery.repo": "example/repo",
+                    "delivery.pr_number": "5",
+                    "delivery.head_sha": "a" * 40,
+                    "delivery.pr_url": "https://github.com/example/repo/pull/5",
+                    "delivery.branch": "polecat/example",
+                }
+            )
+            control = {
+                "id": "publish-control",
+                "title": "Publish the branch and open the pull request",
+                "description": "Publish the verified branch without duplicating a PR.",
+                "metadata": {
+                    "gc.root_bead_id": "root-1",
+                    "gc.step_id": "publish",
+                    "gc.step_ref": "complete-delivery.publish",
+                    "gc.run_target": "complete-delivery.delivery-engineer",
+                },
+            }
+            retry = {
+                "id": "publish-retry",
+                "title": control["title"],
+                "description": "",
+                "metadata": {
+                    "gc.root_bead_id": "root-1",
+                    "gc.control_for": control["id"],
+                    "gc.step_id": "publish",
+                    "gc.step_ref": "complete-delivery.publish.iteration.1",
+                    "gc.attempt": 1,
+                    "gc.idempotency_key": "publish-control:attempt:1",
+                    "gc.run_target": "complete-delivery.delivery-engineer",
+                },
+            }
+            gc = bin_dir / "gc"
+            gc.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = bd ] && [ \"${2:-}\" = update ]; then exit 0; fi\n"
+                "case \"${3:-}\" in\n"
+                "  fi-123) printf '%s\\n' \"$FAKE_SOURCE_JSON\" ;;\n"
+                "  publish-control) printf '%s\\n' \"$FAKE_CONTROL_JSON\" ;;\n"
+                "  publish-retry) printf '%s\\n' \"$FAKE_RETRY_JSON\" ;;\n"
+                "  *) printf '%s\\n' \"$FAKE_ROOT_JSON\" ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            gc.chmod(0o755)
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                "test -f \"$HOME/.config/gh/hosts.yml\" || exit 1\n"
+                "printf '%s\\n' \"$*\" >> \"$FAKE_GH_CALLS\"\n"
+                "if [ \"${1:-}\" = repo ]; then printf '%s\\n' '{\"nameWithOwner\":\"example/repo\"}'; fi\n"
+                "case \"${2:-}\" in\n"
+                "  */pulls/*) printf '%s\\n' \"$FAKE_PR_JSON\" ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            pr_json = {
+                "state": "open",
+                "draft": False,
+                "head": {"sha": "a" * 40, "ref": "polecat/example"},
+                "base": {"ref": "main", "repo": {"full_name": "example/repo"}},
+                "number": 5,
+                "html_url": "https://github.com/example/repo/pull/5",
+            }
+            environment = {
+                "HOME": str(city),
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "GC_BEAD_ID": "root-1",
+                "GC_WORK_DIR": str(repository),
+                "FAKE_GH_CALLS": str(root / "gh-calls"),
+                "FAKE_SOURCE_JSON": json.dumps([{"title": "Requested delivery"}]),
+                "FAKE_ROOT_JSON": json.dumps([{"id": "root-1", "metadata": root_metadata}]),
+                "FAKE_CONTROL_JSON": json.dumps([control]),
+                "FAKE_RETRY_JSON": json.dumps([retry]),
+                "FAKE_PR_JSON": json.dumps(pr_json),
+            }
+            preflight = subprocess.run(
+                ["bash", str(SCRIPT)], capture_output=True, text=True, env=environment
+            )
+            self.assertEqual(preflight.returncode, 0, preflight.stderr)
+            self.assertNotIn("opaque credential fixture", preflight.stdout + preflight.stderr)
+
+            environment["GC_BEAD_ID"] = retry["id"]
+            first = subprocess.run(
+                ["bash", str(PR_OPEN_SCRIPT)], capture_output=True, text=True, env=environment
+            )
+            second = subprocess.run(
+                ["bash", str(PR_OPEN_SCRIPT)], capture_output=True, text=True, env=environment
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            calls = (root / "gh-calls").read_text(encoding="utf-8")
+            self.assertEqual(calls.count("api repos/example/repo/pulls/5"), 2)
+            self.assertNotIn("pr create", calls)
+            self.assertTrue((city / ".config" / "gh").is_symlink())
+
     def test_blank_retry_recovers_only_exact_control_bead_lineage(self) -> None:
         root_id = "root-1"
         control_id = "control-1"
@@ -666,7 +795,8 @@ class PreflightTests(unittest.TestCase):
                 "gc.control_for": control_id,
                 "gc.step_id": "delivery-preflight",
                 "gc.step_ref": "complete-delivery.delivery-preflight.iteration.3",
-                "gc.attempt": "3",
+                # Ralph persists the retry counter as a JSON number.
+                "gc.attempt": 3,
                 "gc.idempotency_key": "control-1:attempt:3",
                 "gc.run_target": "complete-delivery.delivery-engineer",
             },
