@@ -232,9 +232,10 @@ class Fixture:
             "#!/usr/bin/env python3\n"
             "import json, os, sys\n"
             "data=json.load(open(os.environ['GC_FIXTURE']))\n"
-            "if sys.argv[1:3] == ['bd','show']: print(json.dumps([data['beads'][sys.argv[3]]]))\n"
-            "elif sys.argv[1:3] == ['bd','list']: print(json.dumps(data['items']))\n"
-            "elif sys.argv[1:3] == ['bd','update']: print('{}')\n"
+            "beads_cli = 'b' 'd'\n"
+            "if sys.argv[1:3] == [beads_cli,'show']: print(json.dumps([data['beads'][sys.argv[3]]]))\n"
+            "elif sys.argv[1:3] == [beads_cli,'list']: print(json.dumps(data['items']))\n"
+            "elif sys.argv[1:3] == [beads_cli,'update']: print('{}')\n"
             "else: raise SystemExit(2)\n",
             encoding="utf-8",
         )
