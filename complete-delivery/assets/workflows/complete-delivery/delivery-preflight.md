@@ -8,10 +8,11 @@ On the first worker attempt, the mechanical check itself runs `gh auth status`,
 repository resolution, and protected-base access without printing credentials.
 Only after all three pass does it persist a versioned, root-bound worker
 attestation. The launcher performs the same checks before pouring the workflow
-and writes durable `launcher_github_preflight=github-v1` evidence. Ralph retry
-conditions run in a deliberately sanitized ConditionEnv, so they must never
-read `gh` credentials; they require both launcher and exact root-bound worker
-evidence along with all credential-free profile/worktree checks.
+and writes durable `launcher_github_preflight=github-city-v1` evidence only
+after it has established the collision-safe city GitHub capability and repeated
+all three checks with the controller's sanitized HOME and no token/config
+override. Ralph retry conditions require both launcher and exact root-bound
+worker evidence along with all credential-free profile/worktree checks.
 
 Repair durable rig `formula_vars` when configuration is incomplete; do not
 weaken a gate for this run or ask the user to re-enter routine settings. If an

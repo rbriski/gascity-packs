@@ -626,12 +626,30 @@ class CommandContractTests(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
+            city = root / "city"
+            city.mkdir()
+            credential_config = root / "launcher-gh-config"
+            credential_config.mkdir()
+            (credential_config / "hosts.yml").write_text(
+                "opaque credential fixture\n", encoding="utf-8"
+            )
             rig = root / "rig"
             rig.mkdir()
             subprocess.run(["git", "init", "-q", str(rig)], check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", "https://github.com/example/repo.git"],
+                cwd=rig,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "remote", "add", "upstream", "https://github.com/upstream/repo.git"],
+                cwd=rig,
+                check=True,
+            )
             fake_gc = pathlib.Path(directory) / "gc"
             fake_gh = pathlib.Path(directory) / "gh"
             config = {
+                "city_path": str(city),
                 "config": {
                     "Rigs": [{"Name": "finance", "Path": str(rig), "FormulaVars": profile or {
                         "setup_command": "/bin/true",
@@ -668,7 +686,12 @@ class CommandContractTests(unittest.TestCase):
             fake_gh.write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' \"$*\" >> \"$FAKE_GH_CALLS\"\n"
-                "[ \"${FAKE_GH_AUTHENTICATED:-true}\" = true ] || exit 1\n"
+                "printf 'HOME=%s|GH_CONFIG_DIR=%s|XDG_CONFIG_HOME=%s\\n' \"${HOME:-}\" \"${GH_CONFIG_DIR:-}\" \"${XDG_CONFIG_HOME:-}\" >> \"$FAKE_GH_ENVS\"\n"
+                "if [ -n \"${GH_CONFIG_DIR:-}\" ]; then gh_config=$GH_CONFIG_DIR;\n"
+                "elif [ -n \"${XDG_CONFIG_HOME:-}\" ]; then gh_config=$XDG_CONFIG_HOME/gh;\n"
+                "else gh_config=${HOME:-}/.config/gh; fi\n"
+                "test -f \"$gh_config/hosts.yml\" || exit 70\n"
+                "if [ \"${FAKE_GH_AUTHENTICATED:-true}\" != true ]; then printf '%s\\n' \"${FAKE_GH_FAILURE_DIAGNOSTIC:-authentication failed}\" >&2; exit 1; fi\n"
                 "if [ \"${1:-}\" = repo ] && [ \"${2:-}\" = view ]; then\n"
                 "  printf '%s\\n' '{\"nameWithOwner\":\"example/repo\"}'\n"
                 "fi\n"
@@ -688,6 +711,8 @@ class CommandContractTests(unittest.TestCase):
             environment["FAKE_GC_SINK"] = str(sink)
             environment["FAKE_GC_CALLS"] = str(calls)
             environment["FAKE_GH_CALLS"] = str(root / "gh-calls")
+            environment["FAKE_GH_ENVS"] = str(root / "gh-envs")
+            environment["GH_CONFIG_DIR"] = str(credential_config)
             if environment_updates:
                 environment.update(environment_updates)
             if setup:
@@ -704,6 +729,16 @@ class CommandContractTests(unittest.TestCase):
             result.calls = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
             gh_calls = root / "gh-calls"
             result.gh_calls = gh_calls.read_text(encoding="utf-8").splitlines() if gh_calls.exists() else []
+            gh_envs = root / "gh-envs"
+            result.gh_envs = gh_envs.read_text(encoding="utf-8").splitlines() if gh_envs.exists() else []
+            city_gh = city / ".config" / "gh"
+            result.city_gh_is_symlink = city_gh.is_symlink()
+            try:
+                result.city_gh_target = str(city_gh.resolve(strict=True))
+            except OSError:
+                result.city_gh_target = None
+            result.credential_config = str(credential_config)
+            result.city = str(city)
             result.materialized = {
                 "delivery_preflight": (rig / ".gc/scripts/checks/delivery-preflight.sh").is_file(),
                 "build_artifact": (rig / ".gc/scripts/checks/build-artifact-valid.sh").is_file(),
@@ -749,7 +784,7 @@ class CommandContractTests(unittest.TestCase):
         for value in (
             "source_bead_id=fi-123",
             "source_title=Requested delivery",
-            "launcher_github_preflight=github-v1",
+            "launcher_github_preflight=github-city-v1",
             "report_title=Requested delivery",
             "interaction_mode=autonomous",
             "review_mode=agent",
@@ -803,14 +838,63 @@ class CommandContractTests(unittest.TestCase):
             result.gh_calls,
             [
                 "auth status",
-                "repo view --json nameWithOwner",
+                "repo view https://github.com/example/repo.git --json nameWithOwner",
+                "api repos/example/repo/branches/main/protection --silent",
+                "auth status",
+                "repo view https://github.com/example/repo.git --json nameWithOwner",
                 "api repos/example/repo/branches/main/protection --silent",
             ],
         )
+        self.assertTrue(result.city_gh_is_symlink)
+        self.assertEqual(result.city_gh_target, result.credential_config)
+        self.assertEqual(len(result.gh_envs), 6)
+        self.assertTrue(all(f"GH_CONFIG_DIR={result.credential_config}" in line for line in result.gh_envs[:3]))
+        self.assertTrue(all(f"HOME={result.city}" in line for line in result.gh_envs[3:]))
+        self.assertTrue(all("GH_CONFIG_DIR=|" in line for line in result.gh_envs[3:]))
         for name, materialized in result.materialized_review_checks.items():
             source = REPO_ROOT / "gascity/assets/scripts/checks" / name
             self.assertEqual(materialized["bytes"], source.read_bytes())
             self.assertTrue(materialized["executable"])
+
+    def test_existing_exact_city_github_capability_is_revalidated_idempotently(self) -> None:
+        def setup(root: pathlib.Path, _rig: pathlib.Path) -> None:
+            destination = root / "city" / ".config" / "gh"
+            destination.parent.mkdir()
+            destination.symlink_to(root / "launcher-gh-config", target_is_directory=True)
+
+        result = self.run_command("fi-123", "--rig", "finance", setup=setup)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.city_gh_is_symlink)
+        self.assertEqual(result.city_gh_target, result.credential_config)
+        self.assertEqual(len(result.gh_calls), 6)
+
+    def test_city_github_capability_collisions_fail_before_assets_or_dispatch(self) -> None:
+        def foreign_directory(root: pathlib.Path, _rig: pathlib.Path) -> None:
+            destination = root / "city" / ".config" / "gh"
+            destination.mkdir(parents=True)
+
+        def foreign_symlink(root: pathlib.Path, _rig: pathlib.Path) -> None:
+            foreign = root / "foreign-gh-config"
+            foreign.mkdir()
+            destination = root / "city" / ".config" / "gh"
+            destination.parent.mkdir()
+            destination.symlink_to(foreign, target_is_directory=True)
+
+        def symlink_parent(root: pathlib.Path, _rig: pathlib.Path) -> None:
+            foreign = root / "foreign-config-parent"
+            foreign.mkdir()
+            (root / "city" / ".config").symlink_to(foreign, target_is_directory=True)
+
+        for setup in (foreign_directory, foreign_symlink, symlink_parent):
+            with self.subTest(setup=setup.__name__):
+                result = self.run_command(
+                    "fi-123", "--rig", "finance", setup=setup
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("city GitHub capability", result.stderr)
+                self.assertFalse(result.slinged)
+                self.assertEqual(result.materialized_paths, [])
 
     def test_launch_refuses_a_foreign_managed_schema_destination(self) -> None:
         def setup(_root: pathlib.Path, rig: pathlib.Path) -> None:
@@ -942,10 +1026,14 @@ class CommandContractTests(unittest.TestCase):
         result = self.run_command(
             "fi-123",
             "--rig=finance",
-            environment_updates={"FAKE_GH_AUTHENTICATED": "false"},
+            environment_updates={
+                "FAKE_GH_AUTHENTICATED": "false",
+                "FAKE_GH_FAILURE_DIAGNOSTIC": "opaque-token-fixture",
+            },
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("gh authentication check failed", result.stderr)
+        self.assertNotIn("opaque-token-fixture", result.stderr)
         self.assertFalse(result.slinged)
         self.assertEqual(result.materialized_paths, [])
 
@@ -1210,6 +1298,73 @@ class CommandContractTests(unittest.TestCase):
         text = wrapper.read_text(encoding="utf-8")
         self.assertIn('"$GC_PACK_DIR/assets/scripts/publish_delivery_report.py"', text)
         self.assertTrue((wrapper.parent / "help.md").is_file())
+
+
+class GithubCapabilityUnitTests(unittest.TestCase):
+    def test_config_source_honors_gh_then_xdg_then_home_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            gh_override = root / "gh-override"
+            xdg = root / "xdg"
+            home = root / "home"
+            for path in (gh_override, xdg / "gh", home / ".config" / "gh"):
+                path.mkdir(parents=True)
+
+            self.assertEqual(
+                prepare_delivery.github_config_source(
+                    {
+                        "GH_CONFIG_DIR": str(gh_override),
+                        "XDG_CONFIG_HOME": str(xdg),
+                        "HOME": str(home),
+                    }
+                ),
+                gh_override,
+            )
+            self.assertEqual(
+                prepare_delivery.github_config_source(
+                    {"XDG_CONFIG_HOME": str(xdg), "HOME": str(home)}
+                ),
+                xdg / "gh",
+            )
+            self.assertEqual(
+                prepare_delivery.github_config_source({"HOME": str(home)}),
+                home / ".config" / "gh",
+            )
+
+    def test_config_source_fails_closed_without_one_absolute_existing_directory(self) -> None:
+        for environment in (
+            {},
+            {"GH_CONFIG_DIR": "relative"},
+            {"GH_CONFIG_DIR": "/definitely/missing/complete-delivery-gh"},
+        ):
+            with self.subTest(environment=environment):
+                with self.assertRaises(prepare_delivery.LaunchPreflightError):
+                    prepare_delivery.github_config_source(environment)
+
+    def test_controller_probe_removes_github_and_xdg_overrides(self) -> None:
+        city = pathlib.Path("/srv/example-city")
+        with mock.patch.dict(
+            os.environ,
+            {
+                "HOME": "/user/home",
+                "PATH": "/usr/bin:/bin",
+                "GH_CONFIG_DIR": "/credential/config",
+                "GH_TOKEN": "secret",
+                "GH_REPO": "wrong/repo",
+                "GITHUB_REPOSITORY": "wrong/repo",
+                "XDG_CONFIG_HOME": "/user/config",
+                "LANG": "C.UTF-8",
+            },
+            clear=True,
+        ):
+            environment = prepare_delivery.sanitized_city_github_environment(city)
+
+        self.assertEqual(environment["HOME"], str(city))
+        self.assertEqual(environment["PATH"], "/usr/bin:/bin")
+        self.assertEqual(environment["LANG"], "C.UTF-8")
+        self.assertFalse(
+            any(name.startswith(("GH_", "GITHUB_", "XDG_")) for name in environment)
+        )
 
 
 class MaterializationRecoveryTests(unittest.TestCase):

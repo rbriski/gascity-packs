@@ -70,6 +70,17 @@ def bead(raw, label):
 def text(value):
     return value if isinstance(value, str) else ""
 
+def attempt_number(value):
+    # Live Ralph retries currently persist gc.attempt as a canonical decimal
+    # string.  Accept a positive JSON integer as narrow storage compatibility,
+    # but never coerce booleans, floats, signs, or noncanonical strings into a
+    # valid retry identity.
+    if isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value):
+        return value
+    if type(value) is int and value > 0:
+        return str(value)
+    return ""
+
 try:
     attempt = bead(attempt_json, "retry bead")
     control = bead(control_json, "control bead")
@@ -80,10 +91,10 @@ try:
     control_id = text(metadata.get("gc.control_for"))
     step_id = text(metadata.get("gc.step_id"))
     step_ref = text(metadata.get("gc.step_ref"))
-    attempt_number = text(metadata.get("gc.attempt"))
+    retry_attempt = attempt_number(metadata.get("gc.attempt"))
     if not re.fullmatch(r"[A-Za-z0-9._-]+", control_id):
         raise ValueError("retry gc.control_for must be one durable bead ID")
-    if not re.fullmatch(r"[1-9][0-9]*", attempt_number):
+    if not retry_attempt:
         raise ValueError("retry gc.attempt must be a positive integer")
     if attempt.get("id") != attempt_id or control.get("id") != control_id:
         raise ValueError("retry gc.control_for does not resolve to its exact control bead")
@@ -100,9 +111,9 @@ try:
     if text(attempt.get("title")) != text(control.get("title")):
         raise ValueError("control bead title does not match the retry")
     control_ref = text(control_metadata.get("gc.step_ref"))
-    if not control_ref or step_ref != f"{control_ref}.iteration.{attempt_number}":
+    if not control_ref or step_ref != f"{control_ref}.iteration.{retry_attempt}":
         raise ValueError("retry step reference is not the control bead iteration")
-    if text(metadata.get("gc.idempotency_key")) != f"{control_id}:attempt:{attempt_number}":
+    if text(metadata.get("gc.idempotency_key")) != f"{control_id}:attempt:{retry_attempt}":
         raise ValueError("retry idempotency key does not bind the control bead and attempt")
 except ValueError as exc:
     print(f"invalid blank-retry lineage: {exc}", file=sys.stderr)

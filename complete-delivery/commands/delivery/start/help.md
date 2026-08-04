@@ -10,6 +10,11 @@ durable ID and title become the delivery's source-intent record; later stages
 read that bead's title, description, acceptance criteria, and relevant notes
 before using repository state as context.
 
+Before dispatch, the launcher collision-safely links the currently authenticated
+GitHub CLI config into the city HOME and revalidates GitHub access with the
+controller's sanitized environment. It never copies or prints credentials and
+fails before creating a workflow if an existing path conflicts.
+
 Flags:
   --rig <name>          Owning rig (defaults to `$GC_RIG`).
   --agent <target>      Initial run operator (default: `gc.run-operator`).
