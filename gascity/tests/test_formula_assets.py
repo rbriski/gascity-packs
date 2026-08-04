@@ -2563,6 +2563,10 @@ class FormulaAssetTests(unittest.TestCase):
             for template in plan_review["template"]
         }["{target}.gstack-plan-review-loop"]
         self.assertEqual(
+            plan_loop["check"]["check"]["path"],
+            ".gc/scripts/checks/gstack-plan-review-approved.sh",
+        )
+        self.assertEqual(
             [child["id"] for child in plan_loop["children"]],
             [
                 "{target}.founder-scope-review",
@@ -3996,6 +4000,7 @@ description = "Override sink that writes the base triage report contract."
                 "build-artifact-valid.sh",
                 "design-review-approved.sh",
                 "gap-analysis-approved.sh",
+                "gstack-plan-review-approved.sh",
                 "implementation-review-approved.sh",
             ],
         )
