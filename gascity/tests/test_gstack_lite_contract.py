@@ -219,6 +219,12 @@ class GstackLiteContractTests(unittest.TestCase):
                 VALID_PACK,
                 "current rigs must set one polecat pool cap between 1 and 2: demo",
             ),
+            (
+                "malformed writer pool",
+                VALID_CITY.replace("[rigs.patches.pool]\nmax = 2", "pool = 2"),
+                VALID_PACK,
+                "current rigs must set one polecat pool cap between 1 and 2: demo",
+            ),
         ]
 
         for label, city_toml, pack_toml, expected in cases:

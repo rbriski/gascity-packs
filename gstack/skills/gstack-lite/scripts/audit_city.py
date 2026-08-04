@@ -139,7 +139,10 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
             for patch in rig.get("patches", [])
             if isinstance(patch, dict) and patch.get("agent") == "polecat"
         ]
-        caps = [patch.get("pool", {}).get("max") for patch in polecat_patches]
+        caps = []
+        for patch in polecat_patches:
+            pool = patch.get("pool")
+            caps.append(pool.get("max") if isinstance(pool, dict) else None)
         if len(caps) != 1 or type(caps[0]) is not int or not 1 <= caps[0] <= 2:
             unsafe_writer_caps.append(rig.get("name", "<unnamed>"))
     if unsafe_writer_caps:
@@ -148,10 +151,13 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
             + ", ".join(sorted(unsafe_writer_caps))
         )
 
+    patches = city_toml.get("patches", {})
+    agent_patches = patches.get("agent", []) if isinstance(patches, dict) else []
     reviewer_patches = [
         patch
-        for patch in city_toml.get("patches", {}).get("agent", [])
-        if patch.get("name") == "gc.implementation-reviewer"
+        for patch in agent_patches
+        if isinstance(patch, dict)
+        and patch.get("name") == "gc.implementation-reviewer"
         and not patch.get("dir")
         and patch.get("provider") == "claude-review"
         and patch.get("max_active_sessions") == 1
