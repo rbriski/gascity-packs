@@ -99,6 +99,133 @@ PY
   printf '%s' "$resolved"
 }
 
+# Render a deterministic pre-task authority manifest.  Build-base normally
+# derives blank paths in its prepare task, but task descriptions are compiled
+# before that task runs; Complete Delivery therefore binds these values in its
+# launcher and workers must reject any drift before doing work.
+if [ "${1:-}" = "--context" ]; then
+  STAGE="${2:-}"
+  case "$STAGE" in
+    requirements|plan|decompose|finalize) ;;
+    *) delivery_fail "--context requires requirements, plan, decompose, or finalize" ;;
+  esac
+
+  ARTIFACT_ROOT="$(delivery_var artifact_root '')"
+  [ -n "$ARTIFACT_ROOT" ] || delivery_fail "gc.var.artifact_root is missing"
+  SOURCE_ID="$(delivery_root_metadata gc.var.source_bead_id)"
+  [ -n "$SOURCE_ID" ] || delivery_fail "gc.var.source_bead_id is missing"
+
+  REQUIREMENTS_PATH="$(delivery_root_metadata gc.var.requirements_path)"
+  PLAN_PATH="$(delivery_root_metadata gc.var.plan_path)"
+  DECOMPOSITION_PATH="$(delivery_root_metadata gc.var.decomposition_path)"
+  FINAL_REPORT_PATH="$(delivery_root_metadata gc.var.final_report_path)"
+  for binding in \
+    "requirements_path:$REQUIREMENTS_PATH" \
+    "plan_path:$PLAN_PATH" \
+    "decomposition_path:$DECOMPOSITION_PATH" \
+    "final_report_path:$FINAL_REPORT_PATH"; do
+    case "$binding" in *:) delivery_fail "gc.var.${binding%%:*} is missing" ;; esac
+  done
+
+  ATTEMPT="$(delivery_metadata_value "$DELIVERY_STEP_JSON" gc.attempt)"
+  [ -n "$ATTEMPT" ] || ATTEMPT="1"
+  CONTROL_ID=""
+  ATTEMPT_LOG=""
+  if ! [[ "$ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
+    delivery_fail "gc.attempt must be a positive integer"
+  fi
+  if [ "$ATTEMPT" -gt 1 ]; then
+    CONTROL_ID="$(delivery_metadata_value "$DELIVERY_STEP_JSON" gc.control_for)"
+    [[ "$CONTROL_ID" =~ ^[A-Za-z0-9._-]+$ ]] || \
+      delivery_fail "retry gc.control_for must be one durable bead ID"
+    CONTROL_JSON="$(delivery_read_bead_json "$CONTROL_ID")" || \
+      delivery_fail "gc bd show $CONTROL_ID failed while resolving retry context"
+    delivery_json_is_valid "$CONTROL_JSON" || \
+      delivery_fail "gc bd show $CONTROL_ID returned invalid JSON"
+    delivery_retry_lineage_is_valid "$CONTROL_JSON" || \
+      delivery_fail "retry gc.control_for has ambiguous or invalid logical lineage"
+    ATTEMPT_LOG="$(delivery_metadata_value "$CONTROL_JSON" gc.attempt_log)"
+    [ -n "$ATTEMPT_LOG" ] || \
+      delivery_fail "logical control $CONTROL_ID has no gc.attempt_log for retry $ATTEMPT"
+  fi
+
+  DELIVERY_CONTEXT_STAGE="$STAGE" \
+  DELIVERY_CONTEXT_WORK_DIR="$DELIVERY_WORK_DIR" \
+  DELIVERY_CONTEXT_ARTIFACT_ROOT="$ARTIFACT_ROOT" \
+  DELIVERY_CONTEXT_SOURCE_ID="$SOURCE_ID" \
+  DELIVERY_CONTEXT_ATTEMPT="$ATTEMPT" \
+  DELIVERY_CONTEXT_CONTROL_ID="$CONTROL_ID" \
+  DELIVERY_CONTEXT_ATTEMPT_LOG="$ATTEMPT_LOG" \
+  DELIVERY_CONTEXT_REQUIREMENTS_PATH="$REQUIREMENTS_PATH" \
+  DELIVERY_CONTEXT_PLAN_PATH="$PLAN_PATH" \
+  DELIVERY_CONTEXT_DECOMPOSITION_PATH="$DECOMPOSITION_PATH" \
+  DELIVERY_CONTEXT_FINAL_REPORT_PATH="$FINAL_REPORT_PATH" \
+  python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+stage = os.environ["DELIVERY_CONTEXT_STAGE"]
+work = Path(os.environ["DELIVERY_CONTEXT_WORK_DIR"]).resolve(strict=True)
+artifact_raw = Path(os.environ["DELIVERY_CONTEXT_ARTIFACT_ROOT"])
+if not os.environ["DELIVERY_CONTEXT_ARTIFACT_ROOT"] or ".." in artifact_raw.parts:
+    raise SystemExit("complete-delivery-check: artifact_root is not a safe canonical path")
+artifact = artifact_raw if artifact_raw.is_absolute() else work / artifact_raw
+try:
+    artifact_relative = artifact.relative_to(work)
+except ValueError:
+    raise SystemExit("complete-delivery-check: artifact_root must resolve beneath the delivery work directory")
+if not artifact_relative.parts:
+    raise SystemExit("complete-delivery-check: artifact_root must not be the delivery work directory")
+
+names = {
+    "requirements_path": "requirements.md",
+    "plan_path": "implementation-plan.md",
+    "decomposition_path": "decomposition.md",
+    "final_report_path": "final-report.md",
+}
+paths = {}
+for key, filename in names.items():
+    value = os.environ[f"DELIVERY_CONTEXT_{key.upper()}"]
+    raw = Path(value)
+    if not value or ".." in raw.parts:
+        raise SystemExit(f"complete-delivery-check: gc.var.{key} is not a safe path")
+    candidate = raw if raw.is_absolute() else work / raw
+    try:
+        relative = candidate.relative_to(work)
+    except ValueError:
+        raise SystemExit(f"complete-delivery-check: gc.var.{key} must resolve beneath the delivery work directory")
+    expected = artifact_relative / "delivery" / filename
+    if relative != expected:
+        raise SystemExit(f"complete-delivery-check: gc.var.{key} must equal {expected}")
+    current = work
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise SystemExit(f"complete-delivery-check: gc.var.{key} has a symlink authority escape")
+    paths[key] = str((work / relative).resolve(strict=False))
+
+inputs = {
+    "requirements": [],
+    "plan": [paths["requirements_path"]],
+    "decompose": [paths["requirements_path"], paths["plan_path"]],
+    "finalize": [paths["requirements_path"], paths["plan_path"], paths["decomposition_path"]],
+}[stage]
+output_key = {"requirements": "requirements_path", "plan": "plan_path", "decompose": "decomposition_path", "finalize": "final_report_path"}[stage]
+print(json.dumps({
+    "stage": stage,
+    "source_bead_id": os.environ["DELIVERY_CONTEXT_SOURCE_ID"],
+    "attempt": int(os.environ["DELIVERY_CONTEXT_ATTEMPT"]),
+    "logical_control_id": os.environ["DELIVERY_CONTEXT_CONTROL_ID"],
+    "attempt_log": os.environ["DELIVERY_CONTEXT_ATTEMPT_LOG"],
+    "canonical_paths": paths,
+    "permitted_input_paths": inputs,
+    "permitted_output_paths": [paths[output_key]],
+}, sort_keys=True))
+PY
+  exit 0
+fi
+
 # A deployed pack supplies the common checker beside this materialized script.
 # A source-tree caller may select one only from workflow-root policy, never a
 # step-controlled value. Canonicalize configured paths inside the worktree so

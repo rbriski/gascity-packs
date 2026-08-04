@@ -1,5 +1,12 @@
 Run garrytan/gstack office-hours intake for this preflighted delivery.
 
+Before reading source intent or writing, run
+`.gc/scripts/checks/delivery-source-artifact-valid.sh --context requirements`.
+It prints the exact canonical input/output paths and, on a Ralph retry, the
+validated logical control and its exact `gc.attempt_log` failure reason. Use
+only those paths and repair in place. A missing or mismatched control, attempt
+log, artifact root, or path authority is a fail-closed blocker.
+
 Before inspecting repository HEAD or inferring an outcome from existing code,
 resolve `gc.var.source_bead_id` on the workflow root. It is required for a
 launcher-created delivery. Read that durable bead or convoy with `gc bd show

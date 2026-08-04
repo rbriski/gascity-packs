@@ -85,6 +85,14 @@ case "$AGENT" in
     ;;
 esac
 [ -n "$ARTIFACT_ROOT" ] || ARTIFACT_ROOT="plans/complete-delivery/$BEAD_ID"
+# Build-base renders task descriptions before its prepare stage can persist
+# derived metadata.  Bind the Complete Delivery source-artifact paths here so
+# every first attempt and Ralph retry receives the same nonblank authority.
+DELIVERY_ROOT="$ARTIFACT_ROOT/delivery"
+REQUIREMENTS_PATH="$DELIVERY_ROOT/requirements.md"
+PLAN_PATH="$DELIVERY_ROOT/implementation-plan.md"
+DECOMPOSITION_PATH="$DELIVERY_ROOT/decomposition.md"
+FINAL_REPORT_PATH="$DELIVERY_ROOT/final-report.md"
 
 for command_name in env gc python3 timeout mktemp; do
   command -v "$command_name" >/dev/null 2>&1 || {
@@ -156,6 +164,10 @@ if timeout --signal=KILL "$SLING_TIMEOUT" env \
   HOME="$CONTROLLER_HOME" \
   gc sling "$RIG/$AGENT" "$BEAD_ID" --on complete-delivery \
   --var "artifact_root=$ARTIFACT_ROOT" \
+  --var "requirements_path=$REQUIREMENTS_PATH" \
+  --var "plan_path=$PLAN_PATH" \
+  --var "decomposition_path=$DECOMPOSITION_PATH" \
+  --var "final_report_path=$FINAL_REPORT_PATH" \
   --var "source_bead_id=$BEAD_ID" \
   --var "source_title=$SOURCE_TITLE" \
   --var "launcher_github_preflight=github-city-v1" \

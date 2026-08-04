@@ -1,5 +1,12 @@
 Write the pre-publication Complete Delivery build record.
 
+Before reading source intent or writing, run
+`.gc/scripts/checks/delivery-source-artifact-valid.sh --context finalize`.
+It prints the exact canonical input/output paths and, on a Ralph retry, the
+validated logical control and its exact `gc.attempt_log` failure reason. Use
+only those paths and repair in place. A missing or mismatched control, attempt
+log, artifact root, or path authority is a fail-closed blocker.
+
 Synthesize requirements, plan, decomposition, canonical implementation
 summary, internal review, QA, local gates, and release-readiness evidence. The
 artifact is Markdown with YAML front matter and schema

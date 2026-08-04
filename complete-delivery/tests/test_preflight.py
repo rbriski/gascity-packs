@@ -3488,6 +3488,18 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("gc.build.requirements_path", requirements)
         self.assertIn("status: approved", requirements)
 
+        for stage, prompt in (
+            ("requirements", requirements),
+            ("plan", (WORKFLOW_ROOT / "plan.md").read_text(encoding="utf-8")),
+            ("decompose", (WORKFLOW_ROOT / "decompose.md").read_text(encoding="utf-8")),
+            ("finalize", (WORKFLOW_ROOT / "finalize.md").read_text(encoding="utf-8")),
+        ):
+            with self.subTest(stage=stage):
+                self.assertIn(
+                    f"delivery-source-artifact-valid.sh --context {stage}", prompt
+                )
+                self.assertIn("gc.attempt_log", prompt)
+
         plan = (WORKFLOW_ROOT / "plan.md").read_text(encoding="utf-8")
         self.assertIn("Write the plan to `{{plan_path}}`", plan)
         self.assertIn("gc.build.plan_path", plan)
@@ -3725,6 +3737,7 @@ class SourceArtifactTests(unittest.TestCase):
         step_source_id: str | None = None,
         step_source_title: str | None = None,
         root_bead: bool = False,
+        command_args: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -3840,6 +3853,10 @@ class SourceArtifactTests(unittest.TestCase):
             root_metadata = {
                 artifact_path_key: artifact_path_value,
                 "gc.var.artifact_root": "artifacts",
+                "gc.var.requirements_path": "artifacts/delivery/requirements.md",
+                "gc.var.plan_path": "artifacts/delivery/implementation-plan.md",
+                "gc.var.decomposition_path": "artifacts/delivery/decomposition.md",
+                "gc.var.final_report_path": "artifacts/delivery/final-report.md",
                 **(
                     {"gc.var.build_artifact_valid_path": generic_check_value}
                     if generic_check is not None and generic_check_value is not None
@@ -3906,7 +3923,7 @@ class SourceArtifactTests(unittest.TestCase):
                 "PATH": f"{bin_dir}:{environment['PATH']}",
             })
             return subprocess.run(
-                ["bash", str(SOURCE_ARTIFACT_SCRIPT)],
+                ["bash", str(SOURCE_ARTIFACT_SCRIPT), *command_args],
                 capture_output=True,
                 text=True,
                 env=environment,
@@ -3936,6 +3953,27 @@ class SourceArtifactTests(unittest.TestCase):
                 result = self.run_check(artifact)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
+
+    def test_source_artifact_context_binds_every_delivery_path_before_work(self) -> None:
+        result = self.run_check(
+            self.artifact(), command_args=("--context", "plan")
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = json.loads(result.stdout)
+        self.assertEqual(manifest["attempt"], 1)
+        self.assertEqual(manifest["logical_control_id"], "")
+        self.assertEqual(manifest["attempt_log"], "")
+        self.assertEqual(
+            manifest["permitted_input_paths"],
+            [str(pathlib.Path(manifest["canonical_paths"]["requirements_path"]))],
+        )
+        self.assertEqual(
+            manifest["permitted_output_paths"],
+            [str(pathlib.Path(manifest["canonical_paths"]["plan_path"]))],
+        )
+        self.assertTrue(
+            all("/artifacts/delivery/" in path for path in manifest["canonical_paths"].values())
+        )
 
     def test_source_artifact_normalizes_durable_title_like_preflight(self) -> None:
         result = self.run_check(
