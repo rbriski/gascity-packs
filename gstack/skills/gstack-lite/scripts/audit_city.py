@@ -158,12 +158,35 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
         for patch in agent_patches
         if isinstance(patch, dict)
         and patch.get("name") == "gc.implementation-reviewer"
-        and not patch.get("dir")
-        and patch.get("provider") == "claude-review"
-        and patch.get("max_active_sessions") == 1
     ]
-    if len(reviewer_patches) != 1:
-        errors.append("one global Claude gc.implementation-reviewer patch is required")
+    unsafe_reviewer_rigs = []
+    for rig in rigs:
+        rig_name = rig.get("name", "<unnamed>")
+        matching = [patch for patch in reviewer_patches if patch.get("dir") == rig_name]
+        if (
+            len(matching) != 1
+            or matching[0].get("provider") != "claude-review"
+            or type(matching[0].get("max_active_sessions")) is not int
+            or matching[0]["max_active_sessions"] != 1
+        ):
+            unsafe_reviewer_rigs.append(rig_name)
+    if unsafe_reviewer_rigs:
+        errors.append(
+            "current rigs need exactly one Claude gc.implementation-reviewer patch: "
+            + ", ".join(sorted(unsafe_reviewer_rigs))
+        )
+
+    known_rigs = {rig.get("name", "<unnamed>") for rig in rigs}
+    unexpected_reviewer_scopes = sorted(
+        str(patch.get("dir", "<city>"))
+        for patch in reviewer_patches
+        if patch.get("dir") not in known_rigs
+    )
+    if unexpected_reviewer_scopes:
+        errors.append(
+            "gc.implementation-reviewer patches target unknown scopes: "
+            + ", ".join(unexpected_reviewer_scopes)
+        )
 
     stale = stale_skill_links(city)
     if stale and fix_stale_skills:

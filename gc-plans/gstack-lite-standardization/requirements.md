@@ -63,8 +63,9 @@ records.
   a future rig is added.
 - Normal implementation, economy, review, and rescue lanes remain scale-to-zero
   and bounded by the pragmatic concurrency policy.
-- One independent reviewer uses the Claude family by default where the
-  specialized review role is available.
+- Each current rig has one explicit specialized implementation-reviewer patch
+  using the Claude family. Gas City patches match exact rig/agent identities;
+  there is no wildcard global reviewer patch.
 
 ### As an operator debugging drift, I have a deterministic audit
 

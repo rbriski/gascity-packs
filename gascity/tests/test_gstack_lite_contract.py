@@ -38,6 +38,7 @@ base = "builtin:codex"
 source = "gc"
 
 [[patches.agent]]
+dir = "demo"
 name = "gc.implementation-reviewer"
 provider = "claude-review"
 max_active_sessions = 1
@@ -193,7 +194,16 @@ class GstackLiteContractTests(unittest.TestCase):
                     'name = "gc.implementation-reviewer"', 'name = "other"'
                 ),
                 VALID_PACK,
-                "one global Claude gc.implementation-reviewer patch is required",
+                "current rigs need exactly one Claude gc.implementation-reviewer patch: demo",
+            ),
+            (
+                "nonexistent global reviewer scope",
+                VALID_CITY.replace(
+                    'dir = "demo"\nname = "gc.implementation-reviewer"',
+                    'name = "gc.implementation-reviewer"',
+                ),
+                VALID_PACK,
+                "gc.implementation-reviewer patches target unknown scopes: <city>",
             ),
             (
                 "invalid rigs shape",

@@ -65,8 +65,9 @@ checks plus read-only routing canaries.
 - Append the Gstack Lite fragment globally.
 - Add the `gc` roles import explicitly to every current rig and retain it under
   `[defaults.rig.imports]` for future rigs.
-- Make the specialized implementation reviewer a global Claude/Opus patch and
-  remove redundant per-rig patches.
+- Give every current rig one explicit Claude/Opus implementation-reviewer
+  patch. Gas City agent patches match exact `(dir, name)` identities, so a
+  wildcard global reviewer patch would not resolve.
 - Bound ordinary polecat pools to at most two writers per rig; retain smaller
   limits where already stricter. Because the current defaults schema inherits
   imports but not rig pool patches, make the audit reject any newly registered
