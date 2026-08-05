@@ -58,6 +58,7 @@ class DiscordIntakeServiceTests(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self._old_environ = os.environ.copy()
         os.environ["GC_CITY_ROOT"] = self.tempdir.name
+        os.environ["GC_BIN"] = "gc"
         service.LAST_REQUEST_PRUNE_AT = 0.0
         service.LAST_REQUEST_RECOVERY_AT = 0.0
 

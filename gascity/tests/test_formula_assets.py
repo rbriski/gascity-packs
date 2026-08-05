@@ -4037,6 +4037,7 @@ description = "Override sink that writes the base triage report contract."
                 "      echo \"transient bead read failure for $2\" >&2\n"
                 "      exit 75\n"
                 "    fi\n"
+                "    if [ -n \"${BD_SHOW_ADVISORY:-}\" ]; then echo \"$BD_SHOW_ADVISORY\" >&2; fi\n"
                 "    cat \"$BD_SHOW_DIR/$2.json\"\n"
                 "    ;;\n"
                 "  *) exit 2 ;;\n"
@@ -4526,6 +4527,31 @@ description = "Override sink that writes the base triage report contract."
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("build artifact valid", result.stdout)
         self.assertEqual(attempts, ["loop", "loop", "root", "root"])
+
+    def test_build_artifact_check_keeps_success_stderr_out_of_json(self) -> None:
+        with tempfile.TemporaryDirectory() as artifact_dir:
+            artifact = pathlib.Path(artifact_dir) / "requirements.md"
+            artifact.write_text(self._valid_requirements_artifact(), encoding="utf-8")
+            control = (
+                '[{"id": "loop", "metadata": {'
+                '"gc.root_bead_id": "root", '
+                '"gc.build.artifact_schema": "gc.build.requirements.v1", '
+                '"gc.build.artifact_path_keys": "gc.build.requirements_path"}}]'
+            )
+            root_bead = (
+                '[{"id": "root", "metadata": {'
+                f'"gc.build.requirements_path": "{artifact}"'
+                "}}]"
+            )
+            result = self._run_build_artifact_check(
+                {"loop": control, "root": root_bead},
+                "loop",
+                {"BD_SHOW_ADVISORY": "city configuration advisory"},
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("build artifact valid", result.stdout)
+        self.assertIn("city configuration advisory", result.stderr)
 
     def test_build_artifact_check_blocks_persistent_bead_read_failure(self) -> None:
         control = (
