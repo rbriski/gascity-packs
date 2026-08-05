@@ -29,6 +29,10 @@ CLAIM_PROTOCOL_INCLUDE = '{{ template "gc-role-worker" . }}'
 PUBLIC_CLAIM_FRAGMENT = (
     GASCITY_ROOT / "template-fragments" / "gc-role-worker.template.md"
 )
+PUBLIC_POLICY_FRAGMENT = (
+    GASCITY_ROOT / "template-fragments" / "gstack-lite-policy.template.md"
+)
+ROLES_FRAGMENT_ROOT = GASCITY_ROOT / "roles" / "template-fragments"
 
 # Pack-local prompt surfaces that the factory actually executes. Vendored
 # upstream trees under vendor/ are methodology source material, not prompts.
@@ -334,9 +338,14 @@ class DerivedPackCompatibilityTests(unittest.TestCase):
         )
         self.assertTrue(PUBLIC_CLAIM_FRAGMENT.is_file())
         self.assertNotIn("imports", roles_pack)
-        self.assertTrue(
-            (GASCITY_ROOT / "roles" / "template-fragments" / "gc-role-worker.template.md").is_file()
-        )
+        for public_fragment in (PUBLIC_CLAIM_FRAGMENT, PUBLIC_POLICY_FRAGMENT):
+            roles_fragment = ROLES_FRAGMENT_ROOT / public_fragment.name
+            with self.subTest(roles_fragment=roles_fragment.name):
+                self.assertTrue(roles_fragment.is_file())
+                self.assertEqual(
+                    roles_fragment.read_text(encoding="utf-8"),
+                    public_fragment.read_text(encoding="utf-8"),
+                )
 
         for pack_name in DERIVED_PACKS:
             pack_root = PACKS_ROOT / pack_name

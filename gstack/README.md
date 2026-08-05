@@ -23,14 +23,14 @@ Import the pack at city scope:
 
 ```toml
 [imports.gstack]
-source = "https://github.com/rbriski/gascity-packs.git//gstack"
+source = "https://github.com/gastownhall/gascity-packs.git//gstack"
 ```
 
 Import the standalone shared roles on each rig:
 
 ```toml
 [rigs.imports.gc]
-source = "https://github.com/rbriski/gascity-packs.git//gascity/roles"
+source = "https://github.com/gastownhall/gascity-packs.git//gascity/roles"
 ```
 
 Do not import `deprecated/complete-delivery` or route ordinary work through

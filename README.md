@@ -44,7 +44,7 @@ this is the shortest path. Each step is copy-pasteable; swap names to taste.
 3. **Import Gstack Lite at city scope.** From the city directory:
 
    ```sh
-   gc import add --name gstack https://github.com/rbriski/gascity-packs.git//gstack
+   gc import add --name gstack https://github.com/gastownhall/gascity-packs.git//gstack
    ```
 
    This writes the import, fetches the latest release, and pins it in

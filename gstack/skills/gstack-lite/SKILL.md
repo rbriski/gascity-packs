@@ -140,4 +140,7 @@ Close the bead only after the requested terminal state is proven. Report:
 For changes to Gas City itself, run `scripts/audit_city.py --city <city-root>`
 from this skill directory. Use `--fix-stale-skills` only to remove exact stale
 `complete-delivery.complete-delivery` symlinks after the active import is gone.
-The script must pass before calling the city configuration coherent.
+The script enforces this city's strict Gstack Lite profile, so it also rejects
+explicit legacy `build-basic` imports. A separate city may intentionally use
+that legacy pack, but it is not compliant with this lightweight profile. The
+script must pass before calling a Gstack Lite city configuration coherent.

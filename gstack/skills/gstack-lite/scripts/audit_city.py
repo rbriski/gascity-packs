@@ -20,14 +20,14 @@ REQUIRED_PROVIDERS = {
     "claude-review",
     "sol-rescue",
 }
-RETIRED_FORMULAS = {
+STRICT_PROFILE_EXCLUDED_FORMULAS = {
     "build-base",
     "build-basic",
     "build-basic-review",
     "complete-delivery",
     "complete-delivery-pr-gate",
 }
-RETIRED_PREFIXES = ("gstack-",)
+STRICT_PROFILE_EXCLUDED_PREFIXES = ("gstack-",)
 
 
 def load_toml(path: Path) -> dict:
@@ -128,12 +128,16 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
         retired = sorted(
             name
             for name in formula_names
-            if name in RETIRED_FORMULAS
-            or any(name.startswith(prefix) for prefix in RETIRED_PREFIXES)
+            if name in STRICT_PROFILE_EXCLUDED_FORMULAS
+            or any(
+                name.startswith(prefix)
+                for prefix in STRICT_PROFILE_EXCLUDED_PREFIXES
+            )
         )
         if retired:
             errors.append(
-                "retired ordinary formulas remain active: " + ", ".join(retired)
+                "strict Gstack Lite profile excludes active formulas: "
+                + ", ".join(retired)
             )
 
     providers = city_toml.get("providers", {})

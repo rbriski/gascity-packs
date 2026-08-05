@@ -85,4 +85,7 @@ def test_audit_rejects_retired_formula_names(monkeypatch, tmp_path: Path) -> Non
 
     errors, _notes = audit.audit(city, False)
 
-    assert any("retired ordinary formulas remain active" in error for error in errors)
+    assert any(
+        "strict Gstack Lite profile excludes active formulas" in error
+        for error in errors
+    )
