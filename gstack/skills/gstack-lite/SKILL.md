@@ -185,6 +185,17 @@ Close the bead only after the requested terminal state is proven. Report:
 - retries, rejected attempts, rework cause, and human intervention;
 - residual risk or unavailable evidence.
 
+Store comparable terminal accounting in the durable product bead's
+`gc.delivery.metrics` metadata object. Its versioned contract,
+[`schemas/gc.delivery.v1.schema.json`](schemas/gc.delivery.v1.schema.json),
+covers stage timing, rework, human intervention, model lanes, immutable
+revisions, and outcome.
+
+Use `scripts/delivery_snapshot.py delivery` for a bounded product rollup with
+telemetry coverage, and `scripts/delivery_snapshot.py health` for separate
+supported `gc doctor --json` evidence. Only closed, instrumented,
+non-ephemeral product beads count; only `blocking_failed > 0` blocks launch.
+
 ## City configuration audit
 
 For changes to Gas City itself, run `scripts/audit_city.py --city <city-root>`
