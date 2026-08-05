@@ -100,9 +100,10 @@ class GstackLiteContractTests(unittest.TestCase):
         skill = (REPO_ROOT / "gstack/skills/gstack-lite/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("name: gstack-lite", skill)
         self.assertIn("Use by default for Gas City requests", skill)
-        self.assertIn("Never install or launch the deprecated Complete Delivery pack", skill)
+        self.assertIn("Never install or launch a retired delivery graph", skill)
+        self.assertIn("Do not mention retired", skill)
         self.assertNotIn("TODO", skill)
-        self.assertLess(len(skill.splitlines()), 180)
+        self.assertLess(len(skill.splitlines()), 210)
 
     def test_mayor_and_prompt_fragment_default_to_gstack_lite(self) -> None:
         mayor = (REPO_ROOT / "gascity/skills/mayor/SKILL.md").read_text(encoding="utf-8")
@@ -110,12 +111,16 @@ class GstackLiteContractTests(unittest.TestCase):
             REPO_ROOT / "gascity/template-fragments/gstack-lite-policy.template.md"
         ).read_text(encoding="utf-8")
         self.assertIn("## Default Delivery Policy", mayor)
-        self.assertIn("launch the deprecated Complete Delivery pack", mayor)
+        self.assertIn("Do not mention retired workflow names", mayor)
         self.assertIn('{{ define "gstack-lite-policy" -}}', fragment)
         self.assertIn("one independent review", fragment)
         self.assertIn("sol-research", fragment)
         self.assertIn("Sol/max", fragment)
         self.assertIn("--no-formula", fragment)
+        for content in (mayor, fragment):
+            self.assertIn("gc session attach", content)
+            self.assertIn("/home/nvidia/gascity/reports", content)
+            self.assertIn("HTML/CSS", content)
 
     def test_complete_delivery_is_historical_only(self) -> None:
         readme = (REPO_ROOT / "complete-delivery/README.md").read_text(encoding="utf-8")
