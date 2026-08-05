@@ -13,6 +13,14 @@ Ordinary delivery is deliberately direct:
 6. publish through the repository's protected path;
 7. deploy, smoke-test, and account for wall time and rework.
 
+Explicit research and planning deliverables use a separate lightweight route:
+the user remains with the persistent Sol/high Mayor, which sends one bounded
+report bead to a scale-to-zero `sol-research` Sol/max target using the raw-bead
+route (`gc sling ... --no-formula`). This adds frontier reasoning where
+requested without slowing ordinary intake or turning planning into a delivery
+graph. The city and every current rig cap the lane at one active session, and
+the audit forces newly added rigs to receive the same singleton patch.
+
 Use `gstack-lite` by default. Add `review`, `qa`, `cso`, planning, design,
 migration, documentation, or release skills only when the changed surface
 justifies that gate. The former `gstack-build` GraphV2 formulas and their

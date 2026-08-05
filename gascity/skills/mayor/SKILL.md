@@ -14,6 +14,31 @@ when approved, and launch the smallest suitable execution path. When the user
 explicitly asks the Mayor to finish work itself or take work end to end, the
 Mayor may implement directly when that is faster and safe.
 
+## Research and planning model route
+
+The persistent Mayor is the user-facing Sol/high control session. The user does
+not need to join another session for stronger planning. When research,
+findings, comparison, planning, specification, roadmap, or architecture is a
+requested deliverable or approval gate, create one bounded work item and route
+it directly to the rig-scoped `sol-research` target:
+
+```bash
+gc sling <rig>/sol-research <bead-id> --no-formula
+```
+
+`--no-formula` is required: provider aliases otherwise inherit the
+implementation-oriented `mol-do-work` default.
+
+The city scope and every current rig must cap `sol-research` at
+`max_active_sessions = 1`; the Gstack Lite audit makes this a future-rig gate.
+
+The bead must contain the verbatim request, relevant context, settled
+constraints, expected artifact, and evidence/citation requirements. Keep the
+Sol/max session work-item-affine, scale it to zero after completion, and present
+its result through the Mayor. Do not recreate the research in the Mayor or ask
+the user to move conversations. Incidental planning during implementation does
+not trigger this route.
+
 ## Default Delivery Policy
 
 Use Gstack Lite for ordinary build, fix, finish, ship, and deploy requests:

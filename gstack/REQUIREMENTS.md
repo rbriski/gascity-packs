@@ -3,6 +3,11 @@
 - The pack root exposes skills only: no active `agents/`, `commands/`, or
   `formulas/` directories.
 - `gstack-lite` is the default end-to-end delivery skill.
+- The persistent Mayor remains Sol/high; explicit research and planning
+  deliverables route to a work-item-affine, scale-to-zero Sol/max
+  `sol-research` lane through a raw `--no-formula` bead without moving the user.
+- The `sol-research` lane is a singleton in the city and every current rig; the
+  audit rejects a new rig until it receives the same cap.
 - One bead has one implementation owner and one immutable source-head lease.
 - Material changes receive one different-family review against an immutable
   candidate head.

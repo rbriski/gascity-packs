@@ -14,6 +14,7 @@ import tomllib
 
 STALE_SKILL_NAME = "complete-delivery.complete-delivery"
 REQUIRED_PROVIDERS = {
+    "sol-research",
     "sol-fast",
     "luna-economy",
     "claude-careful",
@@ -145,6 +146,15 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
     if missing_providers:
         errors.append(f"missing provider aliases: {', '.join(missing_providers)}")
 
+    research = providers.get("sol-research", {})
+    research_options = (
+        research.get("option_defaults", {}) if isinstance(research, dict) else {}
+    )
+    if research_options.get("model") != "gpt-5.6-sol" or research_options.get(
+        "effort"
+    ) != "max":
+        errors.append("sol-research must use gpt-5.6-sol at max effort")
+
     fragments = city_toml.get("agent_defaults", {}).get("append_fragments", [])
     if "gstack-lite-policy" not in fragments:
         errors.append("agent_defaults.append_fragments must include gstack-lite-policy")
@@ -210,6 +220,53 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
 
     patches = city_toml.get("patches", {})
     agent_patches = patches.get("agent", []) if isinstance(patches, dict) else []
+    mayor_patches = [
+        patch
+        for patch in agent_patches
+        if isinstance(patch, dict) and patch.get("name") == "gastown.mayor"
+    ]
+    mayor_options = (
+        mayor_patches[0].get("option_defaults", {})
+        if len(mayor_patches) == 1
+        else {}
+    )
+    if (
+        len(mayor_patches) != 1
+        or mayor_options.get("model") != "gpt-5.6-sol"
+        or mayor_options.get("effort") != "high"
+    ):
+        errors.append("persistent gastown.mayor must use gpt-5.6-sol at high effort")
+    research_patches = [
+        patch
+        for patch in agent_patches
+        if isinstance(patch, dict) and patch.get("name") == "sol-research"
+    ]
+    research_scopes = {"", *(rig.get("name", "<unnamed>") for rig in rigs)}
+    unsafe_research_scopes = []
+    for scope in research_scopes:
+        matching = [patch for patch in research_patches if patch.get("dir", "") == scope]
+        if (
+            len(matching) != 1
+            or type(matching[0].get("max_active_sessions")) is not int
+            or matching[0]["max_active_sessions"] != 1
+        ):
+            unsafe_research_scopes.append(scope or "<city>")
+    if unsafe_research_scopes:
+        errors.append(
+            "city and current rigs need exactly one singleton sol-research patch: "
+            + ", ".join(sorted(unsafe_research_scopes))
+        )
+
+    unexpected_research_scopes = sorted(
+        str(patch.get("dir", "") or "<city>")
+        for patch in research_patches
+        if patch.get("dir", "") not in research_scopes
+    )
+    if unexpected_research_scopes:
+        errors.append(
+            "sol-research patches target unknown scopes: "
+            + ", ".join(unexpected_research_scopes)
+        )
     reviewer_patches = [
         patch
         for patch in agent_patches

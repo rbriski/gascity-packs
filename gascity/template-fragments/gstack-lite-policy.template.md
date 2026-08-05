@@ -6,6 +6,11 @@ implementation owner, repository-native checks, one independent review for
 material changes, at most one repair cycle, protected publication, deployment,
 smoke verification, and concise wall-clock/rework accounting.
 
+- Keep the persistent Mayor on Sol/high for responsive intake and final
+  adjudication. Route explicit research or planning deliverables to the
+  scale-to-zero `sol-research` Sol/max lane with `gc sling ... --no-formula`;
+  the user remains in the Mayor session. Cap the lane at one active session in
+  the city and every rig; audit newly added rigs for the same singleton patch.
 - Never install or launch Complete Delivery, `gstack-build`, `build-basic`,
   review fan-out, or another retired delivery graph.
 - Add gstack planning, design, QA, security, migration, documentation, or
