@@ -10,8 +10,10 @@ change is correct in production. This is a delivery policy, not a large formula.
 
 ## Invariants
 
-- Never install or launch the deprecated Complete Delivery pack. Treat
-  `gstack-build` and `build-basic` as retired ordinary delivery routes too.
+- Never install or launch a retired delivery graph. Treat `gstack-build` and
+  `build-basic` as retired ordinary delivery routes too. Do not mention retired
+  workflow names to the user unless they ask about history or an active
+  configuration violation is detected.
 - Keep one durable `main`. Use one short-lived branch only when repository
   protection requires a pull request, then delete it after merge.
 - Cap implementation at two genuinely independent writers and review at one
@@ -45,10 +47,20 @@ an alternate builder concurrently with two existing writers.
 
 Keep the persistent Mayor on Sol/high as the responsive conversation owner.
 When research or planning is itself a requested deliverable or approval gate,
-the Mayor creates one bounded bead and routes it directly with
-`gc sling <scope>/sol-research <bead-id> --no-formula`. The explicit flag avoids
-the provider target's default implementation formula. The user stays in the
-Mayor session; the Sol/max worker is an internal execution detail.
+prefer a persistent, attachable Sol/max conversation:
+
+```bash
+gc session new <scope>/sol-research --alias <scope>-<slug>-planning \
+  --title "<planning title>" --no-attach
+gc session submit <scope>-<slug>-planning "<research and planning brief>"
+gc session attach <scope>-<slug>-planning
+```
+
+The Mayor creates and seeds it, then gives the user the exact attach command.
+Suspend rather than close it between planning conversations. Close it only
+after approved artifacts and the live report are complete. Use
+`gc sling <scope>/sol-research <bead-id> --no-formula` only for explicitly
+background or report-only work.
 
 Keep `sol-research` at `max_active_sessions = 1` in the city scope and every
 current rig. `audit_city.py` must fail when a new rig lacks the singleton patch.
@@ -58,6 +70,14 @@ artifact, and evidence/citation requirements. The Mayor validates and presents
 the result instead of independently recreating the analysis. Incidental planning
 inside an implementation task does not trigger this lane. The lane does not
 implement, review its own work, or become rescue capacity.
+
+Every user-facing research engagement publishes an HTML/CSS bundle at
+`/home/nvidia/gascity/reports/<rig>/<slug>/`, adds an active card to
+`/home/nvidia/gascity/reports/index.html`, and returns the live
+`https://gascity.tail96374b.ts.net/reports/<rig>/<slug>/` URL. The durable brief
+must name the slug, title, source-plan directory, expected local bundle, and
+evidence/citation requirements. The Mayor verifies both the library link and a
+successful live HTTP response before reporting completion.
 
 ## Deliver in six stages
 

@@ -4,10 +4,13 @@
   `formulas/` directories.
 - `gstack-lite` is the default end-to-end delivery skill.
 - The persistent Mayor remains Sol/high; explicit research and planning
-  deliverables route to a work-item-affine, scale-to-zero Sol/max
-  `sol-research` lane through a raw `--no-formula` bead without moving the user.
+  deliverables route to a persistent, attachable Sol/max `sol-research`
+  conversation by default; raw `--no-formula` beads are background-only.
 - The `sol-research` lane is a singleton in the city and every current rig; the
   audit rejects a new rig until it receives the same cap.
+- Every user-facing research engagement publishes an HTML/CSS bundle under the
+  rig's reports namespace, registers an active library card, and verifies its
+  live tailnet URL before completion.
 - One bead has one implementation owner and one immutable source-head lease.
 - Material changes receive one different-family review against an immutable
   candidate head.
@@ -17,9 +20,8 @@
   inherited only when bound to the same immutable head and check definition.
 - Protected publication, deployment, and a behavior canary remain distinct
   terminal states.
-- Complete Delivery and the former gstack GraphV2 formula fleet under
-  `../deprecated/` are historical artifacts only and must not appear in the
-  active city catalog.
+- Retired delivery graphs under `../deprecated/` are historical artifacts only
+  and must not appear in the active city catalog.
 - Final accounting records wall clock, provider lanes, queue time, checks,
   review, repair, deployment, rejected attempts, and human intervention.
 

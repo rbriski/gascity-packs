@@ -5,14 +5,15 @@
 > independent gstack review for material changes, one bounded repair, then the
 > repository's protected publish/deploy/smoke path. The large formulas below
 > remain explicit tools for genuinely complex work; they are not the default
-> response to “finish this” or “ship it.” Complete Delivery is deprecated.
+> response to “finish this” or “ship it.”
 
-For research or planning requested as a deliverable, stay in the Mayor session.
-The Sol/high Mayor routes one bounded report bead to the scale-to-zero
-`sol-research` Sol/max target with `gc sling ... --no-formula`, then validates
-and presents the result. No full build graph or separate user session is
-required. City and rig patches cap this lane at one active session; the audit
-fails when a newly added rig lacks the singleton patch.
+For research or planning requested as a deliverable, the Sol/high Mayor creates
+and seeds a persistent, attachable `sol-research` Sol/max session and returns
+its exact attach command. That session owns the discussion and artifacts until
+the plan and linked HTML/CSS report are complete. Raw `gc sling ...
+--no-formula` work is for explicitly background research. City and rig patches
+cap this lane at one active session; the audit fails when a newly added rig
+lacks the singleton patch.
 
 This is the base pack for running full software-delivery workflows in Gas
 City: gather requirements, write and review a plan, decompose into tasks,

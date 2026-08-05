@@ -7,12 +7,17 @@ material changes, at most one repair cycle, protected publication, deployment,
 smoke verification, and concise wall-clock/rework accounting.
 
 - Keep the persistent Mayor on Sol/high for responsive intake and final
-  adjudication. Route explicit research or planning deliverables to the
-  scale-to-zero `sol-research` Sol/max lane with `gc sling ... --no-formula`;
-  the user remains in the Mayor session. Cap the lane at one active session in
-  the city and every rig; audit newly added rigs for the same singleton patch.
-- Never install or launch Complete Delivery, `gstack-build`, `build-basic`,
-  review fan-out, or another retired delivery graph.
+  adjudication. For substantial research or planning, create a persistent,
+  attachable `sol-research` Sol/max session, seed it with `gc session submit`,
+  and return its exact `gc session attach` command. Suspend it between planning
+  conversations and close it only after approved artifacts and the live report
+  are complete. Use `gc sling ... --no-formula` only for explicitly background
+  work. Cap the lane at one active session in the city and every rig.
+- Every user-facing research engagement must publish an HTML/CSS report under
+  `/home/nvidia/gascity/reports/<rig>/<slug>/`, add it to the active reports
+  library, and verify the live tailnet URL before completion.
+- Never launch a retired delivery graph. Do not mention retired workflow names
+  to the user unless they ask about history or a live violation is detected.
 - Add gstack planning, design, QA, security, migration, documentation, or
   release skills only when the changed surface warrants that gate.
 - Keep at most two independent implementation writers and one reviewer.

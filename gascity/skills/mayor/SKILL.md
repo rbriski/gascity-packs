@@ -14,13 +14,36 @@ when approved, and launch the smallest suitable execution path. When the user
 explicitly asks the Mayor to finish work itself or take work end to end, the
 Mayor may implement directly when that is faster and safe.
 
-## Research and planning model route
+## Research and planning session route
 
-The persistent Mayor is the user-facing Sol/high control session. The user does
-not need to join another session for stronger planning. When research,
-findings, comparison, planning, specification, roadmap, or architecture is a
-requested deliverable or approval gate, create one bounded work item and route
-it directly to the rig-scoped `sol-research` target:
+The persistent Mayor is the user-facing Sol/high control session. When
+research, findings, comparison, planning, specification, roadmap, or
+architecture is a requested deliverable or approval gate, use the rig-scoped
+`sol-research` Sol/max target.
+
+For substantial planning where the user may want to collaborate, create a
+persistent, attachable conversation instead of a one-shot worker:
+
+```bash
+gc session new <rig>/sol-research \
+  --alias <rig>-<plan-slug>-planning \
+  --title "<planning title>" \
+  --no-attach
+gc session submit <rig>-<plan-slug>-planning "<research and planning brief>"
+```
+
+Return the exact attach command immediately:
+
+```bash
+gc session attach <rig>-<plan-slug>-planning
+```
+
+Suspend the session between conversations when capacity matters; suspension
+preserves its conversation. Close it only after the user approves the plan,
+the durable artifacts are complete, and the final report link is verified.
+
+Use a bounded raw bead only when the user explicitly wants background or
+report-only work:
 
 ```bash
 gc sling <rig>/sol-research <bead-id> --no-formula
@@ -39,6 +62,28 @@ its result through the Mayor. Do not recreate the research in the Mayor or ask
 the user to move conversations. Incidental planning during implementation does
 not trigger this route.
 
+### Research report contract
+
+Every user-facing research engagement must create or update a finished HTML/CSS
+report and register it in the reports library. The Mayor must put these exact
+values in the session brief or bead:
+
+- `report_slug` and human-readable `report_title`;
+- source artifacts under `<rig-root>/plans/<plan-slug>/`;
+- published bundle at
+  `/home/nvidia/gascity/reports/<rig>/<report_slug>/index.html` with a sibling
+  `styles.css` when styling is non-trivial;
+- active-library entry in `/home/nvidia/gascity/reports/index.html`;
+- expected live URL
+  `https://gascity.tail96374b.ts.net/reports/<rig>/<report_slug>/`.
+
+The research owner must cite sources, distinguish evidence from inference,
+preserve the user's settled decisions, and record the local artifact paths and
+live URL in the session/bead result. The Mayor verifies the bundle, library
+link, and live HTTP response before calling the research complete. Planning
+files remain the executable source of truth; the report is the readable,
+linked presentation of that work.
+
 ## Default Delivery Policy
 
 Use Gstack Lite for ordinary build, fix, finish, ship, and deploy requests:
@@ -52,10 +97,13 @@ Use Gstack Lite for ordinary build, fix, finish, ship, and deploy requests:
 
 Invoke planning, design, browser QA, security, migration, documentation, or
 release-readiness skills only when actual risk warrants them. Do not install or
-launch the deprecated Complete Delivery pack. Do not infer `gstack-build`,
-`build-basic`, review fan-out, or another large GraphV2 formula from a generic
+launch a retired delivery graph. Do not infer `gstack-build`, `build-basic`,
+review fan-out, or another large GraphV2 formula from a generic
 request to “finish” or “deliver” work; use one only when the user explicitly
 selects it or the lightweight path cannot satisfy an identified requirement.
+Do not mention retired workflow names in user-facing responses unless the user
+explicitly asks about their history or an active configuration violation is
+detected.
 
 ## Operating Model
 
