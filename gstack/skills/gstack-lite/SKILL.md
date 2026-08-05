@@ -50,6 +50,9 @@ the Mayor creates one bounded bead and routes it directly with
 the provider target's default implementation formula. The user stays in the
 Mayor session; the Sol/max worker is an internal execution detail.
 
+Keep `sol-research` at `max_active_sessions = 1` in the city scope and every
+current rig. `audit_city.py` must fail when a new rig lacks the singleton patch.
+
 Pass the verbatim request, relevant context, settled constraints, expected
 artifact, and evidence/citation requirements. The Mayor validates and presents
 the result instead of independently recreating the analysis. Incidental planning

@@ -50,6 +50,16 @@ model = "gpt-5.6-sol"
 effort = "high"
 
 [[patches.agent]]
+dir = ""
+name = "sol-research"
+max_active_sessions = 1
+
+[[patches.agent]]
+dir = "demo"
+name = "sol-research"
+max_active_sessions = 1
+
+[[patches.agent]]
 dir = "demo"
 name = "gc.implementation-reviewer"
 provider = "claude-review"
@@ -224,6 +234,24 @@ class GstackLiteContractTests(unittest.TestCase):
                 ),
                 VALID_PACK,
                 "current rigs need exactly one Claude gc.implementation-reviewer patch: demo",
+            ),
+            (
+                "missing research singleton",
+                VALID_CITY.replace(
+                    'dir = "demo"\nname = "sol-research"',
+                    'dir = "demo"\nname = "other-research"',
+                ),
+                VALID_PACK,
+                "city and current rigs need exactly one singleton sol-research patch: demo",
+            ),
+            (
+                "unsafe research concurrency",
+                VALID_CITY.replace(
+                    'dir = "demo"\nname = "sol-research"\nmax_active_sessions = 1',
+                    'dir = "demo"\nname = "sol-research"\nmax_active_sessions = 2',
+                ),
+                VALID_PACK,
+                "city and current rigs need exactly one singleton sol-research patch: demo",
             ),
             (
                 "nonexistent global reviewer scope",

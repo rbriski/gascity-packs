@@ -29,6 +29,9 @@ gc sling <rig>/sol-research <bead-id> --no-formula
 `--no-formula` is required: provider aliases otherwise inherit the
 implementation-oriented `mol-do-work` default.
 
+The city scope and every current rig must cap `sol-research` at
+`max_active_sessions = 1`; the Gstack Lite audit makes this a future-rig gate.
+
 The bead must contain the verbatim request, relevant context, settled
 constraints, expected artifact, and evidence/citation requirements. Keep the
 Sol/max session work-item-affine, scale it to zero after completion, and present

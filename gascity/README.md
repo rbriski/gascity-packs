@@ -11,7 +11,8 @@ For research or planning requested as a deliverable, stay in the Mayor session.
 The Sol/high Mayor routes one bounded report bead to the scale-to-zero
 `sol-research` Sol/max target with `gc sling ... --no-formula`, then validates
 and presents the result. No full build graph or separate user session is
-required.
+required. City and rig patches cap this lane at one active session; the audit
+fails when a newly added rig lacks the singleton patch.
 
 This is the base pack for running full software-delivery workflows in Gas
 City: gather requirements, write and review a plan, decompose into tasks,
