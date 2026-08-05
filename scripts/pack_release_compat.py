@@ -128,7 +128,9 @@ def load_latest_releases(
             if isinstance(release, dict) and (include_withdrawn or not release.get("withdrawn", False))
         ]
         if not active_releases:
-            raise ValueError(f"{name}: no active releases found")
+            if name in requested:
+                raise ValueError(f"{name}: no active releases found")
+            continue
         latest = max(active_releases, key=lambda release: semver_key(require_string(release, "version", name)))
         releases.append(
             Release(

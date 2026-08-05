@@ -55,6 +55,40 @@ def test_latest_releases_ignore_withdrawn_and_sort_semver(tmp_path) -> None:
     assert releases[0].commit == "2222222222222222222222222222222222222222"
 
 
+def test_latest_releases_skip_fully_withdrawn_pack_unless_requested(tmp_path) -> None:
+    registry = tmp_path / "registry.toml"
+    registry.write_text(
+        textwrap.dedent(
+            """\
+            schema = 1
+
+            [[pack]]
+            name = "retired"
+            description = "Retired pack."
+            source = "https://example.com/gascity-packs/tree/main/retired"
+            source_kind = "git"
+
+              [[pack.release]]
+              version = "0.1.0"
+              ref = "main"
+              commit = "1111111111111111111111111111111111111111"
+              hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              description = "Withdrawn release."
+              withdrawn = true
+              withdrawn_reason = "Retired."
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    assert pack_release_compat.load_latest_releases(registry) == []
+    with pytest.raises(ValueError, match="retired: no active releases found"):
+        pack_release_compat.load_latest_releases(
+            registry,
+            pack_filters=["retired"],
+        )
+
+
 def test_write_compat_city_pins_latest_release_sources(tmp_path) -> None:
     releases = [
         pack_release_compat.Release(
