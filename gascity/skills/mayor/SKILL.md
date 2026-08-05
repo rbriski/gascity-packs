@@ -29,14 +29,33 @@ gc session new <rig>/gc.research-planner \
   --alias <rig>-<plan-slug>-planning \
   --title "<planning title>" \
   --no-attach
-gc session submit <rig>-<plan-slug>-planning "<research and planning brief>"
+gc session submit <rig>-<plan-slug>-planning \
+  "interaction_mode=attachable initialization_only=true. <research and planning brief>. Validate the brief, do not begin research yet, and reply exactly READY_FOR_ATTACH."
 ```
 
-Return the exact attach command immediately:
+Wait for a structured assistant acknowledgement, not a substring in terminal
+output:
+
+```bash
+for PLANNER_WAIT_ATTEMPT in $(seq 1 30); do
+  gc session logs <rig>-<plan-slug>-planning --tail 10 --json 2>/dev/null |
+    jq -e '.entries[] | select(.role == "assistant") | .blocks[]? | select(.type == "text" and .text == "READY_FOR_ATTACH")' >/dev/null &&
+    PLANNER_READY=1 && break
+  sleep 2
+done
+```
+
+Return the exact attach command only when `PLANNER_READY=1`:
 
 ```bash
 gc session attach <rig>-<plan-slug>-planning
 ```
+
+Never expose the attach command while the initialization turn is running.
+Attaching to an active model turn can interrupt it. If readiness is not proven
+within 60 seconds, keep the same session for diagnosis and report the startup
+problem; do not create a duplicate. After attachment, the user's first message
+starts research using the already-loaded brief.
 
 Suspend the session between conversations when capacity matters; suspension
 preserves its conversation. Close it only after the user approves the plan,

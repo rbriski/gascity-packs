@@ -9,7 +9,9 @@
 
 For research or planning requested as a deliverable, the Sol/high Mayor creates
 and seeds a persistent, attachable `gc.research-planner` session on the
-`sol-research` Sol/max provider and returns its exact attach command. That
+`sol-research` Sol/max provider. It returns the attach command only after an
+initialization-only turn emits the exact `READY_FOR_ATTACH` acknowledgement, so
+attachment cannot interrupt a model turn. That
 session owns the discussion and artifacts until
 the plan and linked HTML/CSS report are complete. Raw `gc sling ...
 --no-formula` work is for explicitly background research. City and rig patches
