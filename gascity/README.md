@@ -7,6 +7,11 @@
 > remain explicit tools for genuinely complex work; they are not the default
 > response to “finish this” or “ship it.” Complete Delivery is deprecated.
 
+For research or planning requested as a deliverable, stay in the Mayor session.
+The Sol/high Mayor routes one bounded report bead to the scale-to-zero
+`sol-research` Sol/max target with `mol-polecat-report`, then validates and
+presents the result. No full build graph or separate user session is required.
+
 This is the base pack for running full software-delivery workflows in Gas
 City: gather requirements, write and review a plan, decompose into tasks,
 implement in parallel agent sessions, review the result, and optionally

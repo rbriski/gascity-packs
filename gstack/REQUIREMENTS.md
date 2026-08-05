@@ -3,6 +3,9 @@
 - The pack root exposes skills only: no active `agents/`, `commands/`, or
   `formulas/` directories.
 - `gstack-lite` is the default end-to-end delivery skill.
+- The persistent Mayor remains Sol/high; explicit research and planning
+  deliverables route to a work-item-affine, scale-to-zero Sol/max
+  `sol-research` lane through `mol-polecat-report` without moving the user.
 - One bead has one implementation owner and one immutable source-head lease.
 - Material changes receive one different-family review against an immutable
   candidate head.

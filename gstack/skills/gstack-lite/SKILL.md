@@ -27,6 +27,9 @@ change is correct in production. This is a delivery policy, not a large formula.
 
 Use the configured city aliases:
 
+- `sol-research`: explicit research, findings, comparison, planning,
+  specification, roadmap, or architecture deliverables. Run it at Sol/max as a
+  scale-to-zero, work-item-affine report lane.
 - `sol-fast`: normal features and fixes.
 - `luna-economy`: small, atomic, well-specified or mechanical work.
 - `claude-careful`: context-heavy refactors when a second implementation family
@@ -37,6 +40,20 @@ Use the configured city aliases:
 
 For Claude-built changes, review with Sol/high. Do not start the rescue lane or
 an alternate builder concurrently with two existing writers.
+
+## Route quality-first thinking without moving the user
+
+Keep the persistent Mayor on Sol/high as the responsive conversation owner.
+When research or planning is itself a requested deliverable or approval gate,
+the Mayor creates one bounded bead and routes it to `<scope>/sol-research` with
+`mol-polecat-report`. The user stays in the Mayor session; the Sol/max worker is
+an internal execution detail.
+
+Pass the verbatim request, relevant context, settled constraints, expected
+artifact, and evidence/citation requirements. The Mayor validates and presents
+the result instead of independently recreating the analysis. Incidental planning
+inside an implementation task does not trigger this lane. The lane does not
+implement, review its own work, or become rescue capacity.
 
 ## Deliver in six stages
 

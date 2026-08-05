@@ -24,6 +24,11 @@ VALID_CITY = """\
 [agent_defaults]
 append_fragments = ["gstack-lite-policy"]
 
+[providers.sol-research]
+base = "builtin:codex"
+[providers.sol-research.option_defaults]
+model = "gpt-5.6-sol"
+effort = "max"
 [providers.sol-fast]
 base = "builtin:codex"
 [providers.luna-economy]
@@ -37,6 +42,12 @@ base = "builtin:codex"
 
 [defaults.rig.imports.gc]
 source = "gc"
+
+[[patches.agent]]
+name = "gastown.mayor"
+[patches.agent.option_defaults]
+model = "gpt-5.6-sol"
+effort = "high"
 
 [[patches.agent]]
 dir = "demo"
@@ -92,6 +103,8 @@ class GstackLiteContractTests(unittest.TestCase):
         self.assertIn("launch the deprecated Complete Delivery pack", mayor)
         self.assertIn('{{ define "gstack-lite-policy" -}}', fragment)
         self.assertIn("one independent review", fragment)
+        self.assertIn("sol-research", fragment)
+        self.assertIn("Sol/max", fragment)
 
     def test_complete_delivery_is_historical_only(self) -> None:
         readme = (REPO_ROOT / "complete-delivery/README.md").read_text(encoding="utf-8")
@@ -167,6 +180,18 @@ class GstackLiteContractTests(unittest.TestCase):
                 ),
                 VALID_PACK,
                 "missing provider aliases: sol-fast",
+            ),
+            (
+                "research provider is not max Sol",
+                VALID_CITY.replace('effort = "max"', 'effort = "xhigh"', 1),
+                VALID_PACK,
+                "sol-research must use gpt-5.6-sol at max effort",
+            ),
+            (
+                "persistent Mayor is not high Sol",
+                VALID_CITY.replace('effort = "high"', 'effort = "max"', 1),
+                VALID_PACK,
+                "persistent gastown.mayor must use gpt-5.6-sol at high effort",
             ),
             (
                 "missing policy fragment",
