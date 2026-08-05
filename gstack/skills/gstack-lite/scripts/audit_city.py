@@ -87,7 +87,7 @@ def active_formula_names(city: Path) -> tuple[set[str], str | None]:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         return set(), f"active formula catalog returned invalid JSON: {exc}"
-    formulas = payload.get("formulas", []) if isinstance(payload, dict) else []
+    formulas = (payload.get("formulas") or []) if isinstance(payload, dict) else []
     names = {
         str(item.get("name"))
         for item in formulas
@@ -239,21 +239,23 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
     research_patches = [
         patch
         for patch in agent_patches
-        if isinstance(patch, dict) and patch.get("name") == "sol-research"
+        if isinstance(patch, dict) and patch.get("name") == "gc.research-planner"
     ]
-    research_scopes = {"", *(rig.get("name", "<unnamed>") for rig in rigs)}
+    research_scopes = {rig.get("name", "<unnamed>") for rig in rigs}
     unsafe_research_scopes = []
     for scope in research_scopes:
-        matching = [patch for patch in research_patches if patch.get("dir", "") == scope]
+        matching = [patch for patch in research_patches if patch.get("dir") == scope]
         if (
             len(matching) != 1
+            or matching[0].get("provider") != "sol-research"
             or type(matching[0].get("max_active_sessions")) is not int
             or matching[0]["max_active_sessions"] != 1
         ):
-            unsafe_research_scopes.append(scope or "<city>")
+            unsafe_research_scopes.append(scope)
     if unsafe_research_scopes:
         errors.append(
-            "city and current rigs need exactly one singleton sol-research patch: "
+            "current rigs need exactly one singleton Sol/max "
+            "gc.research-planner patch: "
             + ", ".join(sorted(unsafe_research_scopes))
         )
 
@@ -264,7 +266,7 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
     )
     if unexpected_research_scopes:
         errors.append(
-            "sol-research patches target unknown scopes: "
+            "gc.research-planner patches target unknown scopes: "
             + ", ".join(unexpected_research_scopes)
         )
     reviewer_patches = [

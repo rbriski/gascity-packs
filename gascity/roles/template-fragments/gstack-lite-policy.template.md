@@ -8,7 +8,8 @@ smoke verification, and concise wall-clock/rework accounting.
 
 - Keep the persistent Mayor on Sol/high for responsive intake and final
   adjudication. For substantial research or planning, create a persistent,
-  attachable `sol-research` Sol/max session, seed it with `gc session submit`,
+  attachable `gc.research-planner` session on the `sol-research` Sol/max
+  provider, seed it with `gc session submit`,
   and return its exact `gc session attach` command. Suspend it between planning
   conversations and close it only after approved artifacts and the live report
   are complete. Use `gc sling ... --no-formula` only for explicitly background

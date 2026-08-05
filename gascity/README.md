@@ -8,8 +8,9 @@
 > response to “finish this” or “ship it.”
 
 For research or planning requested as a deliverable, the Sol/high Mayor creates
-and seeds a persistent, attachable `sol-research` Sol/max session and returns
-its exact attach command. That session owns the discussion and artifacts until
+and seeds a persistent, attachable `gc.research-planner` session on the
+`sol-research` Sol/max provider and returns its exact attach command. That
+session owns the discussion and artifacts until
 the plan and linked HTML/CSS report are complete. Raw `gc sling ...
 --no-formula` work is for explicitly background research. City and rig patches
 cap this lane at one active session; the audit fails when a newly added rig

@@ -4,10 +4,11 @@
   `formulas/` directories.
 - `gstack-lite` is the default end-to-end delivery skill.
 - The persistent Mayor remains Sol/high; explicit research and planning
-  deliverables route to a persistent, attachable Sol/max `sol-research`
-  conversation by default; raw `--no-formula` beads are background-only.
-- The `sol-research` lane is a singleton in the city and every current rig; the
-  audit rejects a new rig until it receives the same cap.
+  deliverables route to a persistent, attachable `gc.research-planner`
+  conversation on the Sol/max `sol-research` provider by default; raw
+  `--no-formula` beads are background-only.
+- The research-planner role is a singleton in every current rig; the audit
+  rejects a new rig until it receives the same provider binding and cap.
 - Every user-facing research engagement publishes an HTML/CSS bundle under the
   rig's reports namespace, registers an active library card, and verifies its
   live tailnet URL before completion.
