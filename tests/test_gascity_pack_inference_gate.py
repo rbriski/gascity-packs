@@ -272,8 +272,6 @@ def test_supported_pack_nightly_workflow_uses_tier_c_ollama_shape_and_pack_matri
         ("superpowers", "build", "100m"),
         ("compound-engineering", "review", "45m"),
         ("compound-engineering", "build", "100m"),
-        ("gstack", "review", "60m"),
-        ("gstack", "build", "130m"),
         ("bmad", "review", "45m"),
         ("bmad", "build", "100m"),
         ("gastown", "gastown-orchestration", "110m"),
@@ -879,22 +877,6 @@ def test_validate_methodology_flow_contract_rejects_missing_specialist_review_la
     )
 
     with pytest.raises(gascity_pack_inference_gate.GateError, match="superpowers.code-quality-reviewer"):
-        gascity_pack_inference_gate.validate_methodology_flow_contract(
-            replace(spec, source=pack_source)
-        )
-
-
-def test_validate_methodology_flow_contract_rejects_missing_gstack_release_readiness(tmp_path) -> None:
-    spec = gascity_pack_inference_gate.PACK_SPECS["gstack"]
-    pack_source = tmp_path / "gstack"
-    shutil.copytree(spec.source / "formulas", pack_source / "formulas")
-    build_formula = pack_source / "formulas" / "gstack-build.formula.toml"
-    build_formula.write_text(
-        build_formula.read_text(encoding="utf-8").replace('id = "release-readiness"', 'id = "release-check"'),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(gascity_pack_inference_gate.GateError, match="release-readiness"):
         gascity_pack_inference_gate.validate_methodology_flow_contract(
             replace(spec, source=pack_source)
         )

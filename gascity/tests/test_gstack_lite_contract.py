@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -93,14 +94,14 @@ class GstackLiteContractTests(unittest.TestCase):
         self.assertIn("one independent review", fragment)
 
     def test_complete_delivery_is_historical_only(self) -> None:
-        skill = (
-            REPO_ROOT / "complete-delivery/skills/complete-delivery/SKILL.md"
-        ).read_text(encoding="utf-8")
         readme = (REPO_ROOT / "complete-delivery/README.md").read_text(encoding="utf-8")
+        archived_readme = (
+            REPO_ROOT / "deprecated/complete-delivery/README.md"
+        ).read_text(encoding="utf-8")
         registry = (REPO_ROOT / "registry.toml").read_text(encoding="utf-8")
-        self.assertIn("Historical guidance for the deprecated Complete Delivery pack", skill)
-        self.assertIn("never use for ordinary build", skill)
-        self.assertIn("ARCHIVED / DEPRECATED", readme)
+        self.assertFalse((REPO_ROOT / "complete-delivery/skills").exists())
+        self.assertIn("registry-compatible tombstone", readme)
+        self.assertIn("ARCHIVED / DEPRECATED", archived_readme)
         self.assertIn("DEPRECATED historical pack", registry)
 
     def test_audit_removes_only_exact_stale_skill_symlinks(self) -> None:
@@ -124,10 +125,12 @@ class GstackLiteContractTests(unittest.TestCase):
             regular_same_name.parent.mkdir(parents=True)
             regular_same_name.write_text("preserve me", encoding="utf-8")
 
-            errors, _ = audit_module.audit(city, fix_stale_skills=False)
-            self.assertIn("1 stale Complete Delivery skill symlink(s) remain", errors)
-
-            errors, notes = audit_module.audit(city, fix_stale_skills=True)
+            with mock.patch.object(
+                audit_module, "active_formula_names", return_value=(set(), None)
+            ):
+                errors, _ = audit_module.audit(city, fix_stale_skills=False)
+                self.assertIn("1 stale Complete Delivery skill symlink(s) remain", errors)
+                errors, notes = audit_module.audit(city, fix_stale_skills=True)
             self.assertEqual(errors, [])
             self.assertTrue(any("removed stale skill symlink" in note for note in notes))
             self.assertFalse(stale.exists())
@@ -280,11 +283,21 @@ class GstackLiteContractTests(unittest.TestCase):
     def test_cli_exit_codes_and_fail_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             city = write_city(Path(tmp))
+            fake_bin = Path(tmp) / "bin"
+            fake_bin.mkdir()
+            fake_gc = fake_bin / "gc"
+            fake_gc.write_text(
+                "#!/bin/sh\nprintf '%s\\n' '{\"formulas\":[]}'\n",
+                encoding="utf-8",
+            )
+            fake_gc.chmod(0o755)
+            env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
             passed = subprocess.run(
                 [sys.executable, str(AUDIT_PATH), "--city", str(city)],
                 check=False,
                 capture_output=True,
                 text=True,
+                env=env,
             )
             self.assertEqual(passed.returncode, 0, passed.stderr)
             self.assertIn("PASS Gstack Lite city contract", passed.stdout)
@@ -295,6 +308,7 @@ class GstackLiteContractTests(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
+                env=env,
             )
             self.assertEqual(failed.returncode, 1)
             self.assertIn("FAIL cannot read", failed.stderr)

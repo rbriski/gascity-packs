@@ -162,7 +162,6 @@ def test_city_scoped_gascity_registers_claim_command_from_rig(
             "superpowers.implementer",
             "# Superpowers Implementer",
         ),
-        ("gstack", "gstack", "gstack.implementer", "# gstack Implementer"),
         (
             "compound-engineering",
             "compound-engineering",

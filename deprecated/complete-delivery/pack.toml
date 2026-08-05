@@ -1,0 +1,7 @@
+[pack]
+name = "complete-delivery"
+version = "0.1.4"
+schema = 2
+
+[imports.gstack]
+source = "../gstack"

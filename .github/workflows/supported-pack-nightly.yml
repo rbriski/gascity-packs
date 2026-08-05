@@ -42,7 +42,6 @@ on:
           - gascity
           - superpowers
           - compound-engineering
-          - gstack
           - bmad
           - gastown
         default: all-supported
@@ -112,14 +111,6 @@ jobs:
             gate: build
             timeout_minutes: 120
             gate_timeout: 100m
-          - pack: gstack
-            gate: review
-            timeout_minutes: 75
-            gate_timeout: 60m
-          - pack: gstack
-            gate: build
-            timeout_minutes: 150
-            gate_timeout: 130m
           - pack: bmad
             gate: review
             timeout_minutes: 60

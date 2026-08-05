@@ -19,7 +19,7 @@ For the full model (cities, rigs, formulas, beads, runtime providers) see the
   </a>
 </p>
 
-## Start here: first build in about ten minutes
+## Start here: pragmatic delivery
 
 If you just installed Gas City and want a working multi-agent build factory,
 this is the shortest path. Each step is copy-pasteable; swap names to taste.
@@ -41,10 +41,10 @@ this is the shortest path. Each step is copy-pasteable; swap names to taste.
    gc rig add .
    ```
 
-3. **Import the base pack.** From the city directory:
+3. **Import Gstack Lite at city scope.** From the city directory:
 
    ```sh
-   gc import add --name gc https://github.com/gastownhall/gascity-packs.git//gascity
+   gc import add --name gstack https://github.com/gastownhall/gascity-packs.git//gstack
    ```
 
    This writes the import, fetches the latest release, and pins it in
@@ -63,27 +63,24 @@ this is the shortest path. Each step is copy-pasteable; swap names to taste.
    source = "https://github.com/gastownhall/gascity-packs.git//gascity/roles"
    ```
 
-   The city-level import provides the workflow formulas and the `gc.mayor`
-   coordinator skill; the rig-level `roles` import provides the worker agents
-   (`gc.implementation-worker`, `gc.requirements-planner`, and friends) that
-   the formulas route work to. Run `gc import install` after editing to
-   fetch anything newly referenced.
+   The city-level import provides focused gstack skills. The standalone
+   rig-level roles import provides the small `gc.*` worker surface without
+   importing the retired build formula fleet. Run `gc import install` after
+   editing to fetch anything newly referenced.
 
-5. **Run your first build.** Create a bead describing the goal, then launch
-   the starter factory against it:
+5. **Deliver directly.** Create one durable bead, assign one implementation
+   owner, run repository-native checks, one independent review for material
+   changes, protected publication, deployment, and a behavior canary:
 
    ```sh
    gc bd create "Add a --json flag to the export command"
-   gc sling gc.run-operator <bead-id> --on build-basic \
-     --var artifact_root=plans/json-flag/build
+   # Use the gstack-lite skill; do not launch a delivery formula graph.
    ```
 
-   `build-basic` walks requirements → plan → plan review → decomposition →
-   parallel implementation → a three-lane review fanout → finalize. Artifacts
-   (requirements, plan, review reports, and a `factory-run.md` summary) land
-   under `artifact_root` in your rig.
+   Use planning, QA, security, migration, or release skills only when the
+   changed surface warrants them.
 
-6. **Pick a methodology when you want more opinion.** The four methodology
+6. **Pick a legacy methodology only when explicitly required.** The remaining
    packs below replace `build-basic`'s stages with vendored, battle-tested
    processes while keeping the same launch shape — import one at city scope
    and sling its build formula instead (for example `--on bmad-build`):
@@ -98,15 +95,14 @@ this is the shortest path. Each step is copy-pasteable; swap names to taste.
 
 | Pack | Process it runs | Reach for it when |
 | ---- | --------------- | ----------------- |
-| [gascity](./gascity) (`build-basic`) | Requirements → plan → review → decompose → implement → three-lane review | You want the default starter factory with the fewest moving parts. |
+| [gascity](./gascity) (`build-basic`) | Requirements → plan → review → decompose → implement → three-lane review | You explicitly want the legacy full GraphV2 starter factory. |
 | [bmad](./bmad) (`bmad-build`) | PRD → architecture → epics/stories → readiness gate → story-by-story implementation with self-check and acceptance audit → adversarial review | You want disciplined document-first delivery with explicit story decomposition and readiness checks. |
 | [compound-engineering](./compound-engineering) (`compound-build`) | Brainstorm/plan → plan review → implement → the widest reviewer-persona fanout → resolution | Review depth matters most: correctness, security, performance, migrations, and API contracts each get their own reviewer lane. |
 | [superpowers](./superpowers) (`superpowers-build`) | Brainstorm → written spec approval → per-task test-driven development → spec-compliance then code-quality review | You want hard approval gates before code and strict TDD per task. |
-| [gstack](./gstack) (`gstack-build`) | Office-hours intake → multi-perspective plan review → build → staff review → QA → security → release readiness | You want founder/PM-flavored gates and explicit QA + release-readiness stages before shipping. |
+| [gstack](./gstack) (skills only) | One owner → native checks → one review → protected publish/deploy/canary | The default pragmatic delivery path. |
 
-All five expose the same launch variables (`interaction_mode`, `review_mode`,
-`drain_policy`, `push`, `open_pr`, …), so switching methodology is a one-word
-change to the formula name.
+Gstack Lite does not expose or require those formula launch variables. The
+other methodology packs remain explicit opt-ins, not ordinary defaults.
 
 ## Using a pack
 
@@ -176,9 +172,9 @@ Use two mode concepts when comparing methodology packs:
   development/review expansions.
 - [bmad](./bmad) imports `gascity` as `gc` and implements `build-base` with
   vendored BMAD Method skills and Gas City-native story/review expansions.
-- [gstack](./gstack) imports `gascity` as `gc` and implements `build-base`
-  with vendored garrytan/gstack office-hours, autoplan, review, QA, security,
-  documentation, and release-readiness skills mapped to Gas City fanouts.
+- [gstack](./gstack) publishes the focused garrytan/gstack skills and the
+  Gstack Lite policy. Its former full GraphV2 agents and formulas are archived
+  outside Pack V2 discovery.
 
 See the [build methodology framework audit](./docs/design/build-methodology-framework-audit.md)
 for the current parity assessment and proposed beginner-friendly updates.
@@ -204,9 +200,9 @@ rationale.
   owner, deterministic checks, one independent review, bounded repair, and the
   repository's normal protected publish/deploy/smoke path. It is a policy and
   skill, not another mandatory graph.
-- **Archived — [complete-delivery](./complete-delivery):** retained for audit
-  and regression evidence only after its production-shaped control-plane
-  canary failed. Do not install or route ordinary work through it.
+- **Archived — [complete-delivery](./deprecated/complete-delivery):** retained
+  under `deprecated/` for audit evidence only. The top-level path is a
+  non-runnable registry tombstone and every published release is withdrawn.
 
 ### Contributor workflow packs
 

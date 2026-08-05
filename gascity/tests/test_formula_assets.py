@@ -202,7 +202,6 @@ TOP_LEVEL_BUILD_FORMULA_PACKS = {
     "compound-build": "compound-engineering",
     "superpowers-build": "superpowers",
     "bmad-build": "bmad",
-    "gstack-build": "gstack",
 }
 
 # Mode selector vars and their pinned defaults per formula
@@ -417,53 +416,6 @@ THIRD_PARTY_BUILD_PACKS = {
         "review_expansion": "bmad-code-review-flow",
         "gap_analysis_target": "bmad.story-self-checker",
         "review_fix_asset": "assets/workflows/bmad-code-review-flow/{target}.apply-bmad-review-findings.md",
-    },
-    "gstack": {
-        "formula": "gstack-build",
-        "base_import_binding": "gc",
-        "base_import_source": "../gascity",
-        "vendor": "gstack",
-        "upstream": "https://github.com/garrytan/gstack",
-        "commit": "1626d4857bfe30da2690dd6a3217961934aa3192",
-        "implementation_target": "gstack.implementer",
-        "planning_formula": "gstack-planning",
-        "decomposition_formula": "gstack-decomposition",
-        "implementation_entry_formula": "gstack-implementation",
-        "implementation_formula": "gstack-work",
-        "implementation_item_formula": "gstack-work-item",
-        "code_review_entry_formula": "gstack-review",
-        "review_fix_formula": "gstack-fix-loop",
-        "skills": {
-            "requirements": "office-hours",
-            "plan": "autoplan",
-            "plan-review": "plan-eng-review",
-            "implement": "ship",
-            "review": "review",
-            "finalize": "land-and-deploy",
-        },
-        "extra_steps": ["qa", "release-readiness"],
-        "expansions": {
-            "plan-review": "gstack-plan-review",
-            "review": "gstack-code-review",
-            "qa": "gstack-qa-review",
-            "release-readiness": "gstack-release-readiness",
-        },
-        "review_expansion": "gstack-code-review",
-        "review_expand_vars": {
-            "review_mode": "{{review_mode}}",
-        },
-        "gap_analysis_target": "gstack.staff-reviewer",
-        "review_fix_asset": "assets/workflows/gstack-code-review/{target}.apply-review-findings.md",
-        "prompt_assets": {
-            "skills/plan-ceo-review/SKILL.md",
-            "skills/plan-design-review/SKILL.md",
-            "skills/plan-devex-review/SKILL.md",
-            "skills/qa/SKILL.md",
-            "skills/cso/SKILL.md",
-            "skills/document-release/SKILL.md",
-            "skills/investigate/SKILL.md",
-            "skills/spec/SKILL.md",
-        },
     },
 }
 
@@ -2540,7 +2492,8 @@ class FormulaAssetTests(unittest.TestCase):
                     expected["implementation_target"],
                 )
 
-    def test_gstack_build_pack_models_garrytan_sprint_with_gascity_fanouts(self) -> None:
+    @unittest.skip("the former gstack GraphV2 pack is archived and intentionally inactive")
+    def test_deprecated_gstack_build_pack_models_garrytan_sprint_with_gascity_fanouts(self) -> None:
         gascity_root = pathlib.Path(__file__).resolve().parents[1]
         packs_root = gascity_root.parent
         pack_root = packs_root / "gstack"
@@ -3252,11 +3205,6 @@ class FormulaAssetTests(unittest.TestCase):
                 "BMAD structured steps",
                 "step-file discipline",
                 "fanout lanes",
-            ),
-            "gstack": (
-                "garrytan/gstack sprint",
-                "`gstack-build`",
-                "Gas City fanouts",
             ),
         }
         for pack_name, fragments in pack_expectations.items():
@@ -4313,15 +4261,6 @@ description = "Override sink that writes the base triage report contract."
                 "fix_child": "{target}.apply-review-findings",
                 "synthesis": "compound-code-review/{target}.synthesize-code-review.md",
                 "finalize": "compound-code-review/{target}.md",
-            },
-            "gstack": {
-                "pack_dir": repo / "gstack",
-                "review_formula": "gstack-review",
-                "build_formula": "gstack-build",
-                "expansion": "gstack-code-review",
-                "fix_child": "{target}.apply-review-findings",
-                "synthesis": "gstack-code-review/{target}.synthesize-code-review.md",
-                "finalize": "gstack-code-review/{target}.md",
             },
             "superpowers": {
                 "pack_dir": repo / "superpowers",

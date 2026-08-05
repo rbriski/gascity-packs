@@ -1,6 +1,6 @@
 ---
 name: review
-description: Review a code change before landing, with concrete evidence, severity, and a clear approve-or-iterate verdict. Use for pull requests, exact diffs, self-review, pre-landing review, and the Formula staff-review lane.
+description: Review a code change before landing, with concrete evidence, severity, and a clear approve-or-iterate verdict. Use for pull requests, exact diffs, self-review, pre-landing review, and the one independent Gstack Lite review pass.
 ---
 
 # Review
@@ -10,22 +10,9 @@ would matter after landing, verify each finding against the code, and finish
 with an unambiguous verdict. The skill is self-contained: it requires no
 provider-specific runtime, external review bot, helper binary, or agent fanout.
 
-## Choose the execution context
+## Review boundary
 
-### Gas City Formula staff lane
-
-When the assigned workflow is the `gstack.staff-reviewer` lane:
-
-1. Treat the Formula prompt, prepared context, artifact root, and required
-   metadata as authoritative.
-2. Perform one bounded staff review pass. Do not launch another review
-   workflow, provider-native subagent, slash command, or external reviewer.
-3. Write only the assigned review artifact and the requested completion
-   metadata. The Formula graph owns synthesis, repair, and any later pass.
-
-### Standalone review
-
-For any other invocation, review the working tree, branch, commit range, or PR
+Review the working tree, branch, commit range, or PR
 the user named. Review is read-only by default. Do not edit code, commit, push,
 post replies, resolve threads, or change PR state unless the user explicitly
 requests those actions.
@@ -144,5 +131,4 @@ confidence, location, evidence, impact, and smallest fix. Then include:
      verdict.
 
 An approval must say why the inspected change is safe enough to land; “looks
-good” is not evidence. In a Formula lane, also emit the exact artifact path and
-metadata keys required by the assigned workflow prompt.
+good” is not evidence. Bind the verdict to the exact immutable candidate head.
