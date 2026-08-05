@@ -42,6 +42,7 @@ class GitHubIntakeServiceTests(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self._old_environ = os.environ.copy()
         os.environ["GC_CITY_ROOT"] = self.tempdir.name
+        os.environ["GC_BIN"] = "gc"
 
     def tearDown(self) -> None:
         os.environ.clear()

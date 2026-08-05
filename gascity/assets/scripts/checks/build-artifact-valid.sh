@@ -61,12 +61,22 @@ show_bead_json() {
   local bead_id="$1"
   local attempt=1
   local output=""
+  local error_output=""
+  local error_file=""
+
+  error_file="$(mktemp)"
 
   while [ "$attempt" -le "$SHOW_MAX_ATTEMPTS" ]; do
-    if output="$(gc bd show "$bead_id" --json 2>&1)"; then
+    if output="$(gc bd show "$bead_id" --json 2>"$error_file")"; then
+      if [ -s "$error_file" ]; then
+        cat "$error_file" >&2
+      fi
+      rm -f "$error_file"
       printf '%s' "$output"
       return 0
     fi
+
+    error_output="$(cat "$error_file")"
 
     if [ "$attempt" -lt "$SHOW_MAX_ATTEMPTS" ]; then
       sleep "$SHOW_RETRY_DELAY_SECONDS"
@@ -75,7 +85,8 @@ show_bead_json() {
   done
 
   printf 'gc bd show %s failed after %s attempts: %s\n' \
-    "$bead_id" "$SHOW_MAX_ATTEMPTS" "$output" >&2
+    "$bead_id" "$SHOW_MAX_ATTEMPTS" "$error_output" >&2
+  rm -f "$error_file"
   return 1
 }
 
