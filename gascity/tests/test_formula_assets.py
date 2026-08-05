@@ -62,6 +62,9 @@ ROLE_AGENTS = {
     "task-decomposer",
 }
 
+PERSISTENT_ROLE_AGENTS = {"research-planner"}
+ALL_ROLE_AGENTS = ROLE_AGENTS | PERSISTENT_ROLE_AGENTS
+
 CATALOG_FORMULAS = {
     "build-basic",
     "build-from-convoy",
@@ -643,11 +646,14 @@ class FormulaAssetTests(unittest.TestCase):
         paths = sorted((root / "roles" / "agents").glob("*/agent.toml"))
 
         self.assertEqual(roles_pack["pack"]["name"], "gc-roles")
-        self.assertEqual({path.parent.name for path in paths}, ROLE_AGENTS)
+        self.assertEqual({path.parent.name for path in paths}, ALL_ROLE_AGENTS)
         for path in paths:
             data = tomllib.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(data["scope"], "rig")
-            self.assertTrue(data["fallback"])
+            if path.parent.name in PERSISTENT_ROLE_AGENTS:
+                self.assertFalse(data["fallback"])
+            else:
+                self.assertTrue(data["fallback"])
             self.assertNotIn("provider", data, f"{path} must inherit the city/workspace provider by default")
             self.assertTrue((path.parent / "prompt.template.md").is_file())
         self.assertIn(root / "roles" / "agents" / "run-operator" / "agent.toml", paths)

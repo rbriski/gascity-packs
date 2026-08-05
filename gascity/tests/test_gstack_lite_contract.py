@@ -50,13 +50,9 @@ model = "gpt-5.6-sol"
 effort = "high"
 
 [[patches.agent]]
-dir = ""
-name = "sol-research"
-max_active_sessions = 1
-
-[[patches.agent]]
 dir = "demo"
-name = "sol-research"
+name = "gc.research-planner"
+provider = "sol-research"
 max_active_sessions = 1
 
 [[patches.agent]]
@@ -96,6 +92,19 @@ def write_city(root: Path, city_toml: str = VALID_CITY, pack_toml: str = VALID_P
 
 
 class GstackLiteContractTests(unittest.TestCase):
+    def test_formula_catalog_accepts_null_for_an_empty_catalog(self) -> None:
+        audit_module = load_audit_module()
+        completed = subprocess.CompletedProcess(
+            args=["gc", "formula", "list", "--json"],
+            returncode=0,
+            stdout='{"ok":true,"formulas":null}',
+            stderr="",
+        )
+        with mock.patch.object(audit_module.subprocess, "run", return_value=completed):
+            names, error = audit_module.active_formula_names(Path("/tmp"))
+        self.assertEqual(names, set())
+        self.assertIsNone(error)
+
     def test_skill_is_concise_and_owns_generic_delivery_triggers(self) -> None:
         skill = (REPO_ROOT / "gstack/skills/gstack-lite/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("name: gstack-lite", skill)
@@ -121,6 +130,17 @@ class GstackLiteContractTests(unittest.TestCase):
             self.assertIn("gc session attach", content)
             self.assertIn("/home/nvidia/gascity/reports", content)
             self.assertIn("HTML/CSS", content)
+
+    def test_research_planner_is_persistent_attachable_and_publishes(self) -> None:
+        role_root = REPO_ROOT / "gascity/roles/agents/research-planner"
+        agent = (role_root / "agent.toml").read_text(encoding="utf-8")
+        prompt = (role_root / "prompt.template.md").read_text(encoding="utf-8")
+        self.assertIn('scope = "rig"', agent)
+        self.assertIn("persistent, attachable", prompt)
+        self.assertIn("Do not call `gc runtime drain-ack`", prompt)
+        self.assertIn("do not run `gc hook --claim`", prompt)
+        self.assertIn("/home/nvidia/gascity/reports", prompt)
+        self.assertIn("gascity.tail96374b.ts.net/reports", prompt)
 
     def test_complete_delivery_is_historical_only(self) -> None:
         readme = (REPO_ROOT / "complete-delivery/README.md").read_text(encoding="utf-8")
@@ -243,20 +263,30 @@ class GstackLiteContractTests(unittest.TestCase):
             (
                 "missing research singleton",
                 VALID_CITY.replace(
-                    'dir = "demo"\nname = "sol-research"',
+                    'dir = "demo"\nname = "gc.research-planner"',
                     'dir = "demo"\nname = "other-research"',
                 ),
                 VALID_PACK,
-                "city and current rigs need exactly one singleton sol-research patch: demo",
+                "current rigs need exactly one singleton Sol/max gc.research-planner patch: demo",
             ),
             (
                 "unsafe research concurrency",
                 VALID_CITY.replace(
-                    'dir = "demo"\nname = "sol-research"\nmax_active_sessions = 1',
-                    'dir = "demo"\nname = "sol-research"\nmax_active_sessions = 2',
+                    'name = "gc.research-planner"\nprovider = "sol-research"\nmax_active_sessions = 1',
+                    'name = "gc.research-planner"\nprovider = "sol-research"\nmax_active_sessions = 2',
                 ),
                 VALID_PACK,
-                "city and current rigs need exactly one singleton sol-research patch: demo",
+                "current rigs need exactly one singleton Sol/max gc.research-planner patch: demo",
+            ),
+            (
+                "missing research provider binding",
+                VALID_CITY.replace(
+                    'provider = "sol-research"\nmax_active_sessions = 1',
+                    'provider = "sol-fast"\nmax_active_sessions = 1',
+                    1,
+                ),
+                VALID_PACK,
+                "current rigs need exactly one singleton Sol/max gc.research-planner patch: demo",
             ),
             (
                 "nonexistent global reviewer scope",

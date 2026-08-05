@@ -29,9 +29,9 @@ change is correct in production. This is a delivery policy, not a large formula.
 
 Use the configured city aliases:
 
-- `sol-research`: explicit research, findings, comparison, planning,
-  specification, roadmap, or architecture deliverables. Run it at Sol/max as a
-  scale-to-zero, work-item-affine report lane.
+- `gc.research-planner` with provider `sol-research`: explicit research,
+  findings, comparison, planning, specification, roadmap, or architecture
+  deliverables. Run it at Sol/max as a persistent, attachable planning room.
 - `sol-fast`: normal features and fixes.
 - `luna-economy`: small, atomic, well-specified or mechanical work.
 - `claude-careful`: context-heavy refactors when a second implementation family
@@ -50,7 +50,7 @@ When research or planning is itself a requested deliverable or approval gate,
 prefer a persistent, attachable Sol/max conversation:
 
 ```bash
-gc session new <scope>/sol-research --alias <scope>-<slug>-planning \
+gc session new <scope>/gc.research-planner --alias <scope>-<slug>-planning \
   --title "<planning title>" --no-attach
 gc session submit <scope>-<slug>-planning "<research and planning brief>"
 gc session attach <scope>-<slug>-planning
@@ -59,11 +59,12 @@ gc session attach <scope>-<slug>-planning
 The Mayor creates and seeds it, then gives the user the exact attach command.
 Suspend rather than close it between planning conversations. Close it only
 after approved artifacts and the live report are complete. Use
-`gc sling <scope>/sol-research <bead-id> --no-formula` only for explicitly
+`gc sling <scope>/gc.research-planner <bead-id> --no-formula` only for explicitly
 background or report-only work.
 
-Keep `sol-research` at `max_active_sessions = 1` in the city scope and every
-current rig. `audit_city.py` must fail when a new rig lacks the singleton patch.
+Keep `gc.research-planner` bound to provider `sol-research` with
+`max_active_sessions = 1` in every current rig. `audit_city.py` must fail when
+a new rig lacks the singleton patch.
 
 Pass the verbatim request, relevant context, settled constraints, expected
 artifact, and evidence/citation requirements. The Mayor validates and presents

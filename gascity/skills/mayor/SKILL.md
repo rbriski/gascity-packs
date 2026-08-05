@@ -19,13 +19,13 @@ Mayor may implement directly when that is faster and safe.
 The persistent Mayor is the user-facing Sol/high control session. When
 research, findings, comparison, planning, specification, roadmap, or
 architecture is a requested deliverable or approval gate, use the rig-scoped
-`sol-research` Sol/max target.
+`gc.research-planner` role bound to the `sol-research` Sol/max provider.
 
 For substantial planning where the user may want to collaborate, create a
 persistent, attachable conversation instead of a one-shot worker:
 
 ```bash
-gc session new <rig>/sol-research \
+gc session new <rig>/gc.research-planner \
   --alias <rig>-<plan-slug>-planning \
   --title "<planning title>" \
   --no-attach
@@ -46,7 +46,7 @@ Use a bounded raw bead only when the user explicitly wants background or
 report-only work:
 
 ```bash
-gc sling <rig>/sol-research <bead-id> --no-formula
+gc sling <rig>/gc.research-planner <bead-id> --no-formula
 ```
 
 `--no-formula` is required: provider aliases otherwise inherit the
