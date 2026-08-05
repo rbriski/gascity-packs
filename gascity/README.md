@@ -18,9 +18,10 @@ publish. It ships three things:
 - **The `gc.mayor` coordinator skill** — a user-facing planner that gathers
   requirements, writes plans, creates approved beads/convoys, and launches
   the right formula for you.
-- **The `build-base` contract** — the virtual stage sequence that the
-  methodology packs in this repository (bmad, compound-engineering,
-  superpowers, gstack) extend and override.
+- **The `build-base` contract** — the virtual stage sequence that the explicit
+  methodology packs in this repository (bmad, compound-engineering, and
+  superpowers) extend and override. Gstack is now the skills-only lightweight
+  default and does not extend this graph.
 
 ## Quick Start: an explicit full build graph
 
@@ -44,10 +45,9 @@ and your project added as a rig (`gc rig add .` inside the repo). See the
    source = "https://github.com/gastownhall/gascity-packs.git//gascity/roles"
    ```
 
-   Both imports are required. The rig-scoped roles pack supplies agents but,
-   by design, rig imports do not register city commands; importing roles alone
-   renders prompts that reference `gc gc claim` without installing that
-   command. Keep the top-level Gas City pack imported at city scope.
+   Both imports are required only for this explicit full-graph mode. The
+   normal Gstack Lite city imports `gstack` at city scope and the standalone
+   roles pack per rig; it intentionally does not import this formula pack.
 
    (Contributors hacking on packs can point this source at a local clone.)
 

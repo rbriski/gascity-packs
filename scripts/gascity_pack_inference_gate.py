@@ -590,33 +590,6 @@ def make_pack_specs() -> dict[str, PackSpec]:
                 "compound-engineering.ce-compound",
             ),
         ),
-        "gstack": PackSpec(
-            name="gstack",
-            binding="gstack",
-            source=REPO_ROOT / "gstack",
-            roles_source=roles_source,
-            validator_source=validator_source,
-            review_formula="gstack-review",
-            build_formula="gstack-build",
-            default_gates=(REVIEW_GATE, BUILD_GATE),
-            setup_formulas=("gstack-review", "gstack-build"),
-            required_review_routes=(
-                "gstack.staff-reviewer",
-                "gstack.qa-lead",
-                "gstack.security-officer",
-                "gstack.review-synthesizer",
-            ),
-            required_build_routes=(
-                "gstack.office-hours",
-                "gstack.founder-reviewer",
-                "gstack.decomposer",
-                "gstack.implementer",
-                "gstack.review-synthesizer",
-                "gstack.qa-lead",
-                "gstack.security-officer",
-                "gstack.release-engineer",
-            ),
-        ),
         "bmad": PackSpec(
             name="bmad",
             binding="bmad",
@@ -667,7 +640,7 @@ def make_pack_specs() -> dict[str, PackSpec]:
 
 
 PACK_SPECS = make_pack_specs()
-METHODOLOGY_PACKS = ("superpowers", "compound-engineering", "gstack", "bmad")
+METHODOLOGY_PACKS = ("superpowers", "compound-engineering", "bmad")
 SUPPORTED_PACK_CHOICES = (*PACK_SPECS.keys(), "methodology", "all-supported")
 
 

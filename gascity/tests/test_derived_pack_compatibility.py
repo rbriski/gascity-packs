@@ -1,7 +1,7 @@
 """Derived-pack compatibility evidence for GC-METH-012.
 
-Each test inspects all four concrete derived packs (compound-engineering,
-superpowers, bmad, gstack) and asserts one face of the external implementation
+Each test inspects the three active concrete derived packs (compound-engineering,
+superpowers, bmad) and asserts one face of the external implementation
 compatibility contract: import-as-`gc`, anchored `build-base` extension,
 methodology metadata vocabulary, selector defaults, drain or convoy-step
 strategy, providerless route targets, the shared claim protocol, the absence
@@ -333,7 +333,10 @@ class DerivedPackCompatibilityTests(unittest.TestCase):
             (GASCITY_ROOT / "roles" / "pack.toml").read_text(encoding="utf-8")
         )
         self.assertTrue(PUBLIC_CLAIM_FRAGMENT.is_file())
-        self.assertEqual(roles_pack["imports"]["gc"]["source"], "..")
+        self.assertNotIn("imports", roles_pack)
+        self.assertTrue(
+            (GASCITY_ROOT / "roles" / "template-fragments" / "gc-role-worker.template.md").is_file()
+        )
 
         for pack_name in DERIVED_PACKS:
             pack_root = PACKS_ROOT / pack_name
@@ -432,7 +435,7 @@ class DerivedPackCompatibilityTests(unittest.TestCase):
         }
         for pack_name, expected in DERIVED_PACKS.items():
             review_report_gate = base_contract.REVIEW_REPORT_GATE
-            if pack_name in {"superpowers", "compound-engineering", "gstack", "bmad"}:
+            if pack_name in {"superpowers", "compound-engineering", "bmad"}:
                 review_report_gate = (
                     base_contract.REVIEW_REPORT_GATE[0],
                     "gc.build.code_review_report_path,"

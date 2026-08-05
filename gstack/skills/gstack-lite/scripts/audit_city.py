@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tomllib
 
@@ -18,6 +20,14 @@ REQUIRED_PROVIDERS = {
     "claude-review",
     "sol-rescue",
 }
+RETIRED_FORMULAS = {
+    "build-base",
+    "build-basic",
+    "build-basic-review",
+    "complete-delivery",
+    "complete-delivery-pr-gate",
+}
+RETIRED_PREFIXES = ("gstack-",)
 
 
 def load_toml(path: Path) -> dict:
@@ -57,6 +67,34 @@ def stale_skill_links(city: Path) -> list[Path]:
     return sorted(set(found))
 
 
+def active_formula_names(city: Path) -> tuple[set[str], str | None]:
+    try:
+        result = subprocess.run(
+            ["gc", "formula", "list", "--json"],
+            cwd=city,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return set(), f"cannot inspect active formula catalog: {exc}"
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown failure"
+        return set(), f"cannot inspect active formula catalog: {detail}"
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return set(), f"active formula catalog returned invalid JSON: {exc}"
+    formulas = payload.get("formulas", []) if isinstance(payload, dict) else []
+    names = {
+        str(item.get("name"))
+        for item in formulas
+        if isinstance(item, dict) and item.get("name")
+    }
+    return names, None
+
+
 def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     notes: list[str] = []
@@ -82,6 +120,21 @@ def audit(city: Path, fix_stale_skills: bool) -> tuple[list[str], list[str]]:
 
     if contains_complete_delivery(city_toml):
         errors.append("city.toml still contains active Complete Delivery configuration")
+
+    formula_names, formula_error = active_formula_names(city)
+    if formula_error:
+        errors.append(formula_error)
+    else:
+        retired = sorted(
+            name
+            for name in formula_names
+            if name in RETIRED_FORMULAS
+            or any(name.startswith(prefix) for prefix in RETIRED_PREFIXES)
+        )
+        if retired:
+            errors.append(
+                "retired ordinary formulas remain active: " + ", ".join(retired)
+            )
 
     providers = city_toml.get("providers", {})
     missing_providers = sorted(REQUIRED_PROVIDERS - set(providers))

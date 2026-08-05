@@ -6,14 +6,19 @@ implementation owner, repository-native checks, one independent review for
 material changes, at most one repair cycle, protected publication, deployment,
 smoke verification, and concise wall-clock/rework accounting.
 
-- Never install or launch the deprecated Complete Delivery pack.
-- Do not default to `gstack-build`, `build-basic`, review fan-out, or a large
-  GraphV2 workflow. Those require explicit user intent or a demonstrated risk
-  that the lightweight path cannot cover.
+- Never install or launch Complete Delivery, `gstack-build`, `build-basic`,
+  review fan-out, or another retired delivery graph.
 - Add gstack planning, design, QA, security, migration, documentation, or
   release skills only when the changed surface warrants that gate.
 - Keep at most two independent implementation writers and one reviewer.
   Escalation replaces a writer; it does not add concurrency.
+- Record one exclusive write lease per bead/branch/worktree. Before rescue or
+  repair, drain and verify the prior owner is stopped; reject late commits from
+  a revoked lease.
+- Bind checks and review to an immutable candidate head. Reuse green evidence
+  only when both the head and check definition match.
+- Use one structured review artifact and at most one focused repair. A rescue
+  lane must reproduce or edit within four minutes or return the evidence.
 - Preserve one durable `main`; delete any protection-required PR branch after
   merge.
 - “Implemented,” “merged,” and “verified in production” are distinct states.

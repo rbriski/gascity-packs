@@ -274,6 +274,8 @@ schema = 1
     commit = "0258322b80d75af640b22aa933cc3518378aa3a4"
     hash = "sha256:abe44282517092897bc4ca76620293ee9bd37a98ca409cc20734b596212973a0"
     description = "Initial Complete Delivery release with PR-sized delivery maps, bounded review loops, protected merge, deployment verification, and living reports."
+    withdrawn = true
+    withdrawn_reason = "Pack retired in favor of Gstack Lite; retained only for historical audit."
 
   [[pack.release]]
     version = "0.1.1"
@@ -281,6 +283,8 @@ schema = 1
     commit = "4726fe4cde1b8bb72a34a29c35db21158290a019"
     hash = "sha256:552be10d362bbeab2d6089c48bc1c3be886f9334b39ff9134a68502a0af28b93"
     description = "Repair release with fail-closed scope propagation, immutable review deadlines, complete runtime assets, validated retry metadata, and recoverable authenticated publication."
+    withdrawn = true
+    withdrawn_reason = "Pack retired in favor of Gstack Lite; retained only for historical audit."
 
   [[pack.release]]
     version = "0.1.2"
@@ -288,6 +292,8 @@ schema = 1
     commit = "2eb74e08bcb6388f0fcaa701bef53091c946117a"
     hash = "sha256:0962a6a8aa15ce3f2ac375a3cc3821901b925a05feb84c3aa79ef1d6c5198632"
     description = "Controller-bound launch and deterministic retry-context release with exact cache integrity and complete generated review assets."
+    withdrawn = true
+    withdrawn_reason = "Pack retired in favor of Gstack Lite; retained only for historical audit."
 
   [[pack.release]]
     version = "0.1.3"
@@ -295,6 +301,8 @@ schema = 1
     commit = "c8f8cf743eafd4f9c61a34fa5b62db7386474eaf"
     hash = "sha256:55a4519c84ac695273723305f4f72780f707b63fa6b08613e44b55148e8dbe95"
     description = "Bind canonical source-artifact paths before graph creation and surface exact validated retry failures to every build stage."
+    withdrawn = true
+    withdrawn_reason = "Pack retired in favor of Gstack Lite; retained only for historical audit."
 
   [[pack.release]]
     version = "0.1.4"
@@ -302,3 +310,5 @@ schema = 1
     commit = "1b9a7ae110cf7251eb3da02bbb6e14929fddf03a"
     hash = "sha256:af78d17d6054bfbf20ab6e2b01e713cf43c7795fbe2707665f561c869ec954af"
     description = "Align the requirements prompt with the authoritative build-artifact schema and preserve nonblank canonical retry tasks through the exact installed compiler."
+    withdrawn = true
+    withdrawn_reason = "Pack retired in favor of Gstack Lite; retained only for historical audit."

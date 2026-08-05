@@ -69,50 +69,22 @@ def test_installed_review_skill_is_self_contained_and_uses_adjacent_resources() 
     for relative in UPSTREAM_RESOURCES:
         assert (skill_root / relative).is_file(), relative
         assert f"`{relative}`" in text, relative
-    assert "### Gas City Formula staff lane" in text
-    assert "### Standalone review" in text
-    assert "one bounded staff review pass" in text
+    assert "## Review boundary" in text
+    assert "one independent Gstack Lite review pass" in text
     assert "external review bot" in text
     assert "never a\n  prerequisite for review or delivery" in text
     assert "parallel subagents or specialist agents are overridden" in text
     assert "post replies, resolve threads, or change PR state" in text
+    assert "immutable candidate head" in text
 
 
-def test_formula_staff_review_lane_is_explicit_and_self_contained() -> None:
-    agent = (GSTACK_ROOT / "agents/staff-reviewer/prompt.template.md").read_text(
-        encoding="utf-8"
-    )
-    workflow = (
-        GSTACK_ROOT
-        / "assets/workflows/gstack-code-review/{target}.staff-code-review.md"
-    ).read_text(encoding="utf-8")
-    formula = tomllib.loads(
-        (GSTACK_ROOT / "formulas/gstack-code-review.formula.toml").read_text(
-            encoding="utf-8"
-        )
-    )
+def test_formula_staff_lane_is_archived_outside_pack_discovery() -> None:
+    archived = REPO_ROOT / "deprecated/gstack-graph"
 
-    assert "Use the installed gstack review" not in agent
-    assert "Do not invoke the\ninteractive standalone gstack review workflow" in agent
-    assert "one bounded review pass" in workflow
-    assert "must not invoke\nthe interactive standalone review workflow" in workflow
-    for category in (
-        "correctness, control flow, error handling, and data integrity",
-        "concurrency, transaction boundaries, idempotency, and retry behavior",
-        "shell/SQL/path/URL injection",
-        "enum, status, tier, and type completeness",
-        "API, schema, persistence, and backward-compatibility behavior",
-        "acceptance-criteria, failure-path, boundary, and regression test coverage",
-        "scope drift, promised-but-missing behavior, and unrelated changes",
-    ):
-        assert category in workflow
-
-    loop = next(
-        node
-        for node in formula["template"]
-        if node["id"] == "{target}.gstack-code-review-loop"
-    )
-    staff = next(
-        child for child in loop["children"] if child["id"] == "{target}.staff-code-review"
-    )
-    assert staff["metadata"]["gc.run_target"] == "gstack.staff-reviewer"
+    assert (archived / "agents/staff-reviewer/prompt.template.md").is_file()
+    assert (
+        archived / "assets/workflows/gstack-code-review/{target}.staff-code-review.md"
+    ).is_file()
+    assert (archived / "formulas/gstack-code-review.formula.toml").is_file()
+    assert not (GSTACK_ROOT / "agents").exists()
+    assert not (GSTACK_ROOT / "formulas").exists()
