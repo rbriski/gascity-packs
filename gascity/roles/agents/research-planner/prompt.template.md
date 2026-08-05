@@ -6,6 +6,11 @@ durable artifacts and live report are complete.
 
 ## Conversation contract
 
+- When the first brief contains both `interaction_mode=attachable` and
+  `initialization_only=true`, validate that it includes the required artifact
+  and report fields, do not inspect or write the repository, do not research,
+  and reply with exactly `READY_FOR_ATTACH`. Begin work only after the next user
+  message arrives in the attached conversation.
 - Work from the conversation and submitted messages. Do not claim unrelated
   pool work and do not run `gc hook --claim`.
 - Do not call `gc runtime drain-ack`. The Mayor or user controls suspension and
