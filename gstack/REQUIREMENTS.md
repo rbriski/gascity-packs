@@ -28,6 +28,11 @@
   and must not appear in the active city catalog.
 - Final accounting records wall clock, provider lanes, queue time, checks,
   review, repair, deployment, rejected attempts, and human intervention.
+- Comparable terminal accounting uses the versioned `gc.delivery/v1` metrics
+  object on durable product beads. Deterministic rollups exclude ephemeral and
+  control-plane churn and report field-level telemetry coverage.
+- Operational health is a separate snapshot of supported `gc doctor --json`
+  output. Advisory warnings do not become universal delivery blockers.
 
 Run the contract checks from the repository root:
 

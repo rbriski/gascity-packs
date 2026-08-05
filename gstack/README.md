@@ -46,3 +46,23 @@ source = "https://github.com/gastownhall/gascity-packs.git//gascity/roles"
 
 Do not import `deprecated/complete-delivery` or route ordinary work through
 `build-basic` or any archived gstack formula.
+
+## Bounded delivery and health snapshots
+
+Terminal product deliveries store a `gc.delivery.metrics` object conforming to
+[`gc.delivery/v1`](./skills/gstack-lite/schemas/gc.delivery.v1.schema.json) on
+their durable bead. Generate deterministic JSON directly from supported Gas
+City outputs:
+
+```sh
+python3 gstack/skills/gstack-lite/scripts/delivery_snapshot.py delivery
+python3 gstack/skills/gstack-lite/scripts/delivery_snapshot.py health
+python3 gstack/skills/gstack-lite/scripts/delivery_snapshot.py snapshot
+```
+
+The delivery rollup includes only closed, explicitly instrumented `bug`,
+`feature`, `task`, and `chore` beads. Ephemeral records, wisps, and control-plane
+types are excluded; incomplete records remain in the denominator so telemetry
+coverage is visible. The health result is separate and summarizes supported
+`gc doctor --json` warnings. Advisory warnings are evidence to act on, not
+universal launch blockers.

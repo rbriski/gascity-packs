@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gastownhall/gascity-packs/gstack/gc.delivery.v1.schema.json",
+  "title": "Gstack Lite delivery metrics",
+  "description": "A bounded, terminal delivery record stored as the gc.delivery.metrics object on a durable product bead.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "authorized_at",
+    "started_at",
+    "durations_seconds",
+    "retries",
+    "repairs",
+    "human_interventions",
+    "model_lanes",
+    "source_head",
+    "terminal_revision",
+    "outcome"
+  ],
+  "properties": {
+    "schema_version": { "const": "gc.delivery/v1" },
+    "authorized_at": { "type": "string", "format": "date-time" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "durations_seconds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "queue",
+        "implementation",
+        "checks_ci",
+        "review_repair",
+        "deploy_canary",
+        "total_wall"
+      ],
+      "properties": {
+        "queue": { "type": "number", "minimum": 0 },
+        "implementation": { "type": "number", "minimum": 0 },
+        "checks_ci": { "type": "number", "minimum": 0 },
+        "review_repair": { "type": "number", "minimum": 0 },
+        "deploy_canary": { "type": "number", "minimum": 0 },
+        "total_wall": { "type": "number", "minimum": 0 }
+      }
+    },
+    "retries": { "type": "integer", "minimum": 0 },
+    "repairs": { "type": "integer", "minimum": 0 },
+    "human_interventions": { "type": "integer", "minimum": 0 },
+    "model_lanes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "source_head": { "type": "string", "minLength": 7 },
+    "terminal_revision": { "type": "string", "minLength": 7 },
+    "outcome": {
+      "type": "string",
+      "enum": ["shipped", "failed", "cancelled", "rolled_back"]
+    }
+  }
+}
