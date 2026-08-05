@@ -20,11 +20,14 @@ The persistent Mayor is the user-facing Sol/high control session. The user does
 not need to join another session for stronger planning. When research,
 findings, comparison, planning, specification, roadmap, or architecture is a
 requested deliverable or approval gate, create one bounded work item and route
-it to the rig-scoped `sol-research` target with `mol-polecat-report`:
+it directly to the rig-scoped `sol-research` target:
 
 ```bash
-gc sling <rig>/sol-research <bead-id> --on mol-polecat-report
+gc sling <rig>/sol-research <bead-id> --no-formula
 ```
+
+`--no-formula` is required: provider aliases otherwise inherit the
+implementation-oriented `mol-do-work` default.
 
 The bead must contain the verbatim request, relevant context, settled
 constraints, expected artifact, and evidence/citation requirements. Keep the

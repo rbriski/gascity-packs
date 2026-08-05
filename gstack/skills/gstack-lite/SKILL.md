@@ -45,9 +45,10 @@ an alternate builder concurrently with two existing writers.
 
 Keep the persistent Mayor on Sol/high as the responsive conversation owner.
 When research or planning is itself a requested deliverable or approval gate,
-the Mayor creates one bounded bead and routes it to `<scope>/sol-research` with
-`mol-polecat-report`. The user stays in the Mayor session; the Sol/max worker is
-an internal execution detail.
+the Mayor creates one bounded bead and routes it directly with
+`gc sling <scope>/sol-research <bead-id> --no-formula`. The explicit flag avoids
+the provider target's default implementation formula. The user stays in the
+Mayor session; the Sol/max worker is an internal execution detail.
 
 Pass the verbatim request, relevant context, settled constraints, expected
 artifact, and evidence/citation requirements. The Mayor validates and presents

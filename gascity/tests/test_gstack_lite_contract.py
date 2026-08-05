@@ -105,6 +105,7 @@ class GstackLiteContractTests(unittest.TestCase):
         self.assertIn("one independent review", fragment)
         self.assertIn("sol-research", fragment)
         self.assertIn("Sol/max", fragment)
+        self.assertIn("--no-formula", fragment)
 
     def test_complete_delivery_is_historical_only(self) -> None:
         readme = (REPO_ROOT / "complete-delivery/README.md").read_text(encoding="utf-8")

@@ -15,9 +15,10 @@ Ordinary delivery is deliberately direct:
 
 Explicit research and planning deliverables use a separate lightweight route:
 the user remains with the persistent Sol/high Mayor, which sends one bounded
-report bead to a scale-to-zero `sol-research` Sol/max target using the built-in
-`mol-polecat-report` formula. This adds frontier reasoning where requested
-without slowing ordinary intake or turning planning into a delivery graph.
+report bead to a scale-to-zero `sol-research` Sol/max target using the raw-bead
+route (`gc sling ... --no-formula`). This adds frontier reasoning where
+requested without slowing ordinary intake or turning planning into a delivery
+graph.
 
 Use `gstack-lite` by default. Add `review`, `qa`, `cso`, planning, design,
 migration, documentation, or release skills only when the changed surface
