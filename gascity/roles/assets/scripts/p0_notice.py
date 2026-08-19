@@ -78,8 +78,7 @@ def locked_index() -> Any:
 
 
 def run_gc(args: list[str]) -> subprocess.CompletedProcess[str]:
-    command = args if args[:1] == ["gc"] else ["gc", *args]
-    return subprocess.run(command, text=True, capture_output=True, shell=False,
+    return subprocess.run(args, text=True, capture_output=True, shell=False,
                           check=False)
 
 
@@ -89,8 +88,13 @@ def mail_id(output: str) -> str | None:
     except json.JSONDecodeError:
         return None
     if isinstance(decoded, dict):
+        messages = decoded.get("messages")
+        if isinstance(messages, list) and messages and isinstance(messages[0], dict):
+            candidate = messages[0].get("id")
+            if isinstance(candidate, str) and candidate:
+                return candidate
         for key in ("mail_id", "id", "bead_id"):
-            if isinstance(decoded.get(key), str):
+            if isinstance(decoded.get(key), str) and decoded[key]:
                 return decoded[key]
     return None
 
@@ -141,20 +145,24 @@ def send(args: argparse.Namespace) -> int:
         print(json.dumps({"notice_id": nid, "disposition": "duplicate"}))
         return 0
     subject = f"[notice:{nid}] {args.subject}"
-    result = run_gc(["mail", "send", role, "--notify", "--json", "-s", subject,
+    result = run_gc(["gc", "mail", "send", role, "--notify", "--json", "-s", subject,
                      "-m", args.message])
     with locked_index() as data:
         record = data["notices"][nid]
-        if result.returncode == 0:
-            record.update({"mail_id": mail_id(result.stdout), "accepted_at": now(),
+        receipt = mail_id(result.stdout)
+        if result.returncode == 0 and receipt:
+            record.update({"mail_id": receipt, "accepted_at": now(),
                            "disposition": "accepted"})
+        elif result.returncode == 0:
+            record.update({"disposition": "undeliverable",
+                           "terminal_reason": "mail send returned no durable receipt id"})
         else:
             # CLI output can reflect the caller's subject/message. Never copy it
             # into the reconstructable index.
             record.update({"disposition": "undeliverable",
                            "terminal_reason": "durable mail send failed"})
         print(json.dumps({"notice_id": nid, "disposition": record["disposition"]}))
-        return result.returncode
+        return result.returncode or (0 if receipt else 1)
 
 
 def ack(args: argparse.Namespace) -> int:
@@ -171,7 +179,7 @@ def ack(args: argparse.Namespace) -> int:
         linked_mail = record.get("mail_id")
         if not linked_mail:
             raise ValueError("notice has no durable mail receipt")
-    for command in (["mail", "read", linked_mail], ["mail", "archive", linked_mail]):
+    for command in (["gc", "mail", "read", linked_mail], ["gc", "mail", "archive", linked_mail]):
         result = run_gc(command)
         if result.returncode:
             sys.stderr.write(result.stderr or result.stdout)
@@ -193,31 +201,40 @@ def reconcile(args: argparse.Namespace) -> int:
         for nid, record in list(notices.items())[:args.limit]:
             if record.get("processed_at") or record.get("disposition") in TERMINAL:
                 terminal_at = record.get("processed_at") or record.get("last_seen_at", "")
-                if _parse_time(terminal_at) < cutoff:
+                parsed_terminal_at = _parse_time(terminal_at)
+                if parsed_terminal_at is not None and parsed_terminal_at < cutoff:
                     del notices[nid]
                     continue
             # This bounded operation observes receipt state only. It deliberately
             # does not evaluate dependency readiness or create repair work.
             if record.get("disposition") == "sending" and not record.get("escalated_at"):
-                if time.time() - _parse_time(record["queued_at"]) >= 300:
+                queued_at = _parse_time(record.get("queued_at", ""))
+                if queued_at is not None and time.time() - queued_at >= 300:
                     role = record["recipient_role"]
-                    probe = run_gc(["session", "resolve-role", role, "--json"])
+                    # `session wake` is the canonical role/alias routing check.
+                    # It has no mail side effect, unlike probing with a new notice.
+                    probe = run_gc(["gc", "session", "wake", role, "--json"])
                     if probe.returncode:
-                        record["escalated_at"] = now()
-                        record["disposition"] = "escalated"
-                        record["terminal_reason"] = "no routable role after five minutes"
-                        run_gc(["mail", "send", "human", "--notify", "-s",
-                                f"[notice:{nid}] role unavailable", "-m", role])
-                        escalated += 1
+                        escalation = run_gc(["gc", "mail", "send", "human", "--notify", "--json", "-s",
+                                             f"[notice:{nid}] role unavailable", "-m", role])
+                        if escalation.returncode == 0 and mail_id(escalation.stdout):
+                            record["escalated_at"] = now()
+                            record["disposition"] = "escalated"
+                            record["terminal_reason"] = "no routable role after five minutes"
+                            escalated += 1
+                        else:
+                            # Do not claim a human saw the escalation. Leaving the
+                            # receipt in `sending` makes the bounded next run retry.
+                            record["escalation_error"] = "human escalation was not durably accepted"
     print(json.dumps({"processed": min(args.limit, len(notices)), "escalated": escalated}))
     return 0
 
 
-def _parse_time(value: str) -> float:
+def _parse_time(value: str) -> float | None:
     try:
         return calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ"))
     except (TypeError, ValueError):
-        return 0.0
+        return None
 
 
 def main() -> int:

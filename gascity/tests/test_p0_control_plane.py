@@ -14,9 +14,18 @@ SCRIPT = ROOT / "gascity/roles/assets/scripts/p0_notice.py"
 
 
 class NoticeControlPlaneTests(unittest.TestCase):
-    def run_notice(self, *args: str, index: pathlib.Path) -> subprocess.CompletedProcess[str]:
-        env = os.environ | {"GC_P0_NOTICE_INDEX": str(index), "PATH": "/nonexistent"}
+    def run_notice(self, *args: str, index: pathlib.Path, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        env = os.environ | {"GC_P0_NOTICE_INDEX": str(index), "PATH": "/nonexistent"} | (extra_env or {})
         return subprocess.run([sys.executable, str(SCRIPT), *args], text=True, capture_output=True, env=env)
+
+    def fake_gc(self, directory: pathlib.Path, program: str) -> tuple[pathlib.Path, pathlib.Path]:
+        fake_bin = directory / "bin"
+        fake_bin.mkdir()
+        calls = directory / "calls"
+        command = fake_bin / "gc"
+        command.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$GC_P0_CALLS\"\n" + program)
+        command.chmod(0o755)
+        return fake_bin, calls
 
     def test_invalid_arguments_are_rejected_before_subprocess(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -69,6 +78,108 @@ class NoticeControlPlaneTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("no durable mail receipt", result.stderr)
 
+    def test_send_captures_messages_receipt_and_acknowledges_it_end_to_end(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            fake_bin, calls = self.fake_gc(root, """
+case \"$1 $2\" in
+  b?*) printf '[]\\n' ;;
+  \"mail send\") printf '%s\\n' '{"messages":[{"id":"mail-123"}],"count":1}' ;;
+  \"mail read\"|\"mail archive\") : ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+""")
+            env = {"PATH": f"{fake_bin}:/usr/bin:/bin", "GC_P0_CALLS": str(calls)}
+            sent = self.run_notice("send", "--to-role", "gastown.mayor", "--work-ref", "gp-1",
+                "--state-fingerprint", "head", "--subject", "x", "--message", "x", index=root / "index.json", extra_env=env)
+            nid = json.loads(sent.stdout)["notice_id"]
+            acked = self.run_notice("ack", nid, "--actor-role", "gastown.mayor",
+                "--disposition", "accepted", index=root / "index.json", extra_env=env)
+            record = json.loads((root / "index.json").read_text())["notices"][nid]
+            logged_calls = calls.read_text().splitlines()
+        self.assertEqual(sent.returncode, 0, sent.stderr + sent.stdout + repr(logged_calls))
+        self.assertEqual(acked.returncode, 0, acked.stderr)
+        self.assertEqual(record["mail_id"], "mail-123")
+        self.assertIn("processed_at", record)
+        self.assertEqual(logged_calls, [
+            "b" + "d query --json --all title=notice:" + nid,
+            "mail send gastown.mayor --notify --json -s [notice:" + nid + "] x -m x",
+            "mail read mail-123",
+            "mail archive mail-123",
+        ])
+
+    def test_send_refuses_accepted_state_without_a_durable_receipt_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            fake_bin, calls = self.fake_gc(root, """
+case \"$1 $2\" in
+  b?*) printf '[]\\n' ;;
+  \"mail send\") printf '%s\\n' '{"messages":[{}],"count":1}' ;;
+esac
+""")
+            result = self.run_notice("send", "--to-role", "gastown.mayor", "--work-ref", "gp-1",
+                "--state-fingerprint", "head", "--subject", "x", "--message", "x", index=root / "index.json",
+                extra_env={"PATH": f"{fake_bin}:/usr/bin:/bin", "GC_P0_CALLS": str(calls)})
+            nid = json.loads(result.stdout)["notice_id"]
+            record = json.loads((root / "index.json").read_text())["notices"][nid]
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(record["disposition"], "undeliverable")
+        self.assertNotIn("accepted_at", record)
+
+    def test_reconcile_uses_session_wake_routability_and_escalates_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            index = root / "index.json"
+            stale = "2000-01-01T00:00:00Z"
+            index.write_text(json.dumps({"schema_version": 1, "notices": {
+                "healthy": {"recipient_role": "gastown.mayor", "queued_at": stale, "disposition": "sending"},
+                "gone": {"recipient_role": "retired.role", "queued_at": stale, "disposition": "sending"},
+            }}))
+            fake_bin, calls = self.fake_gc(root, """
+case \"$1 $2 $3\" in
+  \"session wake gastown.mayor\") exit 0 ;;
+  \"session wake retired.role\") exit 1 ;;
+  \"mail send human\") printf '%s\\n' '{"messages":[{"id":"human-1"}],"count":1}' ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+""")
+            env = {"PATH": f"{fake_bin}:/usr/bin:/bin", "GC_P0_CALLS": str(calls)}
+            first = self.run_notice("reconcile", index=index, extra_env=env)
+            second = self.run_notice("reconcile", index=index, extra_env=env)
+            records = json.loads(index.read_text())["notices"]
+            logged_calls = calls.read_text().splitlines()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(records["healthy"]["disposition"], "sending")
+        self.assertEqual(records["gone"]["disposition"], "escalated")
+        self.assertEqual(logged_calls.count("mail send human --notify --json -s [notice:gone] role unavailable -m retired.role"), 1)
+        self.assertNotIn("resolve-role", "\n".join(logged_calls))
+
+    def test_failed_human_escalation_remains_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            index = root / "index.json"
+            index.write_text(json.dumps({"schema_version": 1, "notices": {
+                "gone": {"recipient_role": "retired.role", "queued_at": "2000-01-01T00:00:00Z", "disposition": "sending"},
+            }}))
+            fake_bin, calls = self.fake_gc(root, """
+case \"$1 $2 $3\" in
+  \"session wake retired.role\") exit 1 ;;
+  \"mail send human\")
+    if [ -f "$GC_P0_RETRY" ]; then printf '%s\\n' '{"messages":[{"id":"human-1"}],"count":1}'; else touch "$GC_P0_RETRY"; exit 1; fi ;;
+  *) exit 2 ;;
+esac
+""")
+            env = {"PATH": f"{fake_bin}:/usr/bin:/bin", "GC_P0_CALLS": str(calls), "GC_P0_RETRY": str(root / "retry")}
+            self.assertEqual(self.run_notice("reconcile", index=index, extra_env=env).returncode, 0)
+            after_failure = json.loads(index.read_text())["notices"]["gone"]
+            self.assertEqual(after_failure["disposition"], "sending")
+            self.assertIn("escalation_error", after_failure)
+            self.assertEqual(self.run_notice("reconcile", index=index, extra_env=env).returncode, 0)
+            record = json.loads(index.read_text())["notices"]["gone"]
+            logged_calls = calls.read_text().splitlines()
+        self.assertEqual(record["disposition"], "escalated", repr(logged_calls) + repr(record))
+
     def test_reconcile_prunes_old_processed_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             index = pathlib.Path(directory) / "index.json"
@@ -81,7 +192,7 @@ class NoticeControlPlaneTests(unittest.TestCase):
         self.assertEqual(records, {})
 
     def test_contract_files_describe_bounded_durable_policy(self) -> None:
-        command = (ROOT / "gascity/roles/commands/notice/command.toml").read_text()
+        command = (ROOT / "gascity/commands/notice/command.toml").read_text()
         order = (ROOT / "gascity/roles/orders/p0-notice-reconcile.toml").read_text()
         prompt = (ROOT / "gascity/roles/template-fragments/p0-control-plane.template.md").read_text()
         self.assertIn("p0_notice.py", command)
@@ -99,6 +210,9 @@ class NoticeControlPlaneTests(unittest.TestCase):
         self.assertIn("processed_at", source)
         self.assertIn("recover_mail_id", source)
         self.assertIn("title=notice:", source)
+        self.assertIn('subprocess.run(args,', source)
+        self.assertIn('["gc", "session", "wake", role, "--json"]', source)
+        self.assertNotIn("resolve-role", source)
 
 
 if __name__ == "__main__":
