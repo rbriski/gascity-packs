@@ -78,7 +78,8 @@ def locked_index() -> Any:
 
 
 def run_gc(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["gc", *args], text=True, capture_output=True, shell=False,
+    command = args if args[:1] == ["gc"] else ["gc", *args]
+    return subprocess.run(command, text=True, capture_output=True, shell=False,
                           check=False)
 
 
@@ -96,7 +97,7 @@ def mail_id(output: str) -> str | None:
 
 def recover_mail_id(nid: str) -> str | None:
     """Recover a receipt after an index loss from the deterministic subject."""
-    result = run_gc(["bd", "query", "--json", "--all", f"title=notice:{nid}"])
+    result = run_gc(["gc", "bd", "query", "--json", "--all", f"title=notice:{nid}"])
     if result.returncode:
         return None
     try:
