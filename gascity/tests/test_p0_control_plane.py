@@ -126,19 +126,28 @@ esac
         self.assertEqual(record["disposition"], "undeliverable")
         self.assertNotIn("accepted_at", record)
 
-    def test_reconcile_uses_session_wake_routability_and_escalates_once(self) -> None:
+    def test_reconcile_reads_configured_roles_without_waking_or_releasing_held_roles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             index = root / "index.json"
             stale = "2000-01-01T00:00:00Z"
             index.write_text(json.dumps({"schema_version": 1, "notices": {
-                "healthy": {"recipient_role": "gastown.mayor", "queued_at": stale, "disposition": "sending"},
-                "gone": {"recipient_role": "retired.role", "queued_at": stale, "disposition": "sending"},
+                "active": {"recipient_role": "gastown.mayor", "queued_at": stale, "disposition": "sending"},
+                "dormant": {"recipient_role": "gascity-packs/gastown.witness", "queued_at": stale, "disposition": "sending"},
+                "held": {"recipient_role": "gascity-packs/gastown.refinery", "queued_at": stale, "disposition": "sending"},
+                "quarantined": {"recipient_role": "gascity-packs/gastown.polecat", "queued_at": stale, "disposition": "sending"},
+                "retired": {"recipient_role": "retired.role", "queued_at": stale, "disposition": "sending"},
+                "unknown": {"recipient_role": "unknown.role", "queued_at": stale, "disposition": "sending"},
             }}))
             fake_bin, calls = self.fake_gc(root, """
 case \"$1 $2 $3\" in
-  \"session wake gastown.mayor\") exit 0 ;;
-  \"session wake retired.role\") exit 1 ;;
+  \"agent list --json\") printf '%s\\n' '{"agents":[
+    {"qualified_name":"gastown.mayor","suspended":false},
+    {"qualified_name":"gascity-packs/gastown.witness","suspended":false},
+    {"qualified_name":"gascity-packs/gastown.refinery","suspended":true},
+    {"qualified_name":"gascity-packs/gastown.polecat","state":"quarantined"},
+    {"qualified_name":"successor.role","suspended":false}
+  ]}' ;;
   \"mail send human\") printf '%s\\n' '{"messages":[{"id":"human-1"}],"count":1}' ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
 esac
@@ -150,10 +159,37 @@ esac
             logged_calls = calls.read_text().splitlines()
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertEqual(records["healthy"]["disposition"], "sending")
-        self.assertEqual(records["gone"]["disposition"], "escalated")
-        self.assertEqual(logged_calls.count("mail send human --notify --json -s [notice:gone] role unavailable -m retired.role"), 1)
+        for nid in ("active", "dormant", "held", "quarantined"):
+            self.assertEqual(records[nid]["disposition"], "sending")
+        for nid in ("retired", "unknown"):
+            self.assertEqual(records[nid]["disposition"], "escalated")
+            self.assertEqual(logged_calls.count(
+                f"mail send human --notify --json -s [notice:{nid}] role unavailable -m {records[nid]['recipient_role']}",
+            ), 1)
+        self.assertTrue(all(not call.startswith("session wake") for call in logged_calls))
         self.assertNotIn("resolve-role", "\n".join(logged_calls))
+
+    def test_reconcile_does_not_escalate_when_read_only_role_lookup_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            index = root / "index.json"
+            index.write_text(json.dumps({"schema_version": 1, "notices": {
+                "unknown": {"recipient_role": "unknown.role", "queued_at": "2000-01-01T00:00:00Z", "disposition": "sending"},
+            }}))
+            fake_bin, calls = self.fake_gc(root, """
+case \"$1 $2 $3\" in
+  \"agent list --json\") exit 1 ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+""")
+            result = self.run_notice("reconcile", index=index,
+                extra_env={"PATH": f"{fake_bin}:/usr/bin:/bin", "GC_P0_CALLS": str(calls)})
+            record = json.loads(index.read_text())["notices"]["unknown"]
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(record["disposition"], "sending")
+        self.assertIn("routability_error", record)
+        logged_calls = calls.read_text().splitlines() if calls.exists() else []
+        self.assertFalse(any(call.startswith("mail send human") for call in logged_calls))
 
     def test_failed_human_escalation_remains_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -164,7 +200,7 @@ esac
             }}))
             fake_bin, calls = self.fake_gc(root, """
 case \"$1 $2 $3\" in
-  \"session wake retired.role\") exit 1 ;;
+  \"agent list --json\") printf '%s\\n' '{"agents":[]}' ;;
   \"mail send human\")
     if [ -f "$GC_P0_RETRY" ]; then printf '%s\\n' '{"messages":[{"id":"human-1"}],"count":1}'; else touch "$GC_P0_RETRY"; exit 1; fi ;;
   *) exit 2 ;;
@@ -211,7 +247,8 @@ esac
         self.assertIn("recover_mail_id", source)
         self.assertIn("title=notice:", source)
         self.assertIn('subprocess.run(args,', source)
-        self.assertIn('["gc", "session", "wake", role, "--json"]', source)
+        self.assertIn('["gc", "agent", "list", "--json"]', source)
+        self.assertNotIn('"session", "wake"', source)
         self.assertNotIn("resolve-role", source)
 
 

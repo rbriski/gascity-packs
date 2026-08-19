@@ -114,6 +114,31 @@ def recover_mail_id(nid: str) -> str | None:
     return None
 
 
+def configured_role(role: str) -> bool | None:
+    """Return whether an exact canonical role remains configured.
+
+    ``gc agent list`` reads resolved configuration only. Unlike ``gc session
+    wake``, it neither starts a dormant role nor clears a user hold or
+    crash-loop quarantine. A configured role is therefore still a valid notice
+    destination even while it is dormant or intentionally held. ``None``
+    distinguishes an unreadable control plane from a genuinely unknown role.
+    """
+    result = run_gc(["gc", "agent", "list", "--json"])
+    if result.returncode:
+        return None
+    try:
+        decoded = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    agents = decoded.get("agents") if isinstance(decoded, dict) else None
+    if not isinstance(agents, list):
+        return None
+    return any(
+        isinstance(agent, dict) and agent.get("qualified_name") == role
+        for agent in agents
+    )
+
+
 def send(args: argparse.Namespace) -> int:
     role = check(args.to_role, "role")
     work = check(args.work_ref, "work reference")
@@ -211,10 +236,12 @@ def reconcile(args: argparse.Namespace) -> int:
                 queued_at = _parse_time(record.get("queued_at", ""))
                 if queued_at is not None and time.time() - queued_at >= 300:
                     role = record["recipient_role"]
-                    # `session wake` is the canonical role/alias routing check.
-                    # It has no mail side effect, unlike probing with a new notice.
-                    probe = run_gc(["gc", "session", "wake", role, "--json"])
-                    if probe.returncode:
+                    routable = configured_role(role)
+                    if routable is None:
+                        # An unreadable config is not evidence that a canonical
+                        # role disappeared; retry on the next bounded pass.
+                        record["routability_error"] = "unable to read configured canonical roles"
+                    elif not routable:
                         escalation = run_gc(["gc", "mail", "send", "human", "--notify", "--json", "-s",
                                              f"[notice:{nid}] role unavailable", "-m", role])
                         if escalation.returncode == 0 and mail_id(escalation.stdout):
