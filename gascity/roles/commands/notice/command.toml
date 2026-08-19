@@ -1,0 +1,2 @@
+description = "Send, acknowledge, inspect, and reconcile durable role-addressed notices"
+run = "../../assets/scripts/p0_notice.py"
