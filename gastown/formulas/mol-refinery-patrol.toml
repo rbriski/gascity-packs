@@ -13,6 +13,9 @@ descriptions below and work through them in order.
 
 The loop mechanism: every exit path (happy or early) pours the next
 wisp before burning this one. The prompt only bootstraps the first wisp.
+If pouring reports the current wisp as its own successor, stop without
+assigning or burning it: no distinct successor has been proven, and the
+active patrol remains the only safe recovery point.
 
 Work beads flow directly: pool → polecat → refinery → closed.
 No separate MR beads. The polecat sets metadata (branch, target) on
@@ -124,6 +127,11 @@ fi
 NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not requesting restart."
+  gc runtime drain-ack
+  exit 1
+fi
+if [ "$NEXT" = "$CURRENT_WISP" ]; then
+  echo "Refinery patrol successor collision: mol wisp returned the active wisp; preserving it without assign or burn."
   gc runtime drain-ack
   exit 1
 fi
@@ -250,6 +258,11 @@ if [ -z "$NEXT" ]; then
   gc runtime drain-ack
   exit 1
 fi
+if [ "$NEXT" = "$CURRENT_WISP" ]; then
+  echo "Refinery patrol successor collision: mol wisp returned the active wisp; preserving it without assign or burn."
+  gc runtime drain-ack
+  exit 1
+fi
 if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
   echo "Could not assign next refinery wisp; not burning."
   gc runtime drain-ack
@@ -351,6 +364,11 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
        gc runtime drain-ack
        exit 1
      fi
+     if [ "$NEXT" = "$CURRENT_WISP" ]; then
+       echo "Refinery patrol successor collision: mol wisp returned the active wisp; preserving it without assign or burn."
+       gc runtime drain-ack
+       exit 1
+     fi
      if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
        echo "Could not assign next refinery wisp; not burning."
        gc runtime drain-ack
@@ -447,6 +465,11 @@ Target: $TARGET"
   NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
   if [ -z "$NEXT" ]; then
     echo "Could not pour next refinery wisp; not burning."
+    gc runtime drain-ack
+    exit 1
+  fi
+  if [ "$NEXT" = "$CURRENT_WISP" ]; then
+    echo "Refinery patrol successor collision: mol wisp returned the active wisp; preserving it without assign or burn."
     gc runtime drain-ack
     exit 1
   fi
@@ -1148,6 +1171,11 @@ fi
 NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
+if [ "$NEXT" = "$CURRENT_WISP" ]; then
+  echo "Refinery patrol successor collision: mol wisp returned the active wisp; preserving it without assign or burn."
   gc runtime drain-ack
   exit 1
 fi
