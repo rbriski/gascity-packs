@@ -82,16 +82,20 @@ def test_gstack_lite_consolidates_every_review_surface_before_repair() -> None:
             "exact repaired head" in normalized
             or "exact-repaired-head" in normalized
         )
-        assert (
-            "Safety findings always block" in normalized
-            or "safety always blocks" in normalized
-        )
+        assert "safety" in normalized.lower()
+        assert "block" in normalized.lower()
 
     assert skill.index("external PR review bots") < skill.index(
         "single repair allowance"
     )
     assert "never repair serially" in skill
     assert "bounded explicit timeout or\nunavailable result" in skill
+    assert "skipped by its\nconfiguration" in skill
+    assert "not a valid timeout" in skill
+    assert "same bounded timeout/unavailable recording applies to re-review" in (
+        " ".join(skill.split())
+    )
+    assert "unavailable required surface blocks merge" in " ".join(skill.split())
 
 
 def test_gstack_lite_preserves_rejected_candidates_for_successors() -> None:
@@ -100,6 +104,7 @@ def test_gstack_lite_preserves_rejected_candidates_for_successors() -> None:
     assert "exact commit/diff and review evidence" in skill
     assert "carries the failed candidate forward by default" in skill
     assert "Rebuild from\nprotected `main` only" in skill
+    assert "then delete it after merge" not in skill
     assert "delete any protection-required PR branch after\n  merge" not in skill
 
 

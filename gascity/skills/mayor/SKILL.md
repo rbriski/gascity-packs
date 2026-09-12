@@ -118,9 +118,15 @@ Use Gstack Lite for ordinary build, fix, finish, ship, and deploy requests:
    PR bots, and one different-family gstack review for material changes;
 5. one deduplicated exact-head artifact after all surfaces finish or record a
    bounded timeout/unavailable result, then one repair and re-review of the
-   exact repaired head by every applicable surface; safety always blocks and other findings fail
-   upward only after a blocking consolidated re-review;
+   exact repaired head by every applicable surface; the same bounded-result rule
+   applies and an unavailable required surface blocks merge unless repository
+   protection explicitly exempts it and records why; safety always blocks and
+   other findings fail upward only after a blocking consolidated re-review;
 6. protected publication, deployment, smoke verification, and accounting.
+
+Require SHA-bound run or comment evidence that each configured bot actually
+ran. A bot skipped by its configuration is not a timeout; use its explicit
+trigger or a merge-blocked ready-for-review PR.
 
 Do not delete a rejected PR branch until its exact commit, diff, and evidence
 are reachable from an approved successor or durable remote reference. Rescue

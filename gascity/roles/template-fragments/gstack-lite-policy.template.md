@@ -31,12 +31,16 @@ wall-clock/rework accounting.
   a revoked lease.
 - After checks, expose the same immutable candidate to required CI, configured
   external PR bots, and one different-family reviewer for material changes. A
-  draft/non-mergeable PR gathers feedback but grants no merge authority.
+  draft/non-mergeable PR gathers feedback but grants no merge authority. Require
+  SHA-bound run/comment evidence that each bot ran; a configuration skip is not
+  a timeout, so use an explicit trigger or merge-blocked ready-for-review PR.
 - Wait for every applicable surface or record a bounded timeout/unavailable
   result; aggregate and deduplicate one exact-SHA artifact before repair starts.
 - Use one focused repair, rerun affected checks, and require every applicable
   surface to review the exact repaired head. Only a blocking consolidated
-  re-review fails upward; any safety finding always blocks merge.
+  re-review fails upward; any safety finding always blocks merge. Apply the same
+  bounded-result rule to re-review. An unavailable required surface blocks merge
+  unless repository protection explicitly exempts it and that is recorded.
 - Preserve rejected branches until exact commits, diffs, and evidence are
   durably reachable. Rescue carries the failed candidate forward by default;
   rebuild from protected

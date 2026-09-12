@@ -11,14 +11,21 @@ Ordinary delivery is deliberately direct:
 4. expose one immutable candidate to required CI, external PR bots, and one
    independent different-family review for material changes;
 5. consolidate and deduplicate exact-head findings, then allow at most one
-   focused repair owner and require a consolidated exact-repaired-head re-review;
+   focused repair owner, require required CI, configured external PR bots, and
+   the different-family reviewer to evaluate the exact repaired head, then
+   consolidate the re-review findings;
 6. publish through the repository's protected path;
 7. deploy, smoke-test, and account for wall time and rework.
 
 A draft or non-mergeable PR may collect CI and bot feedback, but it grants no
-merge authority. Bounded unavailable/timeout results are recorded in the
-consolidated artifact before repair begins. Safety findings always block merge;
-other blocking findings fail upward only after the consolidated re-review.
+merge authority. Each configured bot needs run or comment evidence bound to the
+candidate SHA; a configuration skip is not a timeout, so use an explicit trigger
+or a merge-blocked ready-for-review PR. Bounded unavailable/timeout results are
+recorded in the consolidated artifact before repair begins and again for the
+repaired head. An unavailable required surface blocks merge unless repository
+protection explicitly does not require it and the exception is recorded. Safety
+findings always block merge; other blocking findings fail upward only after the
+consolidated re-review.
 Rejected work stays reachable by exact commit, diff, and evidence until an
 approved successor or durable remote reference preserves it. Rescue carries the
 candidate forward by default; rebuilding from protected `main` requires a

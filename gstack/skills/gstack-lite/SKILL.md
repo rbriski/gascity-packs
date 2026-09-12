@@ -147,9 +147,13 @@ After deterministic checks, expose the same immutable candidate head to every
 applicable configured review surface: required CI, external PR review bots, and
 one direct `gstack.review` pass with a different model family for material code.
 A draft or otherwise non-mergeable PR may obtain CI and bot feedback, but grants
-no merge authority. Documentation-only or harmless test-only changes may omit
-the model pass. Add `gstack.qa`, `gstack.cso`, design review, or migration review
-only when the changed surface triggers that risk.
+no merge authority. Confirm each configured bot actually ran on the candidate
+SHA with run or comment evidence bound to that SHA. A surface skipped by its
+configuration (draft state, labels, or path filters) is not a valid timeout;
+use a merge-blocked ready-for-review PR or the bot's explicit trigger.
+Documentation-only or harmless test-only changes may omit the model pass. Add
+`gstack.qa`, `gstack.cso`, design review, or migration review only when the
+changed surface triggers that risk.
 
 Wait for all applicable surfaces, or record a bounded explicit timeout or
 unavailable result. Aggregate and deduplicate their findings into one
@@ -160,8 +164,11 @@ while later CI or bot feedback is still pending.
 
 Use one focused repair pass for the consolidated findings and rerun affected
 deterministic checks. Every applicable review surface must evaluate the
-exact repaired head; aggregate that consolidated re-review before merge. Fail upward
-only if it still contains a blocking finding. Any safety finding blocks merge
+exact repaired head; aggregate that consolidated re-review before merge. The
+same bounded timeout/unavailable recording applies to re-review. An unavailable
+required surface blocks merge unless repository protection explicitly does not
+require it, and that exception is recorded. Fail upward only if the consolidated
+re-review still contains a blocking finding. Any safety finding blocks merge
 regardless of repair accounting.
 
 Before assigning the one repair owner, revoke the previous lease:

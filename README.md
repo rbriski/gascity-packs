@@ -69,8 +69,10 @@ this is the shortest path. Each step is copy-pasteable; swap names to taste.
    editing to fetch anything newly referenced.
 
 5. **Deliver directly.** Create one durable bead, assign one implementation
-   owner, run repository-native checks, one independent review for material
-   changes, protected publication, deployment, and a behavior canary:
+   owner, run repository-native checks, one consolidated exact-head round across
+   required CI, configured PR bots, and one different-family review for material
+   changes, one repair, the same surfaces' exact-repaired-head re-review,
+   protected publication, deployment, and a behavior canary:
 
    ```sh
    gc bd create "Add a --json flag to the export command"
@@ -197,9 +199,10 @@ rationale.
 
 - **Current default — Gstack Lite:** import [gstack](./gstack) for focused
   skills and `gascity/roles` for the small execution roles. Use one bead, one
-  owner, deterministic checks, one independent review, bounded repair, and the
-  repository's normal protected publish/deploy/smoke path. It is a policy and
-  skill, not another mandatory graph.
+  owner, deterministic checks, one consolidated exact-head CI/bot/different-
+  family review round, bounded repair, the same surfaces' exact-repaired-head
+  re-review, and the repository's normal protected publish/deploy/smoke path.
+  It is a policy and skill, not another mandatory graph.
 - **Archived — [complete-delivery](./deprecated/complete-delivery):** retained
   under `deprecated/` for audit evidence only. The top-level path is a
   non-runnable registry tombstone and every published release is withdrawn.

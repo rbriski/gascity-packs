@@ -112,7 +112,7 @@ class GstackLiteContractTests(unittest.TestCase):
         self.assertIn("Never install or launch a retired delivery graph", skill)
         self.assertIn("Do not mention retired", skill)
         self.assertNotIn("TODO", skill)
-        self.assertLess(len(skill.splitlines()), 240)
+        self.assertLess(len(skill.splitlines()), 245)
 
     def test_mayor_and_prompt_fragment_default_to_gstack_lite(self) -> None:
         mayor = (REPO_ROOT / "gascity/skills/mayor/SKILL.md").read_text(encoding="utf-8")
@@ -162,11 +162,29 @@ class GstackLiteContractTests(unittest.TestCase):
             self.assertIn("exact repaired head", normalized)
             self.assertIn("safety", normalized.lower())
             self.assertIn("blocks", normalized.lower())
+            self.assertIn("configuration", normalized.lower())
+            self.assertIn("not a", normalized.lower())
+            self.assertIn("timeout", normalized.lower())
+            self.assertIn("unavailable required surface blocks merge", normalized)
 
         self.assertIn("never repair serially", canonical)
         self.assertLess(
             canonical.index("external PR review bots"),
             canonical.index("single repair allowance"),
+        )
+        normalized_fragment = " ".join(public_fragment.split())
+        normalized_mayor = " ".join(mayor.split())
+        self.assertLess(
+            normalized_fragment.index("external PR bots"),
+            normalized_fragment.index("Use one focused repair"),
+        )
+        self.assertLess(
+            normalized_mayor.index("external PR bots"),
+            normalized_mayor.index("then one repair"),
+        )
+        self.assertNotIn(
+            "Use one structured review artifact and at most one focused repair",
+            public_fragment,
         )
 
     def test_active_policy_preserves_rejected_work_for_rescue(self) -> None:
@@ -194,6 +212,7 @@ class GstackLiteContractTests(unittest.TestCase):
         self.assertNotIn(
             "delete any protection-required PR branch after\n  merge", fragment
         )
+        self.assertNotIn("then delete it after merge", canonical)
 
     def test_research_planner_is_persistent_attachable_and_publishes(self) -> None:
         role_root = REPO_ROOT / "gascity/roles/agents/research-planner"
