@@ -159,6 +159,8 @@ class GstackLiteContractTests(unittest.TestCase):
         normalized_canonical = " ".join(canonical.split())
         normalized_mayor = " ".join(mayor.split())
         normalized_fragment = " ".join(public_fragment.split())
+        gstack_requirements = self.normalized(REPO_ROOT / "gstack/REQUIREMENTS.md")
+        gstack_readme = self.normalized(REPO_ROOT / "gstack/README.md")
         root_readme = self.normalized(REPO_ROOT / "README.md")
         gascity_requirements = self.normalized(REPO_ROOT / "gascity/REQUIREMENTS.md")
 
@@ -180,6 +182,31 @@ class GstackLiteContractTests(unittest.TestCase):
             normalized_fragment,
         )
         self.assertIn(
+            "Every applicable review surface must evaluate the exact repaired head; "
+            "aggregate that consolidated re-review before merge.",
+            normalized_canonical,
+        )
+        self.assertIn(
+            "then one repair and re-review of the exact repaired head by every applicable "
+            "surface;",
+            normalized_mayor,
+        )
+        self.assertIn(
+            "Use one focused repair, rerun affected checks, and require every applicable "
+            "surface to review the exact repaired head.",
+            normalized_fragment,
+        )
+        self.assertIn(
+            "All applicable surfaces evaluate the exact repaired head.",
+            gstack_requirements,
+        )
+        self.assertIn(
+            "require required CI, configured external PR bots, and the different-family "
+            "reviewer to evaluate the exact repaired head, then consolidate the re-review "
+            "findings;",
+            gstack_readme,
+        )
+        self.assertIn(
             "one consolidated exact-head round across required CI, configured PR bots, and "
             "one different-family review for material changes, one repair, the same "
             "surfaces' exact-repaired-head re-review",
@@ -191,8 +218,35 @@ class GstackLiteContractTests(unittest.TestCase):
             "exact-repaired-head re-review → publish/deploy/canary path",
             gascity_requirements,
         )
-        for content in (normalized_canonical, normalized_mayor, normalized_fragment):
-            self.assertIn("unavailable required surface blocks merge", content)
+        self.assertIn(
+            "A surface skipped by its configuration (draft state, labels, or path filters) "
+            "is not a valid timeout;",
+            normalized_canonical,
+        )
+        self.assertIn(
+            "A bot skipped by its configuration is not a timeout; use its explicit trigger "
+            "or a merge-blocked ready-for-review PR.",
+            normalized_mayor,
+        )
+        self.assertIn(
+            "a configuration skip is not a timeout, so use an explicit trigger or "
+            "merge-blocked ready-for-review PR.",
+            normalized_fragment,
+        )
+        self.assertIn(
+            "Any safety finding blocks merge regardless of repair accounting.",
+            normalized_canonical,
+        )
+        self.assertIn(
+            "safety always blocks and other findings fail upward only after a blocking "
+            "consolidated re-review;",
+            normalized_mayor,
+        )
+        self.assertIn(
+            "Only a blocking consolidated re-review fails upward; any safety finding "
+            "always blocks merge.",
+            normalized_fragment,
+        )
 
         self.assertIn("never repair serially", canonical)
         self.assertLess(

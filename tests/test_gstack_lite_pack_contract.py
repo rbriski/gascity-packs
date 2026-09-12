@@ -91,6 +91,16 @@ def test_gstack_lite_consolidates_every_review_surface_before_repair() -> None:
         "independent different-family review for material changes;"
     ) in readme
     assert (
+        "Every applicable review surface must evaluate the exact repaired head; "
+        "aggregate that consolidated re-review before merge."
+    ) in skill
+    assert "All applicable surfaces evaluate the exact repaired head." in requirements
+    assert (
+        "require required CI, configured external PR bots, and the different-family "
+        "reviewer to evaluate the exact repaired head, then consolidate the re-review "
+        "findings;"
+    ) in readme
+    assert (
         "one consolidated exact-head round across required CI, configured PR bots, and "
         "one different-family review for material changes, one repair, the same "
         "surfaces' exact-repaired-head re-review"
@@ -101,9 +111,26 @@ def test_gstack_lite_consolidates_every_review_surface_before_repair() -> None:
         "exact-repaired-head re-review → publish/deploy/canary path"
     ) in gascity_requirements
     assert (
+        "A surface skipped by its configuration (draft state, labels, or path filters) "
+        "is not a valid timeout;"
+    ) in skill
+    assert (
+        "Each bot has SHA-bound run/comment evidence; a configuration skip is not a "
+        "timeout."
+    ) in requirements
+    assert (
+        "Each configured bot needs run or comment evidence bound to the candidate SHA; "
+        "a configuration skip is not a timeout, so use an explicit trigger or a "
+        "merge-blocked ready-for-review PR."
+    ) in readme
+    assert "Any safety finding blocks merge regardless of repair accounting." in skill
+    assert (
         "Only a blocking consolidated re-review fails upward; safety always blocks."
     ) in requirements
-    assert "Any safety finding blocks merge regardless of repair accounting." in skill
+    assert (
+        "Safety findings always block merge; other blocking findings fail upward only "
+        "after the consolidated re-review."
+    ) in readme
 
     raw_skill = (GSTACK_ROOT / "skills/gstack-lite/SKILL.md").read_text(encoding="utf-8")
     assert raw_skill.index("external PR review bots") < raw_skill.index(
