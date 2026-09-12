@@ -16,9 +16,10 @@ concrete methodology pack that extends this base must preserve these user-facing
 and artifact-facing behaviors unless this ledger is intentionally updated.
 
 This formula family is no longer the ordinary city default. Gstack Lite uses a
-direct bead → owner → native checks → consolidated exact-head CI/bot/different-
-family review → one repair → the same surfaces' exact-repaired-head re-review →
-publish/deploy/canary path and deliberately does not import this pack. These
+direct bead → owner → native checks →
+consolidated exact-head CI/bot/different-family review → one repair → the same
+surfaces' exact-repaired-head re-review → publish/deploy/canary path and
+deliberately does not import this pack. These
 requirements remain for explicit legacy GraphV2 users and the three methodology
 packs listed above.
 

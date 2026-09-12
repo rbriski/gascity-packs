@@ -92,6 +92,10 @@ def write_city(root: Path, city_toml: str = VALID_CITY, pack_toml: str = VALID_P
 
 
 class GstackLiteContractTests(unittest.TestCase):
+    @staticmethod
+    def normalized(path: Path) -> str:
+        return " ".join(path.read_text(encoding="utf-8").split())
+
     def test_formula_catalog_accepts_null_for_an_empty_catalog(self) -> None:
         audit_module = load_audit_module()
         completed = subprocess.CompletedProcess(
@@ -152,28 +156,49 @@ class GstackLiteContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertEqual(public_fragment, roles_fragment)
-        for content in (canonical, mayor, public_fragment):
-            normalized = " ".join(content.split())
-            self.assertIn("required CI", normalized)
-            self.assertIn("external PR", normalized)
-            self.assertIn("bounded", normalized)
-            self.assertIn("timeout", normalized)
-            self.assertIn("unavailable", normalized)
-            self.assertIn("exact repaired head", normalized)
-            self.assertIn("safety", normalized.lower())
-            self.assertIn("blocks", normalized.lower())
-            self.assertIn("configuration", normalized.lower())
-            self.assertIn("not a", normalized.lower())
-            self.assertIn("timeout", normalized.lower())
-            self.assertIn("unavailable required surface blocks merge", normalized)
+        normalized_canonical = " ".join(canonical.split())
+        normalized_mayor = " ".join(mayor.split())
+        normalized_fragment = " ".join(public_fragment.split())
+        root_readme = self.normalized(REPO_ROOT / "README.md")
+        gascity_requirements = self.normalized(REPO_ROOT / "gascity/REQUIREMENTS.md")
+
+        self.assertIn(
+            "After deterministic checks, expose the same immutable candidate head to "
+            "every applicable configured review surface: required CI, external PR review "
+            "bots, and one direct `gstack.review` pass with a different model family for "
+            "material code.",
+            normalized_canonical,
+        )
+        self.assertIn(
+            "one immutable candidate exposed together to required CI, configured external "
+            "PR bots, and one different-family gstack review for material changes;",
+            normalized_mayor,
+        )
+        self.assertIn(
+            "After checks, expose the same immutable candidate to required CI, configured "
+            "external PR bots, and one different-family reviewer for material changes.",
+            normalized_fragment,
+        )
+        self.assertIn(
+            "one consolidated exact-head round across required CI, configured PR bots, and "
+            "one different-family review for material changes, one repair, the same "
+            "surfaces' exact-repaired-head re-review",
+            root_readme,
+        )
+        self.assertIn(
+            "direct bead → owner → native checks → consolidated exact-head "
+            "CI/bot/different-family review → one repair → the same surfaces' "
+            "exact-repaired-head re-review → publish/deploy/canary path",
+            gascity_requirements,
+        )
+        for content in (normalized_canonical, normalized_mayor, normalized_fragment):
+            self.assertIn("unavailable required surface blocks merge", content)
 
         self.assertIn("never repair serially", canonical)
         self.assertLess(
             canonical.index("external PR review bots"),
             canonical.index("single repair allowance"),
         )
-        normalized_fragment = " ".join(public_fragment.split())
-        normalized_mayor = " ".join(mayor.split())
         self.assertLess(
             normalized_fragment.index("external PR bots"),
             normalized_fragment.index("Use one focused repair"),
@@ -198,21 +223,30 @@ class GstackLiteContractTests(unittest.TestCase):
             REPO_ROOT / "gascity/template-fragments/gstack-lite-policy.template.md"
         ).read_text(encoding="utf-8")
 
-        for content in (canonical, mayor, fragment):
-            normalized = " ".join(content.split())
-            self.assertIn("exact commit", normalized)
-            self.assertIn("diff", normalized)
-            self.assertIn("evidence", normalized)
-            self.assertIn(
-                "carries the failed candidate forward by default", normalized
-            )
-            self.assertIn("rebuild from protected", normalized.lower())
-            self.assertIn("architecture, provenance, or security", normalized)
+        normalized_canonical = " ".join(canonical.split())
+        normalized_mayor = " ".join(mayor.split())
+        normalized_fragment = " ".join(fragment.split())
 
-        self.assertNotIn(
-            "delete any protection-required PR branch after\n  merge", fragment
+        self.assertIn(
+            "Delete a rejected branch only after its exact commit, diff, and evidence are "
+            "reachable from an approved successor or another durable remote reference; "
+            "delete the accepted branch after merge.",
+            normalized_canonical,
         )
-        self.assertNotIn("then delete it after merge", canonical)
+        self.assertIn(
+            "Do not delete a rejected PR branch until its exact commit, diff, and evidence "
+            "are reachable from an approved successor or durable remote reference.",
+            normalized_mayor,
+        )
+        self.assertIn(
+            "Preserve rejected branches until exact commits, diffs, and evidence are "
+            "durably reachable. Rescue carries the failed candidate forward by default;",
+            normalized_fragment,
+        )
+        self.assertIn("Delete the accepted branch after merge.", normalized_fragment)
+        self.assertNotIn(
+            "delete any protection-required PR branch after merge", normalized_fragment
+        )
 
     def test_research_planner_is_persistent_attachable_and_publishes(self) -> None:
         role_root = REPO_ROOT / "gascity/roles/agents/research-planner"

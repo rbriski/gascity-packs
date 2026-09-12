@@ -27,7 +27,8 @@
   allowance begins. All applicable surfaces evaluate the exact repaired head.
   The same bounded-result rule applies, and an unavailable required surface
   blocks merge unless repository protection explicitly exempts it and that is
-  recorded. Only a blocking consolidated re-review fails upward; safety blocks.
+  recorded. Only a blocking consolidated re-review fails upward; safety always
+  blocks.
 - At most one repair owner may write after consolidated review. The prior owner
   must be drain-acknowledged or forcibly closed before reassignment.
 - Rejected branches remain durably reachable with their exact commit, diff, and

@@ -46,6 +46,7 @@ wall-clock/rework accounting.
   rebuild from protected
   `main` only for a recorded architecture, provenance, or security reason. A
   rescue lane must reproduce or edit within four minutes or return the evidence.
+- Preserve one durable `main`. Delete the accepted branch after merge.
 - “Implemented,” “merged,” and “verified in production” are distinct states.
   Continue until the user's requested terminal state is proven.
 {{- end }}
