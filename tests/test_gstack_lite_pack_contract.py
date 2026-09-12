@@ -18,6 +18,10 @@ def load_audit_module():
     return module
 
 
+def normalized_text(path: Path) -> str:
+    return " ".join(path.read_text(encoding="utf-8").split())
+
+
 def test_gstack_pack_is_skills_only() -> None:
     manifest = tomllib.loads((GSTACK_ROOT / "pack.toml").read_text(encoding="utf-8"))
 
@@ -63,6 +67,119 @@ def test_gstack_lite_records_owner_and_candidate_leases() -> None:
         "structured artifact",
     ):
         assert required in text
+
+
+def test_gstack_lite_consolidates_every_review_surface_before_repair() -> None:
+    skill = normalized_text(GSTACK_ROOT / "skills/gstack-lite/SKILL.md")
+    requirements = normalized_text(GSTACK_ROOT / "REQUIREMENTS.md")
+    readme = normalized_text(GSTACK_ROOT / "README.md")
+    root_readme = normalized_text(REPO_ROOT / "README.md")
+    gascity_requirements = normalized_text(REPO_ROOT / "gascity/REQUIREMENTS.md")
+
+    assert (
+        "After deterministic checks, expose the same immutable candidate head to "
+        "every applicable configured review surface: required CI, external PR review "
+        "bots, and one direct `gstack.review` pass with a different model family for "
+        "material code."
+    ) in skill
+    assert (
+        "The same checked immutable candidate is exposed to required CI, configured "
+        "external PR review bots, and one different-family review for material changes."
+    ) in requirements
+    assert (
+        "expose one immutable candidate to required CI, external PR bots, and one "
+        "independent different-family review for material changes;"
+    ) in readme
+    assert (
+        "Every applicable review surface must evaluate the exact repaired head; "
+        "aggregate that consolidated re-review before merge."
+    ) in skill
+    assert "All applicable surfaces evaluate the exact repaired head." in requirements
+    assert (
+        "require required CI, configured external PR bots, and the different-family "
+        "reviewer to evaluate the exact repaired head, then consolidate the re-review "
+        "findings;"
+    ) in readme
+    assert (
+        "one consolidated exact-head round across required CI, configured PR bots, and "
+        "one different-family review for material changes, one repair, the same "
+        "surfaces' exact-repaired-head re-review"
+    ) in root_readme
+    assert (
+        "direct bead → owner → native checks → consolidated exact-head "
+        "CI/bot/different-family review → one repair → the same surfaces' "
+        "exact-repaired-head re-review → publish/deploy/canary path"
+    ) in gascity_requirements
+    assert (
+        "A surface skipped by its configuration (draft state, labels, or path filters) "
+        "is not a valid timeout;"
+    ) in skill
+    assert (
+        "Each bot has SHA-bound run/comment evidence; a configuration skip is not a "
+        "timeout."
+    ) in requirements
+    assert (
+        "Each configured bot needs run or comment evidence bound to the candidate SHA; "
+        "a configuration skip is not a timeout, so use an explicit trigger or a "
+        "merge-blocked ready-for-review PR."
+    ) in readme
+    assert "Any safety finding blocks merge regardless of repair accounting." in skill
+    assert (
+        "Only a blocking consolidated re-review fails upward; safety always blocks."
+    ) in requirements
+    assert (
+        "Safety findings always block merge; other blocking findings fail upward only "
+        "after the consolidated re-review."
+    ) in readme
+    assert (
+        "The same bounded timeout/unavailable recording applies to re-review. An "
+        "unavailable required surface blocks merge unless repository protection "
+        "explicitly does not require it, and that exception is recorded."
+    ) in skill
+    assert (
+        "The same bounded-result rule applies, and an unavailable required surface "
+        "blocks merge unless repository protection explicitly exempts it and that is "
+        "recorded."
+    ) in requirements
+    assert (
+        "An unavailable required surface blocks merge unless repository protection "
+        "explicitly does not require it and the exception is recorded."
+    ) in readme
+
+    raw_skill = (GSTACK_ROOT / "skills/gstack-lite/SKILL.md").read_text(encoding="utf-8")
+    assert raw_skill.index("external PR review bots") < raw_skill.index(
+        "single repair allowance"
+    )
+    assert "never repair serially" in raw_skill
+    assert "bounded explicit timeout or unavailable result" in skill
+    assert "skipped by its configuration" in skill
+    assert "not a valid timeout" in skill
+    assert "same bounded timeout/unavailable recording applies to re-review" in skill
+
+
+def test_gstack_lite_preserves_rejected_candidates_for_successors() -> None:
+    skill = normalized_text(GSTACK_ROOT / "skills/gstack-lite/SKILL.md")
+    requirements = normalized_text(GSTACK_ROOT / "REQUIREMENTS.md")
+    fragment = normalized_text(
+        REPO_ROOT / "gascity/template-fragments/gstack-lite-policy.template.md"
+    )
+
+    assert (
+        "Delete a rejected branch only after its exact commit, diff, and evidence are "
+        "reachable from an approved successor or another durable remote reference; "
+        "delete the accepted branch after merge."
+    ) in skill
+    assert (
+        "Rejected branches remain durably reachable with their exact commit, diff, and "
+        "evidence until an approved successor carries them or another durable remote "
+        "reference preserves them."
+    ) in requirements
+    assert (
+        "Preserve rejected branches until exact commits, diffs, and evidence are durably "
+        "reachable. Rescue carries the failed candidate forward by default;"
+    ) in fragment
+    assert "Delete the accepted branch after merge." in fragment
+    assert "delete any protection-required PR branch after merge" not in fragment
 
 
 def test_audit_rejects_retired_formula_names(monkeypatch, tmp_path: Path) -> None:
