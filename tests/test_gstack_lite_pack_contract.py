@@ -131,6 +131,20 @@ def test_gstack_lite_consolidates_every_review_surface_before_repair() -> None:
         "Safety findings always block merge; other blocking findings fail upward only "
         "after the consolidated re-review."
     ) in readme
+    assert (
+        "The same bounded timeout/unavailable recording applies to re-review. An "
+        "unavailable required surface blocks merge unless repository protection "
+        "explicitly does not require it, and that exception is recorded."
+    ) in skill
+    assert (
+        "The same bounded-result rule applies, and an unavailable required surface "
+        "blocks merge unless repository protection explicitly exempts it and that is "
+        "recorded."
+    ) in requirements
+    assert (
+        "An unavailable required surface blocks merge unless repository protection "
+        "explicitly does not require it and the exception is recorded."
+    ) in readme
 
     raw_skill = (GSTACK_ROOT / "skills/gstack-lite/SKILL.md").read_text(encoding="utf-8")
     assert raw_skill.index("external PR review bots") < raw_skill.index(
@@ -141,7 +155,6 @@ def test_gstack_lite_consolidates_every_review_surface_before_repair() -> None:
     assert "skipped by its configuration" in skill
     assert "not a valid timeout" in skill
     assert "same bounded timeout/unavailable recording applies to re-review" in skill
-    assert "unavailable required surface blocks merge" in skill
 
 
 def test_gstack_lite_preserves_rejected_candidates_for_successors() -> None:

@@ -247,6 +247,35 @@ class GstackLiteContractTests(unittest.TestCase):
             "always blocks merge.",
             normalized_fragment,
         )
+        self.assertIn(
+            "The same bounded timeout/unavailable recording applies to re-review. An "
+            "unavailable required surface blocks merge unless repository protection "
+            "explicitly does not require it, and that exception is recorded.",
+            normalized_canonical,
+        )
+        self.assertIn(
+            "the same bounded-result rule applies and an unavailable required surface "
+            "blocks merge unless repository protection explicitly exempts it and records "
+            "why;",
+            normalized_mayor,
+        )
+        self.assertIn(
+            "Apply the same bounded-result rule to re-review. An unavailable required "
+            "surface blocks merge unless repository protection explicitly exempts it and "
+            "that is recorded.",
+            normalized_fragment,
+        )
+        self.assertIn(
+            "The same bounded-result rule applies, and an unavailable required surface "
+            "blocks merge unless repository protection explicitly exempts it and that is "
+            "recorded.",
+            gstack_requirements,
+        )
+        self.assertIn(
+            "An unavailable required surface blocks merge unless repository protection "
+            "explicitly does not require it and the exception is recorded.",
+            gstack_readme,
+        )
 
         self.assertIn("never repair serially", canonical)
         self.assertLess(
