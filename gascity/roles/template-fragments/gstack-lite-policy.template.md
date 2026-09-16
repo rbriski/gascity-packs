@@ -29,18 +29,35 @@ wall-clock/rework accounting.
 - Record one exclusive write lease per bead/branch/worktree. Before rescue or
   repair, drain and verify the prior owner is stopped; reject late commits from
   a revoked lease.
+- Record a repository-defined delivery lane and concrete risk reasons. A
+  claimed, leased bead authorizes ordinary repository edits, checks, and review
+  without repeated approval mail; external publication, production cutover,
+  credential use, service restart, and other irreversible operations retain
+  their explicit authority gates.
+- Emit concise owner-visible status only at start, external wait, material
+  risk/ETA change, decision gate, and terminal outcome. Use nudge/status
+  channels for routine updates, not permanent mail.
 - After checks, expose the same immutable candidate to required CI, configured
   external PR bots, and one different-family reviewer for material changes. A
   draft/non-mergeable PR gathers feedback but grants no merge authority. Require
   SHA-bound run/comment evidence that each bot ran; a configuration skip is not
   a timeout, so use an explicit trigger or merge-blocked ready-for-review PR.
 - Wait for every applicable surface or record a bounded timeout/unavailable
-  result; aggregate and deduplicate one exact-SHA artifact before repair starts.
+  result; aggregate and deduplicate one exact-SHA artifact before repair starts,
+  including reviewer session, surface verdicts, finding class/severity/blocking
+  reason, location, evidence, and required fix.
 - Use one focused repair, rerun affected checks, and require every applicable
   surface to review the exact repaired head. Only a blocking consolidated
   re-review fails upward; any safety finding always blocks merge. Apply the same
   bounded-result rule to re-review. An unavailable required surface blocks merge
   unless repository protection explicitly exempts it and that is recorded.
+- Submit a repaired head to the same live reviewer session with
+  `gc session submit <reviewer-session> ... --intent follow_up`; only a recorded
+  unavailable reviewer permits replacement. A narrowly authorized second safety
+  repair remains on the same bead, branch, worktree, and lease.
+- Benchmarks are isolated experiments: use an experiment root, `bench/` branch,
+  worktree, dataset, and result path; never consume a product delivery lease or
+  change delivery metrics.
 - Preserve rejected branches until exact commits, diffs, and evidence are
   durably reachable. Rescue carries the failed candidate forward by default;
   rebuild from protected

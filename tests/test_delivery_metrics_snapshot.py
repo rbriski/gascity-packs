@@ -106,6 +106,37 @@ def test_rollup_math_is_deterministic() -> None:
     assert result["outcomes"] == {"failed": 1, "shipped": 1}
 
 
+def test_rolls_up_repository_defined_risk_and_deployment_fields() -> None:
+    module = load_module()
+    first = metrics(
+        repository_lane="fixture-only",
+        risk_reasons=["no production target"],
+        review_rounds=1,
+        deployment_attempts=1,
+        deployment_failures=0,
+        rollback=False,
+        canary_outcome="passed",
+    )
+    second = metrics(
+        repository_lane="external-api",
+        risk_reasons=["third-party contract"],
+        review_rounds=2,
+        deployment_attempts=2,
+        deployment_failures=1,
+        rollback=True,
+        canary_outcome="failed",
+    )
+
+    result = module.delivery_snapshot([bead("one", value=first), bead("two", value=second)])
+
+    assert result["repository_lanes"] == {"external-api": 1, "fixture-only": 1}
+    assert result["review_rounds"] == 3
+    assert result["deployment_attempts"] == 3
+    assert result["deployment_failures"] == 1
+    assert result["rollbacks"] == 1
+    assert result["canary_outcomes"] == {"failed": 1, "passed": 1}
+
+
 def test_health_snapshot_keeps_warnings_separate_from_launch_blocking() -> None:
     module = load_module()
     result = module.health_snapshot(

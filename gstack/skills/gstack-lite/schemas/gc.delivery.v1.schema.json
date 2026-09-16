@@ -45,6 +45,70 @@
     "retries": { "type": "integer", "minimum": 0 },
     "repairs": { "type": "integer", "minimum": 0 },
     "human_interventions": { "type": "integer", "minimum": 0 },
+    "repository_lane": {
+      "description": "Repository-defined risk lane or delivery profile; intentionally not a global enum.",
+      "type": "string",
+      "minLength": 1
+    },
+    "risk_reasons": {
+      "description": "Concrete reasons for the selected repository lane and any elevated operation.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "deployment_target": { "type": "string", "minLength": 1 },
+    "safety_or_actuation": { "type": "boolean" },
+    "review_rounds": { "type": "integer", "minimum": 0 },
+    "review_evidence": {
+      "description": "Consolidated exact-head review records, one entry for each surface and review round.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["head", "round", "surface", "verdict"],
+        "properties": {
+          "head": { "type": "string", "minLength": 7 },
+          "round": { "type": "string", "enum": ["candidate", "repaired"] },
+          "reviewer_session": { "type": "string", "minLength": 1 },
+          "surface": { "type": "string", "minLength": 1 },
+          "verdict": { "type": "string", "enum": ["approved", "changes_required", "blocked", "unavailable"] },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["class", "severity", "blocking_reason", "evidence", "required_fix"],
+              "properties": {
+                "class": { "type": "string", "enum": ["correctness", "security", "safety", "reliability", "testing", "maintainability", "style"] },
+                "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
+                "blocking_reason": { "type": "string" },
+                "location": { "type": "string" },
+                "evidence": { "type": "string", "minLength": 1 },
+                "required_fix": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "duration_seconds"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["passed", "failed", "unavailable"] },
+          "duration_seconds": { "type": "number", "minimum": 0 },
+          "head": { "type": "string", "minLength": 7 }
+        }
+      }
+    },
+    "deployment_attempts": { "type": "integer", "minimum": 0 },
+    "deployment_failures": { "type": "integer", "minimum": 0 },
+    "rollback": { "type": "boolean" },
+    "canary_outcome": { "type": "string", "enum": ["not_required", "passed", "failed", "unavailable"] },
     "model_lanes": {
       "type": "array",
       "items": { "type": "string", "minLength": 1 },
@@ -56,5 +120,17 @@
       "type": "string",
       "enum": ["shipped", "failed", "cancelled", "rolled_back"]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "safety_or_actuation": { "const": true } },
+        "required": ["safety_or_actuation"]
+      },
+      "then": {
+        "required": ["risk_reasons", "deployment_target"],
+        "properties": { "risk_reasons": { "minItems": 1 } }
+      }
+    }
+  ]
 }

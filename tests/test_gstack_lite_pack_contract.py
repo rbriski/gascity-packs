@@ -65,8 +65,23 @@ def test_gstack_lite_records_owner_and_candidate_leases() -> None:
         "immutable candidate head",
         "four minutes",
         "structured artifact",
+        "repository-defined `gc.delivery.lane`",
+        "same live reviewer conversation",
+        "benchmarks outside delivery lineage",
     ):
         assert required in text
+
+
+def test_delivery_schema_keeps_lanes_repository_defined_and_requires_safety_risk() -> None:
+    schema = __import__("json").loads(
+        (GSTACK_ROOT / "skills/gstack-lite/schemas/gc.delivery.v1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert "enum" not in schema["properties"]["repository_lane"]
+    assert schema["properties"]["review_evidence"]["items"]["properties"]["head"]["minLength"] == 7
+    assert schema["allOf"][0]["then"]["required"] == ["risk_reasons", "deployment_target"]
 
 
 def test_gstack_lite_consolidates_every_review_surface_before_repair() -> None:

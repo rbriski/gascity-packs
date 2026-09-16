@@ -98,7 +98,17 @@ def delivery_snapshot(beads: Sequence[dict[str, Any]]) -> dict[str, Any]:
     durations = Counter({field: 0.0 for field in DURATION_FIELDS})
     outcomes: Counter[str] = Counter()
     lanes: Counter[str] = Counter()
-    totals = Counter(retries=0, repairs=0, human_interventions=0)
+    repository_lanes: Counter[str] = Counter()
+    canary_outcomes: Counter[str] = Counter()
+    totals = Counter(
+        retries=0,
+        repairs=0,
+        human_interventions=0,
+        review_rounds=0,
+        deployment_attempts=0,
+        deployment_failures=0,
+        rollbacks=0,
+    )
     complete_records = 0
 
     for bead in candidates:
@@ -116,7 +126,7 @@ def delivery_snapshot(beads: Sequence[dict[str, Any]]) -> dict[str, Any]:
             value = _get_path(metrics, f"durations_seconds.{field}")
             if _valid_number(value):
                 durations[field] += float(value)
-        for field in totals:
+        for field in ("retries", "repairs", "human_interventions"):
             value = metrics.get(field)
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 totals[field] += value
@@ -124,6 +134,16 @@ def delivery_snapshot(beads: Sequence[dict[str, Any]]) -> dict[str, Any]:
             outcomes[metrics["outcome"]] += 1
         if isinstance(metrics.get("model_lanes"), list):
             lanes.update(lane for lane in metrics["model_lanes"] if isinstance(lane, str))
+        if isinstance(metrics.get("repository_lane"), str):
+            repository_lanes[metrics["repository_lane"]] += 1
+        if isinstance(metrics.get("canary_outcome"), str):
+            canary_outcomes[metrics["canary_outcome"]] += 1
+        for field in ("review_rounds", "deployment_attempts", "deployment_failures"):
+            value = metrics.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                totals[field] += value
+        if metrics.get("rollback") is True:
+            totals["rollbacks"] += 1
 
     count = len(candidates)
     coverage = {
@@ -162,6 +182,12 @@ def delivery_snapshot(beads: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "human_interventions": totals["human_interventions"],
         "outcomes": dict(sorted(outcomes.items())),
         "model_lanes": dict(sorted(lanes.items())),
+        "repository_lanes": dict(sorted(repository_lanes.items())),
+        "review_rounds": totals["review_rounds"],
+        "deployment_attempts": totals["deployment_attempts"],
+        "deployment_failures": totals["deployment_failures"],
+        "rollbacks": totals["rollbacks"],
+        "canary_outcomes": dict(sorted(canary_outcomes.items())),
     }
 
 
