@@ -216,6 +216,59 @@ if verify >= metadata:
 PY
 }
 
+test_refinery_patrol_successor_collision_guard() {
+    local formula prompt guard expected_formula_guards expected_prompt_guards
+    formula="$GASTOWN/formulas/mol-refinery-patrol.toml"
+    prompt="$GASTOWN/agents/refinery/prompt.template.md"
+    guard='if [ "$NEXT" = "$CURRENT_WISP" ]; then'
+    expected_formula_guards=5
+    expected_prompt_guards=2
+
+    [[ "$(grep -cF "$guard" "$formula")" -eq "$expected_formula_guards" ]] ||
+        fail "every refinery formula rotation must guard a successor collision before assignment or burn"
+    [[ "$(grep -cF "$guard" "$prompt")" -eq "$expected_prompt_guards" ]] ||
+        fail "refinery prompt rotation examples must guard a successor collision"
+
+    python3 - "$formula" "$prompt" <<'PY' ||
+import sys
+
+for path in sys.argv[1:]:
+    text = open(path, encoding="utf-8").read()
+    marker = 'NEXT=$(gc bd mol wisp mol-refinery-patrol'
+    for part in text.split(marker)[1:]:
+        before_assign = part.split('gc bd update "$NEXT" --assignee="$GC_AGENT"', 1)[0]
+        if 'if [ "$NEXT" = "$CURRENT_WISP" ]; then' not in before_assign:
+            raise SystemExit(f"{path}: successor collision guard must precede assigning NEXT")
+        before_burn = part.split('gc bd mol burn "$CURRENT_WISP" --force', 1)[0]
+        if 'if [ "$NEXT" = "$CURRENT_WISP" ]; then' not in before_burn:
+            raise SystemExit(f"{path}: successor collision guard must precede burning CURRENT_WISP")
+PY
+        fail "refinery successor collision guards must precede assignment and burn"
+
+    rotate() {
+        local current="$1" next="$2"
+        ASSIGNED=""
+        BURNED=""
+        if [ "$next" = "$current" ]; then
+            return 1
+        fi
+        ASSIGNED="$next"
+        BURNED="$current"
+    }
+
+    # Empty queue: mol wisp can return the current active patrol. It must stay
+    # assigned and unburned, so the next attempt can safely resume it.
+    ! rotate "current-wisp" "current-wisp" ||
+        fail "same-wisp successor must stop rotation"
+    [[ -z "$ASSIGNED" && -z "$BURNED" ]] ||
+        fail "same-wisp successor must not assign or burn the active patrol"
+
+    rotate "current-wisp" "successor-wisp" ||
+        fail "distinct successor should rotate successfully"
+    [[ "$ASSIGNED" = "successor-wisp" && "$BURNED" = "current-wisp" ]] ||
+        fail "distinct successor must assign successor and burn only the scoped current patrol"
+}
+
 test_dog_assets_are_pack_local
 test_retired_dog_formulas_are_not_reintroduced
 test_shutdown_dance_contracts_are_executable
@@ -224,5 +277,6 @@ test_composition_is_documented
 test_polecat_startup_uses_standard_hook_claim
 test_review_leg_contract_forbids_synthetic_mutation
 test_refinery_direct_merge_is_worktree_safe_and_fail_closed
+test_refinery_patrol_successor_collision_guard
 
 echo "gastown pack asset tests passed"

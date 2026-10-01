@@ -66,6 +66,10 @@ external observers (witness, mayor) only catch on a slow patrol cycle.
 
 ### 1. ALWAYS pour the next wisp before burning the current one
 
+If `gc bd mol wisp` returns the current wisp ID, it is not a successor. Stop
+without assigning or burning either ID; the still-open current patrol is the
+safe recovery point.
+
 ```bash
 CURRENT_WISP=${GC_BEAD_ID:-}
 if [ -z "$CURRENT_WISP" ]; then
@@ -74,6 +78,10 @@ fi
 NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not burning."
+  exit 1
+fi
+if [ "$NEXT" = "$CURRENT_WISP" ]; then
+  echo "Refinery patrol successor collision: mol wisp returned the active wisp; preserving it without assign or burn."
   exit 1
 fi
 if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
@@ -119,6 +127,10 @@ fi
 NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
   echo "Could not pour next refinery wisp; not requesting restart."
+  exit 1
+fi
+if [ "$NEXT" = "$CURRENT_WISP" ]; then
+  echo "Refinery patrol successor collision: mol wisp returned the active wisp; preserving it without assign or burn."
   exit 1
 fi
 if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
